@@ -6,9 +6,9 @@ from typing import Any, Optional, Union
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 import webdataset as wds
-from olinda import featurizer
 
-from olinda.featurizer import Featurizer
+from olinda.featurizer import Featurizer, Flat2Grid
+from olinda.utils import calculate_cbor_size
 
 
 class FeaturizedSmilesDM(pl.LightningDataModule):
@@ -17,7 +17,7 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
     def __init__(
         self: "FeaturizedSmilesDM",
         workspace_dir: Union[str, Path],
-        featurizer: Featurizer,
+        featurizer: Featurizer = Flat2Grid(),
         batch_size: int = 32,
         num_workers: int = 2,
         transform: Optional[Any] = None,
@@ -35,6 +35,7 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
         """
         super().__init__()
         self.workspace_dir = workspace_dir
+        self.featurizer = featurizer
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.transform = transform
@@ -51,30 +52,26 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
 
         """
         # Check if data files are available
-        if (
+        file_path = (
             Path(self.workspace_dir)
             / "reference"
-            / f"featurized_smiles_{featurizer}.cbor"
-        ).is_file() is not True:
-            raise Exception("Data file not available")
+            / f"featurized_smiles_{(type(self.featurizer).__name__.lower())}.cbor"
+        )
+        if file_path.is_file() is not True:
+            raise Exception(f"Data file not available at {file_path.absolute()}")
+
+        with open(file_path, "rb") as fp:
+            dataset_size = calculate_cbor_size(fp)
 
         if stage == "train":
-            self.train_dataset_size = 1999380
+            self.train_dataset_size = dataset_size
             shuffle = 5000
         elif stage == "val":
-            self.val_dataset_size = 20000
+            self.val_dataset_size = dataset_size // 10
             shuffle = None
 
         self.dataset = wds.DataPipeline(
-            wds.SimpleShardList(
-                str(
-                    (
-                        Path(self.workspace_dir)
-                        / "reference"
-                        / f"featurized_smiles_{featurizer}.cbor"
-                    ).absolute()
-                )
-            ),
+            wds.SimpleShardList(str(file_path.absolute())),
             wds.cbors2_to_samples(),
             wds.shuffle(shuffle),
             wds.batched(self.batch_size, partial=False),
