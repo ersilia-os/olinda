@@ -39,11 +39,11 @@ def get_workspace_path(override: Optional[Path] = None) -> Path:
     return workspace_path
 
 
-def calculate_stop_step(fp: BufferedWriter) -> int:
+def calculate_cbor_size(fp: BufferedWriter) -> int:
     """Calculate no of processed instances in a cbor file."""
     decoder = CBORDecoder(fp)
-    stop_step = 0
+    size = 0
     while fp.peek(1):
         decoder.decode()
-        stop_step += 1
-    return stop_step
+        size += 1
+    return size
