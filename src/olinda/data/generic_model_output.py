@@ -7,6 +7,8 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 import webdataset as wds
 
+from olinda.utils import calculate_cbor_size
+
 
 class GenericOutputDM(pl.LightningDataModule):
     """Generic teacher model output datamodule."""
@@ -41,11 +43,19 @@ class GenericOutputDM(pl.LightningDataModule):
         Args:
             stage (Optional[str]): Optional pipeline state
         """
+        # Check if data files are available
+        file_path = Path(self.model_dir) / "model_output.cbor"
+        if file_path.is_file() is not True:
+            raise Exception(f"Data file not available at {file_path.absolute()}")
+
+        with open(file_path, "rb") as fp:
+            dataset_size = calculate_cbor_size(fp)
+
         if stage == "train":
-            self.train_dataset_size = 1999380
+            self.train_dataset_size = dataset_size
             shuffle = 5000
         elif stage == "val":
-            self.val_dataset_size = 20000
+            self.val_dataset_size = dataset_size // 10
             shuffle = None
 
         self.dataset = wds.DataPipeline(
