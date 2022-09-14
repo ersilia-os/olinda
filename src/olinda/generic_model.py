@@ -1,9 +1,9 @@
 """A wrapper to standardize models."""
 
-from typing import Any, Union
+from typing import Any
 
 import pytorch_lightning as pl
-from torch.nn import Module
+import torch.nn as nn
 
 from olinda.models.base import DistillBaseModel
 
@@ -18,14 +18,17 @@ class GenericModel(DistillBaseModel):
         Raises:
             Exception : Unsupported Model
         """
+        super().__init__()
         # Check type of model and convert to pytorch accordingly
-        if type(model) is Union[pl.LightningModule, Module]:
-            self._model = model
+        if issubclass(type(model), (pl.LightningModule, nn.Module)):
+            self.nn = model
+            self.name = type(model).__name__.lower()
+
         elif type(model) is str:
             # Download model from Ersilia hub and convert to pytorch
             pass
         else:
-            raise Exception("Unsupported Model")
+            raise Exception(f"Unsupported Model type: {type(model)}")
 
     def forward(self: "GenericModel", x: Any) -> Any:
         """Forward function.
@@ -36,4 +39,4 @@ class GenericModel(DistillBaseModel):
         Returns:
             Any: Ouput
         """
-        return self._model(x)
+        return self.nn(x)
