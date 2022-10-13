@@ -6,6 +6,7 @@ import pytorch_lightning as pl
 import torch.nn as nn
 
 from olinda.models.base import DistillBaseModel
+from olinda.utils import run_ersilia_api_in_context
 
 
 class GenericModel(DistillBaseModel):
@@ -25,8 +26,9 @@ class GenericModel(DistillBaseModel):
             self.name = type(model).__name__.lower()
 
         elif type(model) is str:
-            # Download model from Ersilia hub and convert to pytorch
-            pass
+            self.nn = run_ersilia_api_in_context(model)
+            self.name = type(model).__name__.lower()
+
         else:
             raise Exception(f"Unsupported Model type: {type(model)}")
 
