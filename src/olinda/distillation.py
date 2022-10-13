@@ -14,6 +14,7 @@ from tqdm import tqdm
 from olinda.data import ReferenceSmilesDM, FeaturizedSmilesDM, GenericOutputDM
 from olinda.featurizer import Featurizer
 from olinda.generic_model import GenericModel
+from olinda.tuner import ModelTuner, AutoKerasTuner
 from olinda.utils import calculate_cbor_size
 
 
@@ -22,8 +23,10 @@ def distill(
     featurizer: Optional[Featurizer],
     working_dir: Path,
     clean: bool = False,
+    tuner: ModelTuner = AutoKerasTuner(),
     reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
+    generic_output_dm: Optional[GenericOutputDM] = None,
 ) -> pl.LightningModule:
     """Distill models.
 
@@ -32,8 +35,10 @@ def distill(
         featurizer (Optional[Featurizer]): Featurizer to use.
         working_dir (Path): Path to model workspace directory.
         clean (bool): Clean workspace before starting.
+        tuner (ModelTuner): Tuner to use for selecting and optimizing student model.
         reference_smiles_dm (Optional[ReferenceSmilesDM]): Reference SMILES datamodules.
         featurized_smiles_dm (Optional[FeaturizedSmilesDM]): Reference Featurized SMILES datamodules.
+        generic_output_dm (Optional[GenericOutputDM]): Precalculated training dataset for student model.
 
     Returns:
         pl.LightningModule: Student Model.
@@ -41,22 +46,26 @@ def distill(
 
     # Convert model to a generic model
     model = GenericModel(model)
+    student_training_dm = generic_output_dm
+    if student_training_dm is None:
+        # Prepare reference smiles datamodule
+        if reference_smiles_dm is None:
+            reference_smiles_dm = ReferenceSmilesDM()
+        reference_smiles_dm.prepare_data()
+        reference_smiles_dm.setup("train")
 
-    # Prepare reference smiles datamodule
-    if reference_smiles_dm is None:
-        reference_smiles_dm = ReferenceSmilesDM()
-    reference_smiles_dm.prepare_data()
-    reference_smiles_dm.setup("train")
-
-    # Generate student model training dataset
-    student_training_dm = gen_training_dataset(
-        model, featurizer, reference_smiles_dm, featurized_smiles_dm, working_dir, clean
-    )
+        # Generate student model training dataset
+        student_training_dm = gen_training_dataset(
+            model,
+            featurizer,
+            reference_smiles_dm,
+            featurized_smiles_dm,
+            working_dir,
+            clean,
+        )
 
     # Select and Train student model
-    student_model = pl.LightningModule()
-    trainer = pl.Trainer()
-    trainer.fit(student_model, student_training_dm)
+    student_model = tuner.fit(student_training_dm)
 
     return student_model
 
