@@ -3,9 +3,10 @@
 from io import BufferedWriter
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from cbor2 import CBORDecoder
+from ersilia import ErsiliaModel
 import gin
 from xdg import xdg_data_home
 
@@ -47,3 +48,20 @@ def calculate_cbor_size(fp: BufferedWriter) -> int:
         decoder.decode()
         size += 1
     return size
+
+
+def run_ersilia_api_in_context(model_id: str) -> Callable:
+    """Utility function to execute Ersilia API.
+
+    Args:
+        model_id (str): Ersilia model hub ID.
+
+    Returns:
+        Callable: Util function.
+    """
+
+    def execute(x: Any) -> Any:
+        with ErsiliaModel(model_id) as em_api:
+            return em_api.predict(x, output="pandas")
+
+    return execute
