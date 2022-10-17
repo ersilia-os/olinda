@@ -3,6 +3,7 @@
 from typing import Any
 
 import pytorch_lightning as pl
+import tensorflow as tf
 import torch.nn as nn
 
 from olinda.models.base import DistillBaseModel
@@ -23,10 +24,17 @@ class GenericModel(DistillBaseModel):
         # Check type of model and convert to pytorch accordingly
         if issubclass(type(model), (pl.LightningModule, nn.Module)):
             self.nn = model
+            self.type = "pytorch"
+            self.name = type(model).__name__.lower()
+
+        elif issubclass(type(model), (tf.keras.Model)):
+            self.nn = model
+            self.type = "tensorflow"
             self.name = type(model).__name__.lower()
 
         elif type(model) is str:
             self.nn = run_ersilia_api_in_context(model)
+            self.type = "ersilia"
             self.name = type(model).__name__.lower()
 
         else:
