@@ -19,10 +19,12 @@ class Segmenter:
         """Segment dataset."""
         for sample in iterator:
             _, _, featurized_smile, output = sample
-            if self.only_X:
+            if self.only_X and not self.only_Y:
                 yield featurized_smile
-            elif self.only_Y:
+            elif self.only_Y and not self.only_X:
                 yield output
+            elif self.only_X and self.only_Y:
+                yield featurized_smile, output
             else:
                 yield sample
 
@@ -82,7 +84,7 @@ class GenericOutputDM(pl.LightningDataModule):
             shuffle = 5000
         elif stage == "val":
             self.val_dataset_size = dataset_size // 10
-            shuffle = None
+            shuffle = 1000
 
         self.dataset = wds.DataPipeline(
             wds.SimpleShardList(
