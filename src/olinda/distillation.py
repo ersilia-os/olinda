@@ -237,7 +237,7 @@ def gen_model_output(
 
 
 def clean_workspace(
-    working_dir: Path, model: GenericModel, featurizer: Featurizer
+    working_dir: Path, model: GenericModel = None, featurizer: Featurizer = None
 ) -> None:
     """Clean workspace.
 
