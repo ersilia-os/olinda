@@ -1,6 +1,7 @@
 """Model Tuner."""
 
 from abc import ABC, abstractmethod
+
 from random import random
 from typing import Any, List
 
@@ -9,7 +10,7 @@ import kerastuner as kt
 import tensorflow as tf
 from tensorflow import keras
 
-from olinda.data import GenericOutputDM
+from olinda.data import GenericOutputDM, TensorflowDatasetWrapper
 from olinda.generic_model import GenericModel
 
 
@@ -17,11 +18,11 @@ class ModelTuner(ABC):
     """Automatic model tuner."""
 
     @abstractmethod
-    def fit(self: "ModelTuner", dataset: GenericOutputDM) -> GenericModel:
+    def fit(self: "ModelTuner", datamodule: GenericOutputDM) -> GenericModel:
         """Fit an optimal model using the given dataset.
 
         Args:
-            dataset (GenericOutputDM): Dataset to fit an optimal model.
+            datamodule (GenericOutputDM): Datamodule to fit an optimal model.
 
         Returns:
             GenericModel : Student model as wrapped in a generic model class.
@@ -40,11 +41,11 @@ class AutoKerasTuner(ModelTuner):
         """
         self.max_trials = max_trials
 
-    def fit(self: "AutoKerasTuner", dataset: GenericOutputDM) -> GenericModel:
+    def fit(self: "AutoKerasTuner", datamodule: GenericOutputDM) -> GenericModel:
         """Fit an optimal model using the given dataset.
 
         Args:
-            dataset (GenericOutputDM): Dataset to fit an optimal model.
+            datamodule (GenericOutputDM): Datamodule to fit an optimal model.
 
         Returns:
             GenericModel : Student model as wrapped in a generic model class.
@@ -54,8 +55,8 @@ class AutoKerasTuner(ModelTuner):
             max_trials=self.max_trials,
             project_name=f"autokeras-{random()*1000}",
         )
-        self.X = dataset.dataset[2]
-        self.Y = dataset.dataset[3]
+        self.X = TensorflowDatasetWrapper(datamodule, "train", only_X=True)
+        self.Y = TensorflowDatasetWrapper(datamodule, "train", only_Y=True)
         self.mdl.fit(self.X, self.Y)
         return GenericModel(self.mdl.export_model())
 

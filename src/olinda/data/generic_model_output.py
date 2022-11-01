@@ -10,6 +10,23 @@ import webdataset as wds
 from olinda.utils import calculate_cbor_size
 
 
+class Segmenter:
+    def __init__(self, only_X: bool, only_Y: bool) -> None:
+        self.only_X = only_X
+        self.only_Y = only_Y
+
+    def segment_dataset(self, iterator: Any) -> Any:
+        """Segment dataset."""
+        for sample in iterator:
+            _, _, featurized_smile, output = sample
+            if self.only_X:
+                yield featurized_smile
+            elif self.only_Y:
+                yield output
+            else:
+                yield sample
+
+
 class GenericOutputDM(pl.LightningDataModule):
     """Generic teacher model output datamodule."""
 
@@ -37,11 +54,20 @@ class GenericOutputDM(pl.LightningDataModule):
         self.transform = transform
         self.target_transform = target_transform
 
-    def setup(self: "GenericOutputDM", stage: Optional[str]) -> None:
+    def setup(
+        self: "GenericOutputDM",
+        stage: Optional[str],
+        only_X: bool = False,
+        only_Y: bool = False,
+        batched: bool = True,
+    ) -> None:
         """Setup dataloaders.
 
         Args:
             stage (Optional[str]): Optional pipeline state
+            only_X (bool): Returns only X part of the dataset
+            only_Y (bool): Returns only Y part of the dataset
+            batched (bool): Create batches
         """
         # Check if data files are available
         file_path = Path(self.model_dir) / "model_output.cbor"
@@ -63,9 +89,13 @@ class GenericOutputDM(pl.LightningDataModule):
                 str((Path(self.model_dir) / "model_output.cbor").absolute())
             ),
             wds.cbors2_to_samples(),
+            Segmenter(only_X, only_Y).segment_dataset,
             wds.shuffle(shuffle),
-            wds.batched(self.batch_size, partial=False),
         )
+        if batched:
+            self.dataset = self.dataset.compose(
+                wds.batched(self.batch_size, partial=False)
+            )
 
     def train_dataloader(self: "GenericOutputDM") -> DataLoader:
         """Train dataloader.
