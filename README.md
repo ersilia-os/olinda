@@ -8,7 +8,9 @@ It can automatically distill models from Pytorch, Tensorflow, ONNX amd models fe
 Olinda is available on PyPi and can be installed using pip.
 
 ```bash
-pip install olinda
+git clone https://github.com/ersilia-os/olinda
+cd olinda
+python -m pip install -e .
 ```
 
 Models can be distilled quickly with a single function
