@@ -27,6 +27,7 @@ def distill(
     reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
     generic_output_dm: Optional[GenericOutputDM] = None,
+    test: bool = False,
 ) -> pl.LightningModule:
     """Distill models.
 
@@ -39,6 +40,7 @@ def distill(
         reference_smiles_dm (Optional[ReferenceSmilesDM]): Reference SMILES datamodules.
         featurized_smiles_dm (Optional[FeaturizedSmilesDM]): Reference Featurized SMILES datamodules.
         generic_output_dm (Optional[GenericOutputDM]): Precalculated training dataset for student model.
+        test (bool): Run a test distillation on a smaller fraction of the dataset.
 
     Returns:
         pl.LightningModule: Student Model.
@@ -52,7 +54,10 @@ def distill(
         if reference_smiles_dm is None:
             reference_smiles_dm = ReferenceSmilesDM()
         reference_smiles_dm.prepare_data()
-        reference_smiles_dm.setup("train")
+        if not test:
+            reference_smiles_dm.setup("train")
+        else:
+            reference_smiles_dm.setup("val")
 
         # Generate student model training dataset
         student_training_dm = gen_training_dataset(

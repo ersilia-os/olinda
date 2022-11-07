@@ -94,8 +94,8 @@ class ReferenceSmilesDM(pl.LightningDataModule):
             self.train_dataset_size = 1999380
             shuffle = 5000
         elif stage == "val":
-            self.val_dataset_size = 20000
-            shuffle = None
+            self.val_dataset_size = 100000
+            shuffle = 5000
 
         self.dataset = wds.DataPipeline(
             wds.SimpleShardList(
