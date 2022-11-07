@@ -5,7 +5,7 @@ It can automatically distill models from Pytorch, Tensorflow, ONNX amd models fe
 
 ## Getting Started
 
-Crate a conda environment
+Create a conda environment
 
 ```bash
 conda create -n olinda python=3.9
@@ -151,6 +151,10 @@ We provide two Tuners for the student model training based on the fantastic Kera
 * Autokeras
 * KerasTuner
 
+
+## License
+This project is licensed under GNU AFFERO GENERAL PUBLIC LICENSE Version 3.
+
 ## About
 The [Ersilia Open Source Initiative](https://ersilia.io) is a Non Profit Organization (1192266) with the mission is to equip labs, universities and clinics in LMIC with AI/ML tools for infectious disease research.
 
@@ -159,9 +163,9 @@ The [Ersilia Open Source Initiative](https://ersilia.io) is a Non Profit Organiz
 
 
 
-## TODO
+### TODO
 
-### Poetry install fails on m1 macs
+#### Poetry install fails on m1 macs
 
 ```bash
 CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF -DProtobuf_USE_STATIC_LIBS=ON" poetry install
