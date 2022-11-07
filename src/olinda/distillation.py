@@ -96,11 +96,11 @@ def gen_training_dataset(
     if featurized_smiles_dm is None:
         if featurizer is None:
             raise Exception("Featurizer cannont be None.")
-
         featurized_smiles_dm = gen_featurized_smiles(
             reference_smiles_dm, featurizer, working_dir, clean
         )
 
+    featurized_smiles_dm.setup("train")
     # Generate model outputs and save to a file
     model_output_dm = gen_model_output(featurized_smiles_dm, model, working_dir, clean)
 
@@ -202,6 +202,7 @@ def gen_model_output(
                 Path(working_dir / (model.name) / "featurized_smiles_dl.joblib")
             )
         except Exception:
+
             featurized_smiles_dl = featurized_smiles_dm.train_dataloader()
 
     # Save dataloader for resuming
