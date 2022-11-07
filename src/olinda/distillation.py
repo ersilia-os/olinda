@@ -126,7 +126,7 @@ def gen_featurized_smiles(
     """
 
     if clean is True:
-        clean_workspace(working_dir, featurizer=featurizer)
+        clean_workspace(Path(working_dir), featurizer=featurizer)
         reference_smiles_dl = reference_smiles_dm.train_dataloader()
     else:
         try:
@@ -139,13 +139,12 @@ def gen_featurized_smiles(
     # Save dataloader for resuming
     joblib.dump(
         reference_smiles_dl,
-        Path(working_dir / "reference" / "reference_smiles_dl.joblib"),
-    )
+        Path(working_dir)  / "reference_smiles_dl.joblib")
 
     # calculate stop_step
     try:
         with open(
-            working_dir
+            Path(working_dir)
             / "reference"
             / f"featurized_smiles_{(type(featurizer).__name__.lower())}.cbor",
             "rb",
@@ -155,10 +154,10 @@ def gen_featurized_smiles(
         stop_step = 0
 
     with open(
-        working_dir
-        / "reference"
+        Path(working_dir)
+        / "reference" 
         / f"featurized_smiles_{(type(featurizer).__name__.lower())}.cbor",
-        "wb",
+        "wb"
     ) as feature_stream:
         for i, batch in tqdm(
             enumerate((reference_smiles_dl)),
@@ -192,9 +191,9 @@ def gen_model_output(
     Returns:
         pl.LightningDataModule: Dateset with featurized smiles.
     """
-    os.makedirs(working_dir / model.name, exist_ok=True)
+    os.makedirs(Path(working_dir) / model.name, exist_ok=True)
     if clean is True:
-        clean_workspace(working_dir, model=model)
+        clean_workspace(Path(working_dir), model=model)
         featurized_smiles_dl = featurized_smiles_dm.train_dataloader()
     else:
         try:
@@ -214,14 +213,14 @@ def gen_model_output(
     # calculate stop step
     try:
         with open(
-            working_dir / (model.name) / "model_output.cbor",
+            Path(working_dir) / (model.name) / "model_output.cbor",
             "rb",
         ) as output_stream:
             stop_step = calculate_cbor_size(output_stream)
     except Exception:
         stop_step = 0
 
-    with open(working_dir / (model.name) / "model_output.cbor", "wb") as output_stream:
+    with open(Path(working_dir) / (model.name) / "model_output.cbor", "wb") as output_stream:
         for i, batch in tqdm(
             enumerate(iter(featurized_smiles_dl)),
             total=featurized_smiles_dl.length,
@@ -249,15 +248,14 @@ def clean_workspace(
     """
 
     if model:
-        shutil.rmtree(working_dir / (model.name), ignore_errors=True)
-        os.makedirs(working_dir / (model.name), exist_ok=True)
+        shutil.rmtree(Path(working_dir) / (model.name), ignore_errors=True)
+        os.makedirs(Path(working_dir) / (model.name), exist_ok=True)
 
     if featurizer:
-        os.remove(Path(working_dir / "reference" / "reference_smiles_dl.joblib"))
+        os.remove(Path(working_dir) / "reference" / "reference_smiles_dl.joblib")
         os.remove(
             Path(
-                working_dir
+                working_dir)
                 / "reference"
                 / f"featurized_smiles_{type(featurizer).__name__.lower()}.cbor"
             )
-        )
