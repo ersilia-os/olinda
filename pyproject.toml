@@ -2,7 +2,7 @@
 name = "olinda"
 version = "0.1.0"
 description = "A model distillation library"
-authors = ["Ankur Kumar <ank@leoank.me>"]
+authors = ["Ersilia Open Source Initiative <hello@ersilia.io>","Ankur Kumar <ank@leoank.me>"]
 
 [tool.poetry.dependencies]
 python = ">=3.8, <3.10"

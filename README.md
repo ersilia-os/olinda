@@ -5,10 +5,17 @@ It can automatically distill models from Pytorch, Tensorflow, ONNX amd models fe
 
 ## Getting Started
 
-Olinda is available on PyPi and can be installed using pip.
+Crate a conda environment
 
 ```bash
-git clone https://github.com/ersilia-os/olinda
+conda create -n olinda python=3.9
+conda activate olinda
+```
+
+Clone the Olinda repository and install it
+
+```bash
+git clone https://github.com/ersilia-os/olinda.git
 cd olinda
 python -m pip install -e .
 ```
@@ -17,8 +24,9 @@ Models can be distilled quickly with a single function
 
 ```python
 from olinda import distill
+from olinda.featurizer import Flat2Grid
 
-student_model = distill(your_model)
+student_model = distill("path_to_model", featurizer = "Flat2Grid", "path_to_working_dir" )
 ```
 
 ### How the distillation works?
@@ -27,10 +35,12 @@ The distillation function first downloads a reference SMILES dataset if it is no
 
 ```mermaid
   graph TD;
-  A[Generate reference SMILES dataset] --> B[Generate a training dataset using the given teacher model] --> C[Search a suitable arcitecture for student model] --> D[Train student model]
+  A[Generate reference SMILES dataset] --> B[Generate a training dataset using the given teacher model] --> C[Search a suitable architecture for student model] --> D[Train student model]
 ```
 
 During the distillation process, helpful messages and progress bars are printed to keep the user informed. In the case of a crash or process interruption the distillation process can be resumed automatically. It caches all the intermediate results in a local directory (`xdg_home() / olinda`).
+
+The student model is trained on a library of 2M molecules from ChEMBL 29.
 
 ## Distillation customization
 
@@ -86,7 +96,7 @@ from olinda import distill
 from olinda.featurizer import Featurizer, Flat2Grid
 
 # Implement your own featurizer by inheriting the `Featurizer` abstract class
-# or use one of the provided Featurizers
+# or use one of the provided Featurizers (see below for more info)
 student_model = distill(your_model, featurizer=Flat2Grid())
 ```
 
@@ -120,7 +130,7 @@ student_model = distill(your_model, generic_output_dm=custom_student_training_dm
 
 ### Custom Tuners for student model tuning
 
-Olinda provides multiple Tuners out of the box. Custom tuners can also be implemented using the `ModelTuner` interface.
+Olinda provides multiple Tuners out of the box. Custom tuners can also be implemented using the `ModelTuner` interface. See below for more information
 
 ```python
 from olinda import distill
@@ -133,12 +143,23 @@ student_model = distill(your_model, tuner=KerasTuner())
 ## DataModules
 
 ## Featurizers
+Currently we provide only one Featurizer class, Flat2Grid.
+This featurizer converts SMILES strings into Morgan Fingerprints of radius 3, and subsequently transforms each vector into a 32x32 grid using the Ersilia package [Griddify](https://github.com/ersilia-os/griddify).
 
 ## Tuners
+We provide two Tuners for the student model training based on the fantastic Keras library:
+* Autokeras
+* KerasTuner
+
+## About
+The [Ersilia Open Source Initiative](https://ersilia.io) is a Non Profit Organization (1192266) with the mission is to equip labs, universities and clinics in LMIC with AI/ML tools for infectious disease research.
+
+[Help us](https://ersilia.io/model-hub) achieve our mission!
+
+
+
 
 ## TODO
-
-## FAQs
 
 ### Poetry install fails on m1 macs
 
