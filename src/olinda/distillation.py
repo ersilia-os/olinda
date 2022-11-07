@@ -12,18 +12,18 @@ import torch
 from tqdm import tqdm
 
 from olinda.data import ReferenceSmilesDM, FeaturizedSmilesDM, GenericOutputDM
-from olinda.featurizer import Featurizer
+from olinda.featurizer import Featurizer, Flat2Grid
 from olinda.generic_model import GenericModel
-from olinda.tuner import ModelTuner, AutoKerasTuner
-from olinda.utils import calculate_cbor_size
+from olinda.tuner import ModelTuner, KerasTuner
+from olinda.utils import calculate_cbor_size, get_workspace_path
 
 
 def distill(
     model: Any,
-    featurizer: Optional[Featurizer],
-    working_dir: Path,
+    working_dir: Path = get_workspace_path(),
+    featurizer: Optional[Featurizer] = Flat2Grid(),
     clean: bool = False,
-    tuner: ModelTuner = AutoKerasTuner(),
+    tuner: ModelTuner = KerasTuner([1, 3]),
     reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
     generic_output_dm: Optional[GenericOutputDM] = None,
@@ -137,9 +137,7 @@ def gen_featurized_smiles(
             reference_smiles_dl = reference_smiles_dm.train_dataloader()
 
     # Save dataloader for resuming
-    joblib.dump(
-        reference_smiles_dl,
-        Path(working_dir)  / "reference_smiles_dl.joblib")
+    joblib.dump(reference_smiles_dl, Path(working_dir) / "reference_smiles_dl.joblib")
 
     # calculate stop_step
     try:
@@ -155,9 +153,9 @@ def gen_featurized_smiles(
 
     with open(
         Path(working_dir)
-        / "reference" 
+        / "reference"
         / f"featurized_smiles_{(type(featurizer).__name__.lower())}.cbor",
-        "wb"
+        "wb",
     ) as feature_stream:
         for i, batch in tqdm(
             enumerate((reference_smiles_dl)),
@@ -220,7 +218,9 @@ def gen_model_output(
     except Exception:
         stop_step = 0
 
-    with open(Path(working_dir) / (model.name) / "model_output.cbor", "wb") as output_stream:
+    with open(
+        Path(working_dir) / (model.name) / "model_output.cbor", "wb"
+    ) as output_stream:
         for i, batch in tqdm(
             enumerate(iter(featurized_smiles_dl)),
             total=featurized_smiles_dl.length,
@@ -254,8 +254,7 @@ def clean_workspace(
     if featurizer:
         os.remove(Path(working_dir) / "reference" / "reference_smiles_dl.joblib")
         os.remove(
-            Path(
-                working_dir)
-                / "reference"
-                / f"featurized_smiles_{type(featurizer).__name__.lower()}.cbor"
-            )
+            Path(working_dir)
+            / "reference"
+            / f"featurized_smiles_{type(featurizer).__name__.lower()}.cbor"
+        )
