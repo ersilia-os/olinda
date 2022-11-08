@@ -19,7 +19,7 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
         workspace_dir: Union[str, Path],
         featurizer: Featurizer = Flat2Grid(),
         batch_size: int = 32,
-        num_workers: int = 2,
+        num_workers: int = 1,
         transform: Optional[Any] = None,
         target_transform: Optional[Any] = None,
     ) -> None:
@@ -90,7 +90,7 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
             num_workers=self.num_workers,
         )
 
-        loader.length = self.train_dataset_size // self.batch_size
+        loader.length = (self.train_dataset_size * self.num_workers) // self.batch_size
 
         return loader
 
@@ -107,7 +107,7 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
             num_workers=self.num_workers,
         )
 
-        loader.length = self.val_dataset_size // self.batch_size
+        loader.length = (self.val_dataset_size * self.num_workers) // self.batch_size
 
         return loader
 

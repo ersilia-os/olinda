@@ -27,7 +27,7 @@ class ReferenceSmilesDM(pl.LightningDataModule):
         self: "ReferenceSmilesDM",
         workspace: Union[str, Path] = None,
         batch_size: int = 32,
-        num_workers: int = 2,
+        num_workers: int = 1,
         transform: Optional[Any] = None,
         target_transform: Optional[Any] = None,
     ) -> None:
@@ -75,36 +75,71 @@ class ReferenceSmilesDM(pl.LightningDataModule):
         if (
             Path(self.workspace / "reference" / "reference_smiles.cbor").is_file()
             is False
+            or Path(
+                self.workspace / "reference" / "reference_smiles_truncated.cbor"
+            ).is_file()
+            is False
         ):
             # preprocess csv into a cbor file
             df = pd.read_csv(self.workspace / "reference" / "reference_smiles.csv")
+            truncated_df = df.iloc[:100000]
             with open(
                 self.workspace / "reference" / "reference_smiles.cbor", "wb"
             ) as stream:
-                for i, row in tqdm(df.iterrows(), total=df.shape[0]):
+                for i, row in tqdm(
+                    df.iterrows(),
+                    total=df.shape[0],
+                    desc="Creating reference smiles dataset",
+                ):
+                    dump((i, str(row.to_list()[0])), stream)
+            with open(
+                self.workspace / "reference" / "reference_smiles_truncated.cbor", "wb"
+            ) as stream:
+                for i, row in tqdm(
+                    truncated_df.iterrows(),
+                    total=truncated_df.shape[0],
+                    desc="Creating truncated reference smiles dataset",
+                ):
                     dump((i, str(row.to_list()[0])), stream)
 
-    def setup(self: "ReferenceSmilesDM", stage: Optional[str]) -> None:
+    def setup(self: "ReferenceSmilesDM", stage: Optional[str] = "train") -> None:
         """Setup dataloaders.
 
         Args:
             stage (Optional[str]): Optional pipeline state
         """
         if stage == "train":
-            self.train_dataset_size = 1999380
+            self.dataset_size = 1999380
             shuffle = 5000
+            self.dataset = wds.DataPipeline(
+                wds.SimpleShardList(
+                    str(
+                        (
+                            self.workspace / "reference" / "reference_smiles.cbor"
+                        ).absolute()
+                    )
+                ),
+                wds.cbors2_to_samples(),
+                wds.shuffle(shuffle),
+                wds.batched(self.batch_size, partial=False),
+            )
         elif stage == "val":
-            self.val_dataset_size = 100000
+            self.dataset_size = 100000
             shuffle = 5000
-
-        self.dataset = wds.DataPipeline(
-            wds.SimpleShardList(
-                str((self.workspace / "reference" / "reference_smiles.cbor").absolute())
-            ),
-            wds.cbors2_to_samples(),
-            wds.shuffle(shuffle),
-            wds.batched(self.batch_size, partial=False),
-        )
+            self.dataset = wds.DataPipeline(
+                wds.SimpleShardList(
+                    str(
+                        (
+                            self.workspace
+                            / "reference"
+                            / "reference_smiles_truncated.cbor"
+                        ).absolute()
+                    )
+                ),
+                wds.cbors2_to_samples(),
+                wds.shuffle(shuffle),
+                wds.batched(self.batch_size, partial=False),
+            )
 
     def train_dataloader(self: "ReferenceSmilesDM") -> DataLoader:
         """Train dataloader.
@@ -119,7 +154,7 @@ class ReferenceSmilesDM(pl.LightningDataModule):
             num_workers=self.num_workers,
         )
 
-        loader.length = self.train_dataset_size // self.batch_size
+        loader.length = (self.dataset_size * self.num_workers) // self.batch_size
 
         return loader
 
@@ -136,7 +171,7 @@ class ReferenceSmilesDM(pl.LightningDataModule):
             num_workers=self.num_workers,
         )
 
-        loader.length = self.val_dataset_size // self.batch_size
+        loader.length = (self.dataset_size * self.num_workers) // self.batch_size
 
         return loader
 

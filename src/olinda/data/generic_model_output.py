@@ -36,7 +36,7 @@ class GenericOutputDM(pl.LightningDataModule):
         self: "GenericOutputDM",
         model_dir: Union[str, Path],
         batch_size: int = 32,
-        num_workers: int = 2,
+        num_workers: int = 1,
         transform: Optional[Any] = None,
         target_transform: Optional[Any] = None,
     ) -> None:
@@ -112,7 +112,7 @@ class GenericOutputDM(pl.LightningDataModule):
             num_workers=self.num_workers,
         )
 
-        loader.length = self.train_dataset_size // self.batch_size
+        loader.length = (self.train_dataset_size * self.num_workers) // self.batch_size
 
         return loader
 
@@ -129,7 +129,7 @@ class GenericOutputDM(pl.LightningDataModule):
             num_workers=self.num_workers,
         )
 
-        loader.length = self.val_dataset_size // self.batch_size
+        loader.length = (self.val_dataset_size * self.num_workers) // self.batch_size
 
         return loader
 

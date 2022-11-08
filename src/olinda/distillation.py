@@ -142,7 +142,10 @@ def gen_featurized_smiles(
             reference_smiles_dl = reference_smiles_dm.train_dataloader()
 
     # Save dataloader for resuming
-    joblib.dump(reference_smiles_dl, Path(working_dir) / "reference_smiles_dl.joblib")
+    joblib.dump(
+        reference_smiles_dl,
+        Path(working_dir) / "reference" / "reference_smiles_dl.joblib",
+    )
 
     # calculate stop_step
     try:
@@ -163,7 +166,7 @@ def gen_featurized_smiles(
         "wb",
     ) as feature_stream:
         for i, batch in tqdm(
-            enumerate((reference_smiles_dl)),
+            enumerate(iter(reference_smiles_dl)),
             total=reference_smiles_dl.length,
             desc="Featurizing",
         ):
