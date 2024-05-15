@@ -12,6 +12,7 @@ from rdkit.Chem import AllChem
 from olinda.utils import get_package_root_path
 
 
+
 class Featurizer(ABC):
     def featurize(self: "Featurizer", batch: Any) -> Any:
         """Featurize input batch.
@@ -24,13 +25,11 @@ class Featurizer(ABC):
         """
         pass
 
-
-class Flat2Grid(Featurizer):
-    def __init__(self: "Flat2Grid") -> None:
-        self.transformer = joblib.load(get_package_root_path() / "flat2grid.joblib")
-        self.name = "flat2grid"
-
-    def featurize(self: "Flat2Grid", batch: Any) -> Any:
+class MorganFeaturizer(Featurizer):
+    def __init__(self: "MorganFeaturizer") -> None:
+        self.name = "morganfeaturizer"
+        
+    def featurize(self: "MorganFeaturizer", batch: Any) -> Any:
         """Featurize input batch.
 
         Args:
@@ -39,12 +38,11 @@ class Flat2Grid(Featurizer):
         Returns:
             Any: featurized outputs
         """
-
         mols = [Chem.MolFromSmiles(smi) for smi in batch]
         ecfps = self.ecfp_counts(mols)
-        return self.transformer.transform(ecfps)
-
-    def ecfp_counts(self: "Flat2Grid", mols: List) -> List:
+        return ecfps
+    
+    def ecfp_counts(self: "MorganFeaturizer", mols: List) -> List:
         """Create ECFPs from batch of smiles.
 
         Args:
@@ -65,3 +63,22 @@ class Flat2Grid(Featurizer):
                 nidx = idx % 1024
                 nfp[i, nidx] += int(v)
         return nfp
+
+class Flat2Grid(MorganFeaturizer):
+    def __init__(self: "Flat2Grid") -> None:
+        self.transformer = joblib.load(get_package_root_path() / "flat2grid.joblib")
+        self.name = "flat2grid"
+
+    def featurize(self: "Flat2Grid", batch: Any) -> Any:
+        """Featurize input batch.
+
+        Args:
+            batch (Any): batch of smiles
+
+        Returns:
+            Any: featurized outputs
+        """
+
+        mols = [Chem.MolFromSmiles(smi) for smi in batch]
+        ecfps = self.ecfp_counts(mols)
+        return self.transformer.transform(ecfps)
