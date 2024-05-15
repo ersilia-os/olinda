@@ -30,6 +30,7 @@ class ReferenceSmilesDM(pl.LightningDataModule):
         num_workers: int = 1,
         transform: Optional[Any] = None,
         target_transform: Optional[Any] = None,
+        small_data: bool = False,
     ) -> None:
         """Init.
 
@@ -47,6 +48,7 @@ class ReferenceSmilesDM(pl.LightningDataModule):
         self.num_workers = num_workers
         self.transform = transform
         self.target_transform = target_transform
+        self.small_data = small_data
 
     def prepare_data(self: "ReferenceSmilesDM") -> None:
         """Prepare data."""
@@ -109,7 +111,10 @@ class ReferenceSmilesDM(pl.LightningDataModule):
             stage (Optional[str]): Optional pipeline state
         """
         if stage == "train":
-            self.dataset_size = 1999380
+            if self.small_data:
+                self.dataset_size = 100
+            else:
+                self.dataset_size = 1999380
             shuffle = 5000
             self.dataset = wds.DataPipeline(
                 wds.SimpleShardList(
@@ -124,7 +129,10 @@ class ReferenceSmilesDM(pl.LightningDataModule):
                 wds.batched(self.batch_size, partial=False),
             )
         elif stage == "val":
-            self.dataset_size = 100000
+            if self.small_data:
+                self.dataset_size = 100
+            else:
+                self.dataset_size = 100000
             shuffle = 5000
             self.dataset = wds.DataPipeline(
                 wds.SimpleShardList(
@@ -155,7 +163,6 @@ class ReferenceSmilesDM(pl.LightningDataModule):
         )
 
         loader.length = (self.dataset_size * self.num_workers) // self.batch_size
-
         return loader
 
     def val_dataloader(self: "ReferenceSmilesDM") -> DataLoader:

@@ -28,6 +28,7 @@ def distill(
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
     generic_output_dm: Optional[GenericOutputDM] = None,
     test: bool = False,
+    small_data: bool = False,
 ) -> pl.LightningModule:
     """Distill models.
 
@@ -52,7 +53,7 @@ def distill(
     if student_training_dm is None:
         # Prepare reference smiles datamodule
         if reference_smiles_dm is None:
-            reference_smiles_dm = ReferenceSmilesDM()
+            reference_smiles_dm = ReferenceSmilesDM(small_data=small_data)
         reference_smiles_dm.prepare_data()
         if not test:
             reference_smiles_dm.setup("train")
@@ -67,6 +68,7 @@ def distill(
             featurized_smiles_dm,
             working_dir,
             clean,
+            small_data,
         )
 
     # Select and Train student model
@@ -82,6 +84,7 @@ def gen_training_dataset(
     featurized_smiles_dm: Optional[pl.LightningDataModule],
     working_dir: Path,
     clean: bool = False,
+    small_data: bool = False,
 ) -> pl.LightningDataModule:
     """Generate dataset for training and evaluating student model.
 
@@ -102,7 +105,7 @@ def gen_training_dataset(
         if featurizer is None:
             raise Exception("Featurizer cannont be None.")
         featurized_smiles_dm = gen_featurized_smiles(
-            reference_smiles_dm, featurizer, working_dir, clean
+            reference_smiles_dm, featurizer, working_dir, clean, small_data
         )
 
     featurized_smiles_dm.setup("train")
@@ -117,6 +120,7 @@ def gen_featurized_smiles(
     featurizer: Featurizer,
     working_dir: Path,
     clean: bool = False,
+    small_data: bool = False,
 ) -> pl.LightningDataModule:
     """Generate featurized smiles representation dataset.
 
@@ -169,9 +173,12 @@ def gen_featurized_smiles(
             enumerate(iter(reference_smiles_dl)),
             total=reference_smiles_dl.length,
             desc="Featurizing",
-        ):
+        ):  
             if i < stop_step // len(batch[0]):
-                continue
+                continue   
+            if i >= reference_smiles_dl.length * len(batch[1]):
+                break
+                 
             output = featurizer.featurize(batch[1])
             for j, elem in enumerate(batch[0]):
                 dump((elem.tolist(), batch[1][j], output[j].tolist()), feature_stream)
