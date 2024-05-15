@@ -22,6 +22,7 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
         num_workers: int = 1,
         transform: Optional[Any] = None,
         target_transform: Optional[Any] = None,
+        small_data: bool = False,
     ) -> None:
         """Init.
 
@@ -40,6 +41,8 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
         self.num_workers = num_workers
         self.transform = transform
         self.target_transform = target_transform
+        self.small_data = small_data
+        
 
     def setup(self: "FeaturizedSmilesDM", stage: Optional[str]) -> None:
         """Setup dataloaders.
@@ -64,10 +67,16 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
             dataset_size = calculate_cbor_size(fp)
 
         if stage == "train":
-            self.train_dataset_size = dataset_size
+            if self.small_data:
+                self.train_dataset_size = 100
+            else:
+                self.train_dataset_size = dataset_size
             shuffle = 5000
         elif stage == "val":
-            self.val_dataset_size = dataset_size // 10
+            if self.small_data:
+                self.val_dataset_size = 100
+            else:
+                self.val_dataset_size = dataset_size // 10
             shuffle = None
 
         self.dataset = wds.DataPipeline(
