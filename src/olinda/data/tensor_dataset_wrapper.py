@@ -22,7 +22,7 @@ class TensorflowDatasetWrapper:
         datamodule.setup(stage, only_X, only_Y, batched=False)
         self.dataset = datamodule.dataset
         sample = next(iter(self.dataset))
-        sample = np.array(sample)
+        #sample = np.array(sample)
 
         if stage == "train":
             self.loader = datamodule.train_dataloader()
