@@ -236,9 +236,16 @@ def gen_model_output(
         ):
             if i < stop_step // len(batch[0]):
                 continue
-            output = model(torch.tensor(batch[2]))
-            for j, elem in enumerate(batch[1]):
-                dump((j, elem, batch[2][j], output[j].tolist()), output_stream)
+            
+            if model.type == "ersilia":
+                output = model(batch[1])               
+                for j, elem in enumerate(batch[1]):
+                    dump((j, elem, batch[2][j], float(output['model_score'][j])), output_stream)
+            else:
+            	output = model(torch.tensor(batch[2]))
+            	for j, elem in enumerate(batch[1]):
+            	    dump((j, elem, batch[2][j], output[j].tolist()), output_stream)            
+
 
     model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))
     return model_output_dm

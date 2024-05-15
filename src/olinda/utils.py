@@ -60,8 +60,9 @@ def run_ersilia_api_in_context(model_id: str) -> Callable:
         Callable: Util function.
     """
 
-    def execute(x: Any) -> Any:
+    def execute(x: Any) -> Any:       
         with ErsiliaModel(model_id) as em_api:
-            return em_api.predict(x, output="pandas")
-
+            tmp = em_api.run(x, output="pandas")
+            tmp['model_score'] = tmp['logPe'] #MAKE GENERAL OUTPUT ADAPTER
+            return tmp
     return execute
