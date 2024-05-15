@@ -114,7 +114,7 @@ class KerasTuner(ModelTuner):
         val_dataset = val_dataset.batch(32)
         self._search(train_dataset, val_dataset)
         self._get_best_epoch(train_dataset, val_dataset)
-        self._final_train(train_dataset, val_dataset)
+        #self._final_train(train_dataset, val_dataset)
         return GenericModel(self.hypermodel)
 
     def _model_builder(self: "KerasTuner", hp: Any):
@@ -180,6 +180,13 @@ class KerasTuner(ModelTuner):
         val_per_epoch = history.history["val_loss"]
         self.best_epoch = val_per_epoch.index(min(val_per_epoch)) + 1
         print("Best epoch: %d" % (self.best_epoch,))
+        
+        #FIX NEEDED: When a new model is created and trained, a Graph Execution error occurs. When overwritten here, it proceeds ok.
+        model = self.tuner.hypermodel.build(self.best_hps)
+        history = model.fit(
+            train_dataset, epochs=self.best_epoch, validation_data=val_dataset
+        )
+        self.hypermodel = model
 
     def _final_train(
         self: "KerasTuner", train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset
