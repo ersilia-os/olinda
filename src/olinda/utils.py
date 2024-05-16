@@ -2,6 +2,7 @@
 
 from io import BufferedWriter
 import os
+import numpy as np
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -9,6 +10,8 @@ from cbor2 import CBORDecoder
 from ersilia import ErsiliaModel
 import gin
 from xdg import xdg_data_home
+
+import onnxruntime as rt
 
 
 def get_package_root_path() -> Path:
@@ -65,4 +68,29 @@ def run_ersilia_api_in_context(model_id: str) -> Callable:
             tmp = em_api.run(x, output="pandas")
             tmp['model_score'] = tmp['logPe'] #MAKE GENERAL OUTPUT ADAPTER
             return tmp
+    return execute
+
+def run_onnx_runtime(onnx_model: Any) -> Callable:
+    """Utility function to execute ONNX runtime.
+
+    Args:
+        onnx_model (str): ONNX model object
+
+    Returns:
+        Callable: Util function.
+    """
+    
+    def execute(x: list) -> list:
+        onnx_rt = rt.InferenceSession(onnx_model.SerializeToString())
+        output_names = [n.name for n in onnx_model.graph.output]
+        
+        #adapt for single versus batched queries
+        if np.array(x).shape[0] == 1:
+            preds = onnx_rt.run(output_names, {"input": x})[0]
+        else:
+            preds = [onnx_rt.run(output_names, {"input": val})[0] for val in x]
+            
+        #flatten list
+        preds = [float(ele) for ele in preds]
+        return preds
     return execute

@@ -8,6 +8,8 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
+import tensorflow as tf
+
 
 from olinda.utils import get_package_root_path
 
@@ -28,6 +30,7 @@ class Featurizer(ABC):
 class MorganFeaturizer(Featurizer):
     def __init__(self: "MorganFeaturizer") -> None:
         self.name = "morganfeaturizer"
+        self.tf_dtype = tf.uint8
         
     def featurize(self: "MorganFeaturizer", batch: Any) -> Any:
         """Featurize input batch.
@@ -68,6 +71,7 @@ class Flat2Grid(MorganFeaturizer):
     def __init__(self: "Flat2Grid") -> None:
         self.transformer = joblib.load(get_package_root_path() / "flat2grid.joblib")
         self.name = "flat2grid"
+        self.tf_dtype = tf.double
 
     def featurize(self: "Flat2Grid", batch: Any) -> Any:
         """Featurize input batch.

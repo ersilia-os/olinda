@@ -11,6 +11,10 @@ import pytorch_lightning as pl
 import torch
 from tqdm import tqdm
 
+import tensorflow as tf
+import tf2onnx
+import onnx
+
 from olinda.data import ReferenceSmilesDM, FeaturizedSmilesDM, GenericOutputDM
 from olinda.featurizer import Featurizer, Flat2Grid
 from olinda.generic_model import GenericModel
@@ -73,8 +77,9 @@ def distill(
 
     # Select and Train student model
     student_model = tuner.fit(student_training_dm)
+    model_onnx = convert_to_onnx(student_model, featurizer)
 
-    return student_model
+    return featurizer, model_onnx
 
 
 def gen_training_dataset(
@@ -192,7 +197,7 @@ def gen_model_output(
     model: GenericModel,
     working_dir: Path,
     clean: bool = False,
-) -> pl.LightningDataModule:
+) -> onnx.onnx_ml_pb2.ModelProto:
     """Generate featurized smiles representation dataset.
 
     Args:
@@ -252,10 +257,32 @@ def gen_model_output(
             else:
             	output = model(torch.tensor(batch[2]))
             	for j, elem in enumerate(batch[1]):
-            	    dump((j, elem, batch[2][j], output[j].tolist()), output_stream)           
+            	    dump((j, elem, batch[2][j], output[j].tolist()), output_stream)        
 
     model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))
     return model_output_dm
+
+
+def convert_to_onnx(
+    model: pl.LightningModule,
+    featurizer: Featurizer,
+) -> onnx.onnx_ml_pb2.ModelProto:
+    """Convert student model to ONNX format
+
+    Args:
+        model (GenericModel): Wrapped Student model.
+        featurizer (Featurizer): Featurizer to test data shape.
+
+    Returns:
+        onnx.onnx_ml_pb2.ModelProto: ONNX formatted model
+    """
+    
+    example = featurizer.featurize(["CCCOC"])
+    
+    spec = (tf.TensorSpec(example.shape, featurizer.tf_dtype, name="input"),)
+    model_onnx, _ = tf2onnx.convert.from_keras(model.nn, input_signature=spec)
+    model_onnx = GenericModel(model_onnx)
+    return model_onnx
 
 
 def clean_workspace(
