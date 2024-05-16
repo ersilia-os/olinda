@@ -43,9 +43,12 @@ class GenericModel(DistillBaseModel):
             self.model = model
 
         elif type(model) is str:
-            self.nn = run_ersilia_api_in_context(model)
-            self.type = "ersilia"
-            self.name = type(model).__name__.lower()
+            if model[:3] == "eos":
+            	self.nn = run_ersilia_api_in_context(model)
+            	self.type = "ersilia"
+            	self.name = type(model).__name__.lower()
+            elif model[-5:] == ".onnx":
+                self.load(model)
 
         else:
             raise Exception(f"Unsupported Model type: {type(model)}")
@@ -70,3 +73,13 @@ class GenericModel(DistillBaseModel):
     def save_featurizer(self, featurizer: Any, path: str) -> None:
         with open(os.path.join(path), "wb") as file_out:
             pickle.dump(featurizer, file_out)
+
+    def load(self: "GenericModel", path: str) -> None:
+            self.model = onnx.load(os.path.join(path))
+            self.nn = run_onnx_runtime(self.model)
+            self.type = "onnx"
+            self.name = type(self.model).__name__.lower()
+    
+    def load_featurizer(self, path: str) -> Any:
+        with open(os.path.join(path), "rb") as file_in:
+            return pickle.load(file_in)
