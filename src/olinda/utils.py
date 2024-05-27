@@ -66,8 +66,7 @@ def run_ersilia_api_in_context(model_id: str) -> Callable:
     def execute(x: Any) -> Any:       
         with ErsiliaModel(model_id) as em_api:
             tmp = em_api.run(x, output="pandas")
-            tmp['model_score'] = tmp['logPe'] #MAKE GENERAL OUTPUT ADAPTER
-            return tmp
+            return tmp['logPe']
     return execute
 
 def run_onnx_runtime(onnx_model: Any) -> Callable:

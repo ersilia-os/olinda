@@ -83,7 +83,6 @@ class KerasTuner(ModelTuner):
         self.layers_range = layers_range
         self.max_epochs = max_epochs
         self.input_shape = 1024
-        self.output_shape = 1
 
     def fit(self: "KerasTuner", datamodule: GenericOutputDM) -> GenericModel:
         """Fit an optimal model using the given dataset.
@@ -101,7 +100,8 @@ class KerasTuner(ModelTuner):
             generator=train_tensor_wrapper.__iter__,
             output_signature=train_tensor_wrapper.output_signature(),
         )
-
+        
+        self.output_shape = train_tensor_wrapper.output_signature()[1].shape[0] #Length of output tensor
         val_tensor_wrapper = TensorflowDatasetWrapper(
             datamodule, "val", only_X=True, only_Y=True
         )

@@ -250,9 +250,9 @@ def gen_model_output(
                 continue
                
             if model.type == "ersilia":
-                output = model(batch[1])               
+                output = model(batch[1])
                 for j, elem in enumerate(batch[1]):
-                    dump((j, elem, batch[2][j], float(output['model_score'][j])), output_stream)
+                    dump((j, elem, batch[2][j], [output[j].tolist()]), output_stream)
 
             else:
             	output = model(torch.tensor(batch[2]))
