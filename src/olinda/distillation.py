@@ -16,7 +16,7 @@ import tf2onnx
 import onnx
 
 from olinda.data import ReferenceSmilesDM, FeaturizedSmilesDM, GenericOutputDM
-from olinda.featurizer import Featurizer, Flat2Grid
+from olinda.featurizer import Featurizer, MorganFeaturizer, Flat2Grid
 from olinda.generic_model import GenericModel
 from olinda.tuner import ModelTuner, KerasTuner
 from olinda.utils import calculate_cbor_size, get_workspace_path
@@ -25,14 +25,14 @@ from olinda.utils import calculate_cbor_size, get_workspace_path
 def distill(
     model: Any,
     working_dir: Path = get_workspace_path(),
-    featurizer: Optional[Featurizer] = Flat2Grid(),
+    featurizer: Optional[Featurizer] = MorganFeaturizer(),
     clean: bool = False,
     tuner: ModelTuner = KerasTuner([1, 3]),
     reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
     generic_output_dm: Optional[GenericOutputDM] = None,
     test: bool = False,
-    small_data: bool = False,
+    num_data: int = 1999380,
 ) -> pl.LightningModule:
     """Distill models.
 
@@ -57,7 +57,7 @@ def distill(
     if student_training_dm is None:
         # Prepare reference smiles datamodule
         if reference_smiles_dm is None:
-            reference_smiles_dm = ReferenceSmilesDM(small_data=small_data)
+            reference_smiles_dm = ReferenceSmilesDM(num_data=num_data)
         reference_smiles_dm.prepare_data()
         if not test:
             reference_smiles_dm.setup("train")
@@ -71,8 +71,8 @@ def distill(
             reference_smiles_dm,
             featurized_smiles_dm,
             working_dir,
+            num_data,
             clean,
-            small_data,
         )
 
     # Select and Train student model
@@ -88,9 +88,9 @@ def gen_training_dataset(
     reference_smiles_dm: pl.LightningDataModule,
     featurized_smiles_dm: Optional[pl.LightningDataModule],
     working_dir: Path,
+    num_data,
     clean: bool = False,
-    small_data: bool = False,
-) -> pl.LightningDataModule:
+    ) -> pl.LightningDataModule:
     """Generate dataset for training and evaluating student model.
 
     Args:
@@ -110,9 +110,9 @@ def gen_training_dataset(
         if featurizer is None:
             raise Exception("Featurizer cannont be None.")
         featurized_smiles_dm = gen_featurized_smiles(
-            reference_smiles_dm, featurizer, working_dir, clean, small_data
+            reference_smiles_dm, featurizer, working_dir, num_data, clean,
         )
-
+    
     featurized_smiles_dm.setup("train")
     # Generate model outputs and save to a file
     model_output_dm = gen_model_output(featurized_smiles_dm, model, working_dir, clean)
@@ -124,8 +124,8 @@ def gen_featurized_smiles(
     reference_smiles_dm: pl.LightningDataModule,
     featurizer: Featurizer,
     working_dir: Path,
+    num_data,
     clean: bool = False,
-    small_data: bool = False,
 ) -> pl.LightningDataModule:
     """Generate featurized smiles representation dataset.
 
@@ -188,7 +188,8 @@ def gen_featurized_smiles(
             for j, elem in enumerate(batch[0]):
                 dump((elem.tolist(), batch[1][j], output[j].tolist()), feature_stream)
 
-    featurized_smiles_dm = FeaturizedSmilesDM(Path(working_dir), small_data=small_data)
+    featurized_smiles_dm = FeaturizedSmilesDM(Path(working_dir), featurizer)
+    
     return featurized_smiles_dm
 
 
@@ -219,7 +220,6 @@ def gen_model_output(
                 Path(working_dir / (model.name) / "featurized_smiles_dl.joblib")
             )
         except Exception:
-
             featurized_smiles_dl = featurized_smiles_dm.train_dataloader()
 
     # Save dataloader for resuming
@@ -237,7 +237,7 @@ def gen_model_output(
             stop_step = calculate_cbor_size(output_stream)
     except Exception:
         stop_step = 0
-
+    
     with open(
         Path(working_dir) / (model.name) / "model_output.cbor", "wb"
     ) as output_stream:
@@ -257,7 +257,7 @@ def gen_model_output(
             else:
             	output = model(torch.tensor(batch[2]))
             	for j, elem in enumerate(batch[1]):
-            	    dump((j, elem, batch[2][j], output[j].tolist()), output_stream)        
+            	    dump((j, elem, batch[2][j], output[j].tolist()), output_stream)
 
     model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))
     return model_output_dm

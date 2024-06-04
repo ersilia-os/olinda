@@ -46,9 +46,14 @@ class GenericModel(DistillBaseModel):
             if model[:3] == "eos":
             	self.nn = run_ersilia_api_in_context(model)
             	self.type = "ersilia"
-            	self.name = type(model).__name__.lower()
+            	self.name = self.type + "_" + model
             elif model[-5:] == ".onnx":
-                self.load(model)
+            	self.load(model)
+            #WIP ZairaChem models
+            #else:
+            #	self.nn = run_zairachem(model_path)
+            #	self.type = "zairachem"
+            #	self.name = self.type + "_" + model
 
         else:
             raise Exception(f"Unsupported Model type: {type(model)}")

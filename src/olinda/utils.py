@@ -66,6 +66,7 @@ def run_ersilia_api_in_context(model_id: str) -> Callable:
     def execute(x: Any) -> Any:       
         with ErsiliaModel(model_id) as em_api:
             tmp = em_api.run(x, output="pandas")
+            ###WIP: Hardcoded for eos97yu but need general output adapter
             return tmp['logPe']
     return execute
 
