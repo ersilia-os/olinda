@@ -79,7 +79,7 @@ def distill(
     student_model = tuner.fit(student_training_dm)
     model_onnx = convert_to_onnx(student_model, featurizer)
 
-    return featurizer, model_onnx
+    return model_onnx
 
 
 def gen_training_dataset(

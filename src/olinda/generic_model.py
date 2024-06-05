@@ -74,17 +74,9 @@ class GenericModel(DistillBaseModel):
             onnx.save(self.model, os.path.join(path))
         else:
             raise Exception(f"Cannot save non-ONNX model")
-    
-    def save_featurizer(self, featurizer: Any, path: str) -> None:
-        with open(os.path.join(path), "wb") as file_out:
-            pickle.dump(featurizer, file_out)
 
     def load(self: "GenericModel", path: str) -> None:
             self.model = onnx.load(os.path.join(path))
             self.nn = run_onnx_runtime(self.model)
             self.type = "onnx"
             self.name = type(self.model).__name__.lower()
-    
-    def load_featurizer(self, path: str) -> Any:
-        with open(os.path.join(path), "rb") as file_in:
-            return pickle.load(file_in)
