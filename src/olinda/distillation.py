@@ -46,7 +46,7 @@ def distill(
         featurized_smiles_dm (Optional[FeaturizedSmilesDM]): Reference Featurized SMILES datamodules.
         generic_output_dm (Optional[GenericOutputDM]): Precalculated training dataset for student model.
         test (bool): Run a test distillation on a smaller fraction of the dataset.
-
+        num_data: (int) : Set the number of ChEMBL training points to use (up to 1999380)
     Returns:
         pl.LightningModule: Student Model.
     """

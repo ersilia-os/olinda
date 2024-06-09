@@ -24,10 +24,12 @@ Models can be distilled quickly with a single function
 
 ```python
 from olinda import distill
-from olinda.featurizer import Flat2Grid
+from olinda.featurizer import MorganFeaturizer
 
-student_model = distill("path_to_model", featurizer = "Flat2Grid", "path_to_working_dir" )
+student_model = distill("path_to_model", "path_to_working_dir" )
 ```
+
+Use the 'num_data' parameter to use a smaller training dataset to test the pipeline.
 
 ### How the distillation works?
 
@@ -40,7 +42,8 @@ The distillation function first downloads a reference SMILES dataset if it is no
 
 During the distillation process, helpful messages and progress bars are printed to keep the user informed. In the case of a crash or process interruption the distillation process can be resumed automatically. It caches all the intermediate results in a local directory (`xdg_home() / olinda`).
 
-The student model is trained on a library of 2M molecules from ChEMBL 29.
+The student model is trained on a library of 2M molecules from ChEMBL 29. A subset of this can be used by setting the 'num_data' flag in distill().
+Distilled models are returned in ONNX format for cross-platform use.
 
 ## Distillation customization
 
@@ -55,7 +58,9 @@ def distill(
     tuner: ModelTuner = AutoKerasTuner(),
     reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
-    generic_output_dm: Optional[GenericOutputDM] = None,
+    generic_output_dm: Optional[GenericOutputDM] = Nonei,
+    test: bool = False,
+    num_data: int = 1999380,
 ) -> pl.LightningModule:
     """Distill models.
 
@@ -68,6 +73,8 @@ def distill(
         reference_smiles_dm (Optional[ReferenceSmilesDM]): Reference SMILES datamodules.
         featurized_smiles_dm (Optional[FeaturizedSmilesDM]): Reference Featurized SMILES datamodules.
         generic_output_dm (Optional[GenericOutputDM]): Precalculated training dataset for student model.
+        test (bool): Run a test distillation on a smaller fraction of the dataset.
+        num_data: (int) : Set the number of ChEMBL training points to use (up to 1999380)
 
     Returns:
         pl.LightningModule: Student Model.
@@ -93,11 +100,11 @@ student_model = distill(your_model, reference_smiles_dm=custom_reference_dm)
 
 ```python
 from olinda import distill
-from olinda.featurizer import Featurizer, Flat2Grid
+from olinda.featurizer import Featurizer, MorganFeaturizer
 
 # Implement your own featurizer by inheriting the `Featurizer` abstract class
 # or use one of the provided Featurizers (see below for more info)
-student_model = distill(your_model, featurizer=Flat2Grid())
+student_model = distill(your_model, featurizer=MorganFeaturizer())
 ```
 
 ### Custom featurized input dataset
@@ -143,8 +150,10 @@ student_model = distill(your_model, tuner=KerasTuner())
 ## DataModules
 
 ## Featurizers
-Currently we provide only one Featurizer class, Flat2Grid.
-This featurizer converts SMILES strings into Morgan Fingerprints of radius 3, and subsequently transforms each vector into a 32x32 grid using the Ersilia package [Griddify](https://github.com/ersilia-os/griddify).
+Currently we support only one Featurizer class, MorganFeaturizer. 
+This featurizer converts SMILES strings into Morgan Fingerprints of 1024 bits and radius 3.
+
+A related Featurizer is available but is no longer actively maintained for Olinda, which subsequently transforms each Morgan Fingerprint vector into a 32x32 grid using the Ersilia package [Griddify](https://github.com/ersilia-os/griddify).
 
 ## Tuners
 We provide two Tuners for the student model training based on the fantastic Keras library:
@@ -171,11 +180,12 @@ The [Ersilia Open Source Initiative](https://ersilia.io) is a Non Profit Organiz
 CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF -DProtobuf_USE_STATIC_LIBS=ON" poetry install
 ```
 
-- [ ] Model compatibility
+- [ ] Input model compatibility
   - [x] Pytorch
   - [ ] Tensorflow
   - [ ] ONNX
-  - [ ] ErsiliaModel ID
+  - [ ] ErsiliaModel ID (Currently hard-coded for eos97yu. Ersilia models require an output adapter to standardise prediction formatting)
+  - [ ] ZairaChem
 - [x] Caching intermediate results
   - [x]  Dataloader object using joblib
   - [x]  Separate folders for models+distill params
@@ -183,10 +193,12 @@ CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF -DProtobuf_USE_STATIC_LIBS=ON" p
 - [x]  Support custom featurizers
 - [ ]  Support custom input types to the featurizer
   - [ ]  Input types can vary but the output is always of same dimensions
+- [ ] Support distillation of multi-output models. (Works in principle but needs further testing)
 - [ ]  Custom tuners for model search and optimization
   - [ ]  Support chemxor models
 - [ ]  DataModules
   - [ ] Add a split percentage parameter to the datamodules
 - [x] Skip generating model outputs and use provided datamodule
+- [ ] Refactor and bugfix \_final_train() in tuner class
 
 - flatten images and check with previous tuners
