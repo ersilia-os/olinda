@@ -113,7 +113,6 @@ class GenericOutputDM(pl.LightningDataModule):
         )
 
         loader.length = (self.train_dataset_size * self.num_workers) // self.batch_size
-
         return loader
 
     def val_dataloader(self: "GenericOutputDM") -> DataLoader:

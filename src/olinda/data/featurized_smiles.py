@@ -40,6 +40,7 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
         self.num_workers = num_workers
         self.transform = transform
         self.target_transform = target_transform
+        
 
     def setup(self: "FeaturizedSmilesDM", stage: Optional[str]) -> None:
         """Setup dataloaders.
@@ -62,7 +63,7 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
 
         with open(file_path, "rb") as fp:
             dataset_size = calculate_cbor_size(fp)
-
+        #print(dataset_size)
         if stage == "train":
             self.train_dataset_size = dataset_size
             shuffle = 5000

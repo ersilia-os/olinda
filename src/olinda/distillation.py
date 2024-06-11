@@ -11,8 +11,12 @@ import pytorch_lightning as pl
 import torch
 from tqdm import tqdm
 
+import tensorflow as tf
+import tf2onnx
+import onnx
+
 from olinda.data import ReferenceSmilesDM, FeaturizedSmilesDM, GenericOutputDM
-from olinda.featurizer import Featurizer, Flat2Grid
+from olinda.featurizer import Featurizer, MorganFeaturizer, Flat2Grid
 from olinda.generic_model import GenericModel
 from olinda.tuner import ModelTuner, KerasTuner
 from olinda.utils import calculate_cbor_size, get_workspace_path
@@ -21,13 +25,14 @@ from olinda.utils import calculate_cbor_size, get_workspace_path
 def distill(
     model: Any,
     working_dir: Path = get_workspace_path(),
-    featurizer: Optional[Featurizer] = Flat2Grid(),
+    featurizer: Optional[Featurizer] = MorganFeaturizer(),
     clean: bool = False,
     tuner: ModelTuner = KerasTuner([1, 3]),
     reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
     generic_output_dm: Optional[GenericOutputDM] = None,
     test: bool = False,
+    num_data: int = 1999380,
 ) -> pl.LightningModule:
     """Distill models.
 
@@ -41,7 +46,7 @@ def distill(
         featurized_smiles_dm (Optional[FeaturizedSmilesDM]): Reference Featurized SMILES datamodules.
         generic_output_dm (Optional[GenericOutputDM]): Precalculated training dataset for student model.
         test (bool): Run a test distillation on a smaller fraction of the dataset.
-
+        num_data: (int) : Set the number of ChEMBL training points to use (up to 1999380)
     Returns:
         pl.LightningModule: Student Model.
     """
@@ -52,7 +57,7 @@ def distill(
     if student_training_dm is None:
         # Prepare reference smiles datamodule
         if reference_smiles_dm is None:
-            reference_smiles_dm = ReferenceSmilesDM()
+            reference_smiles_dm = ReferenceSmilesDM(num_data=num_data)
         reference_smiles_dm.prepare_data()
         if not test:
             reference_smiles_dm.setup("train")
@@ -66,13 +71,15 @@ def distill(
             reference_smiles_dm,
             featurized_smiles_dm,
             working_dir,
+            num_data,
             clean,
         )
 
     # Select and Train student model
     student_model = tuner.fit(student_training_dm)
+    model_onnx = convert_to_onnx(student_model, featurizer)
 
-    return student_model
+    return model_onnx
 
 
 def gen_training_dataset(
@@ -81,8 +88,9 @@ def gen_training_dataset(
     reference_smiles_dm: pl.LightningDataModule,
     featurized_smiles_dm: Optional[pl.LightningDataModule],
     working_dir: Path,
+    num_data,
     clean: bool = False,
-) -> pl.LightningDataModule:
+    ) -> pl.LightningDataModule:
     """Generate dataset for training and evaluating student model.
 
     Args:
@@ -102,9 +110,9 @@ def gen_training_dataset(
         if featurizer is None:
             raise Exception("Featurizer cannont be None.")
         featurized_smiles_dm = gen_featurized_smiles(
-            reference_smiles_dm, featurizer, working_dir, clean
+            reference_smiles_dm, featurizer, working_dir, num_data, clean,
         )
-
+    
     featurized_smiles_dm.setup("train")
     # Generate model outputs and save to a file
     model_output_dm = gen_model_output(featurized_smiles_dm, model, working_dir, clean)
@@ -116,6 +124,7 @@ def gen_featurized_smiles(
     reference_smiles_dm: pl.LightningDataModule,
     featurizer: Featurizer,
     working_dir: Path,
+    num_data,
     clean: bool = False,
 ) -> pl.LightningDataModule:
     """Generate featurized smiles representation dataset.
@@ -169,14 +178,18 @@ def gen_featurized_smiles(
             enumerate(iter(reference_smiles_dl)),
             total=reference_smiles_dl.length,
             desc="Featurizing",
-        ):
+        ):  
             if i < stop_step // len(batch[0]):
-                continue
+                continue   
+            if i >= reference_smiles_dl.length:
+                break
+                     
             output = featurizer.featurize(batch[1])
             for j, elem in enumerate(batch[0]):
                 dump((elem.tolist(), batch[1][j], output[j].tolist()), feature_stream)
 
-    featurized_smiles_dm = FeaturizedSmilesDM(Path(working_dir))
+    featurized_smiles_dm = FeaturizedSmilesDM(Path(working_dir), featurizer)
+    
     return featurized_smiles_dm
 
 
@@ -185,7 +198,7 @@ def gen_model_output(
     model: GenericModel,
     working_dir: Path,
     clean: bool = False,
-) -> pl.LightningDataModule:
+) -> onnx.onnx_ml_pb2.ModelProto:
     """Generate featurized smiles representation dataset.
 
     Args:
@@ -207,7 +220,6 @@ def gen_model_output(
                 Path(working_dir / (model.name) / "featurized_smiles_dl.joblib")
             )
         except Exception:
-
             featurized_smiles_dl = featurized_smiles_dm.train_dataloader()
 
     # Save dataloader for resuming
@@ -225,7 +237,7 @@ def gen_model_output(
             stop_step = calculate_cbor_size(output_stream)
     except Exception:
         stop_step = 0
-
+    
     with open(
         Path(working_dir) / (model.name) / "model_output.cbor", "wb"
     ) as output_stream:
@@ -236,12 +248,41 @@ def gen_model_output(
         ):
             if i < stop_step // len(batch[0]):
                 continue
-            output = model(torch.tensor(batch[2]))
-            for j, elem in enumerate(batch[1]):
-                dump((j, elem, batch[2][j], output[j].tolist()), output_stream)
+               
+            if model.type == "ersilia":
+                output = model(batch[1])
+                for j, elem in enumerate(batch[1]):
+                    dump((j, elem, batch[2][j], [output[j].tolist()]), output_stream)
+
+            else:
+            	output = model(torch.tensor(batch[2]))
+            	for j, elem in enumerate(batch[1]):
+            	    dump((j, elem, batch[2][j], output[j].tolist()), output_stream)
 
     model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))
     return model_output_dm
+
+
+def convert_to_onnx(
+    model: pl.LightningModule,
+    featurizer: Featurizer,
+) -> onnx.onnx_ml_pb2.ModelProto:
+    """Convert student model to ONNX format
+
+    Args:
+        model (GenericModel): Wrapped Student model.
+        featurizer (Featurizer): Featurizer to test data shape.
+
+    Returns:
+        onnx.onnx_ml_pb2.ModelProto: ONNX formatted model
+    """
+    
+    example = featurizer.featurize(["CCCOC"])
+    
+    spec = (tf.TensorSpec(example.shape, featurizer.tf_dtype, name="input"),)
+    model_onnx, _ = tf2onnx.convert.from_keras(model.nn, input_signature=spec)
+    model_onnx = GenericModel(model_onnx)
+    return model_onnx
 
 
 def clean_workspace(
