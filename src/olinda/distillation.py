@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 from typing import Any, Optional
 
-from cbor2 import dump
+from cbor2 import dump, load
 import joblib
 import pytorch_lightning as pl
 import torch
@@ -237,7 +237,12 @@ def gen_model_output(
             stop_step = calculate_cbor_size(output_stream)
     except Exception:
         stop_step = 0
-    
+
+    if model.type == "zairachem":
+        with open(Path(working_dir) / (model.name) / "smiles_list.csv", "w"
+        ) as smiles_out:
+            smiles_out.write("SMILES\n")
+
     with open(
         Path(working_dir) / (model.name) / "model_output.cbor", "wb"
     ) as output_stream:
@@ -248,8 +253,21 @@ def gen_model_output(
         ):
             if i < stop_step // len(batch[0]):
                 continue
+
+            if model.type == "zairachem":
+                #Write separate smiles file to run zairachem without batches
+                with open(Path(working_dir) / (model.name) / "smiles_list.csv", "a"
+                ) as smiles_out:
+                    for elem in batch[1]:
+                        smiles_out.write(elem + "\n")
+                        
+                    #Write separate fingerprints to correspond to smiles later    
+                    with open(Path(working_dir) / (model.name) / "fps_list.cbor", "ab"
+                    ) as fps_out:
+                        for fp in batch[2]:
+                            dump(fp, fps_out)
                
-            if model.type == "ersilia":
+            elif model.type == "ersilia":
                 output = model(batch[1])
                 for j, elem in enumerate(batch[1]):
                     dump((j, elem, batch[2][j], [output[j].tolist()]), output_stream)
@@ -258,6 +276,18 @@ def gen_model_output(
             	output = model(torch.tensor(batch[2]))
             	for j, elem in enumerate(batch[1]):
             	    dump((j, elem, batch[2][j], output[j].tolist()), output_stream)
+
+        if model.type == "zairachem":
+            output = model(os.path.join(working_dir, model.name, "smiles_list.csv"))
+
+            with open(Path(working_dir) / (model.name) / "fps_list.cbor", "rb"
+                    ) as fps_file:
+                with open(Path(working_dir) / (model.name) / "model_output.cbor", "wb"
+                ) as output_stream:
+                    for j, smi in enumerate(output):
+                        dump((j, output.iloc[j]["smiles"], load(fps_file), [[output.iloc[j]["pred"]]]), output_stream)
+
+        ### Remove zairachem folder
 
     model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))
     return model_output_dm

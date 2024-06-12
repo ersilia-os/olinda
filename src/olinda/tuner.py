@@ -50,7 +50,7 @@ class AutoKerasTuner(ModelTuner):
         Returns:
             GenericModel : Student model as wrapped in a generic model class.
         """
-        self.mdl = ak.ImageRegressor(
+        self.mdl = ak.StructuredDataRegressor(
             overwrite=False,
             max_trials=self.max_trials,
             project_name=f"autokeras-{random()*1000}",
@@ -61,7 +61,7 @@ class AutoKerasTuner(ModelTuner):
         self.dataset = tf.data.Dataset.from_generator(
             generator=tensor_wrapper.__iter__,
             output_signature=(
-                tf.TensorSpec(shape=(32, 32), dtype=tf.float32),
+                tf.TensorSpec(shape=(1024,), dtype=tf.float32),
                 tf.TensorSpec(shape=(1,), dtype=tf.float32),
             ),
         )

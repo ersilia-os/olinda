@@ -13,6 +13,9 @@ from xdg import xdg_data_home
 
 import onnxruntime as rt
 
+from olinda.models import zairachem
+from olinda.models.zairachem import ZairaChemPredictor
+
 
 def get_package_root_path() -> Path:
     """Get path of the package root.
@@ -51,6 +54,23 @@ def calculate_cbor_size(fp: BufferedWriter) -> int:
         decoder.decode()
         size += 1
     return size
+
+    
+def run_zairachem(model_path: str) -> Callable:
+    """Utility function to run ZairaChem model predictions.
+
+    Args:
+        model_path (str): Path to ZairaChem model.
+
+    Returns:
+        Callable: Util function.
+    """
+
+    def execute(smiles_path: str) -> list:
+        model_output = os.path.join(get_workspace_path(), "zairachem_output_dir")     
+        zp = ZairaChemPredictor(smiles_path, model_path, model_output, False, False)
+        return zp.predict()
+    return execute    
 
 
 def run_ersilia_api_in_context(model_id: str) -> Callable:
