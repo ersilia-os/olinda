@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 import webdataset as wds
 
-from olinda.featurizer import Featurizer, Flat2Grid
+from olinda.featurizer import Featurizer, MorganFeaturizer
 from olinda.utils import calculate_cbor_size
 
 
@@ -17,7 +17,7 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
     def __init__(
         self: "FeaturizedSmilesDM",
         workspace_dir: Union[str, Path],
-        featurizer: Featurizer = Flat2Grid(),
+        featurizer: Featurizer = MorganFeaturizer(),
         batch_size: int = 32,
         num_workers: int = 1,
         transform: Optional[Any] = None,
@@ -63,18 +63,17 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
 
         with open(file_path, "rb") as fp:
             dataset_size = calculate_cbor_size(fp)
-        #print(dataset_size)
         if stage == "train":
             self.train_dataset_size = dataset_size
-            shuffle = 5000
+            #shuffle = 5000
         elif stage == "val":
             self.val_dataset_size = dataset_size // 10
-            shuffle = None
+            #shuffle = None
 
         self.dataset = wds.DataPipeline(
             wds.SimpleShardList(str(file_path.absolute())),
             wds.cbors2_to_samples(),
-            wds.shuffle(shuffle),
+            #wds.shuffle(shuffle),
             wds.batched(self.batch_size, partial=False),
         )
 

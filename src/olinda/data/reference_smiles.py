@@ -83,8 +83,8 @@ class ReferenceSmilesDM(pl.LightningDataModule):
             is False
         ):
             # preprocess csv into a cbor file
-            df = pd.read_csv(self.workspace / "reference" / "reference_smiles.csv")
-            truncated_df = df.iloc[:100000]
+            df = pd.read_csv(self.workspace / "reference" / "reference_smiles.csv", header=None)
+            truncated_df = df.iloc[:self.num_data]
             with open(
                 self.workspace / "reference" / "reference_smiles.cbor", "wb"
             ) as stream:
@@ -112,7 +112,7 @@ class ReferenceSmilesDM(pl.LightningDataModule):
         """
         if stage == "train":
             self.dataset_size = self.num_data
-            shuffle = 5000
+            #shuffle = 5000
             self.dataset = wds.DataPipeline(
                 wds.SimpleShardList(
                     str(
@@ -122,12 +122,12 @@ class ReferenceSmilesDM(pl.LightningDataModule):
                     )
                 ),
                 wds.cbors2_to_samples(),
-                wds.shuffle(shuffle),
+                #wds.shuffle(shuffle),
                 wds.batched(self.batch_size, partial=False),
             )
         elif stage == "val":
-            self.dataset_size = self.num_data
-            shuffle = 5000
+            self.dataset_size = self.num_data//10
+            #shuffle = 5000
             self.dataset = wds.DataPipeline(
                 wds.SimpleShardList(
                     str(
@@ -139,7 +139,7 @@ class ReferenceSmilesDM(pl.LightningDataModule):
                     )
                 ),
                 wds.cbors2_to_samples(),
-                wds.shuffle(shuffle),
+                #wds.shuffle(shuffle),
                 wds.batched(self.batch_size, partial=False),
             )
 
