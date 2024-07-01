@@ -72,6 +72,20 @@ def run_zairachem(model_path: str) -> Callable:
         return zp.predict()
     return execute    
 
+def get_zairachem_training_preds(model_path: str) -> Callable:
+    """Utility function to return the training set predictions of a ZairaChem model.
+
+    Args:
+        model_path (str): Path to ZairaChem model.
+
+    Returns:
+        Callable: Util function.
+    """
+
+    def execute() -> Any:  
+        zp = ZairaChemPredictor("", model_path, "", False, False)
+        return zp.clean_output(model_path)
+    return execute   
 
 def run_ersilia_api_in_context(model_id: str) -> Callable:
     """Utility function to execute Ersilia API.

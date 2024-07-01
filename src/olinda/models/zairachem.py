@@ -56,7 +56,7 @@ class ZairaChemPredictor(object):
         f = Finisher(path=self.output_dir, clean=self.clean, flush=self.flush)
         f.run()
         
-        return self.clean_output()
+        return self.clean_output(self.output_dir)
  
     def run_descriptors(self, d: Describer) -> None:   
         d.reset_time()
@@ -95,10 +95,9 @@ class ZairaChemPredictor(object):
         #update json descriptor file
         with open(os.path.join(self.output_dir, "descriptors", "done_eos.json"), "w") as done_file:
             json.dump(done, done_file)
-
-    def clean_output(self):
-        results = pd.read_csv(os.path.join(self.output_dir, "output.csv"))
-        print(results)
+    
+    def clean_output(self, path):
+        results = pd.read_csv(os.path.join(path, "output.csv"))
         col_names = results.columns.values.tolist()
         
         clf_col = ""
@@ -108,4 +107,5 @@ class ZairaChemPredictor(object):
         
         results.rename({clf_col: 'pred'}, axis=1, inplace=True)
         return results[["smiles", 'pred']]
+        
 

@@ -246,26 +246,35 @@ def gen_model_output(
     except Exception:
         stop_step = 0
         
-
+    counter = 0
     with open(
         Path(working_dir) / (model.name) / "model_output.cbor", "wb"
     ) as output_stream:
     
         if model.type == "zairachem":
             output = model(os.path.join("/home/jason/JHlozek_code/olinda/example_precalculated_descriptors", "reference_library.csv"))
+            training_output = model.get_training_preds()
+            morganFeat = MorganFeaturizer()
+            for i, row in training_output.iterrows():
+                fp = morganFeat.featurize([row["smiles"]])
+                if fp is None:
+                    continue
+                dump((i, row["smiles"], fp[0].tolist(), [[row["pred"]]]), output_stream)
+                counter +=1
                 
-    
         for i, batch in tqdm(
             enumerate(iter(featurized_smiles_dl)),
             total=featurized_smiles_dl.length,
             desc="Creating model output",
         ):
+
             if i < stop_step // len(batch[0]):
                 continue
 
             if model.type == "zairachem":
                 for j, elem in enumerate(batch[1]):
                     dump((j, elem, batch[2][j], [[output.iloc[i*len(batch[0]) +j]["pred"]]]), output_stream)
+                    counter+=1
                
             elif model.type == "ersilia":
                 output = model(batch[1])
@@ -278,7 +287,7 @@ def gen_model_output(
             	    dump((j, elem, batch[2][j], output[j].tolist()), output_stream)
 
         ### Remove zairachem folder
-
+        
     model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))
     return model_output_dm
 

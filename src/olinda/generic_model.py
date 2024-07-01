@@ -11,7 +11,7 @@ import os
 import pickle
 
 from olinda.models.base import DistillBaseModel
-from olinda.utils import run_ersilia_api_in_context, run_onnx_runtime, run_zairachem
+from olinda.utils import run_ersilia_api_in_context, run_onnx_runtime, run_zairachem, get_zairachem_training_preds
 
 
 class GenericModel(DistillBaseModel):
@@ -53,6 +53,7 @@ class GenericModel(DistillBaseModel):
             	self.nn = run_zairachem(model)
             	self.type = "zairachem"
             	self.name = self.type + "_" + model
+            	self.get_training_preds = get_zairachem_training_preds(model)
 
         else:
             raise Exception(f"Unsupported Model type: {type(model)}")
