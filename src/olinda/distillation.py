@@ -26,7 +26,7 @@ def distill(
     model: Any,
     working_dir: Path = get_workspace_path(),
     featurizer: Optional[Featurizer] = MorganFeaturizer(),
-    clean: bool = False,
+    clean: bool = True,
     tuner: ModelTuner = KerasTuner([1, 3]),
     reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
@@ -246,13 +246,14 @@ def gen_model_output(
     except Exception:
         stop_step = 0
         
-    counter = 0
     with open(
         Path(working_dir) / (model.name) / "model_output.cbor", "wb"
     ) as output_stream:
     
         if model.type == "zairachem":
             output = model(os.path.join("/home/jason/JHlozek_code/olinda/example_precalculated_descriptors", "reference_library.csv"))
+            
+            train_counter = 0
             training_output = model.get_training_preds()
             morganFeat = MorganFeaturizer()
             for i, row in training_output.iterrows():
@@ -260,21 +261,26 @@ def gen_model_output(
                 if fp is None:
                     continue
                 dump((i, row["smiles"], fp[0].tolist(), [[row["pred"]]]), output_stream)
-                counter +=1
-                
+                train_counter += 1
+        
+        ref_counter = 0        
         for i, batch in tqdm(
             enumerate(iter(featurized_smiles_dl)),
             total=featurized_smiles_dl.length,
             desc="Creating model output",
         ):
-
             if i < stop_step // len(batch[0]):
                 continue
 
             if model.type == "zairachem":
+                combined_count = train_counter + featurized_smiles_dl.length*len(batch[0])
+                target_count = combined_count // len(batch[0]) * len(batch[0])
+                
                 for j, elem in enumerate(batch[1]):
+                    if ref_counter + train_counter == target_count:
+                        break
                     dump((j, elem, batch[2][j], [[output.iloc[i*len(batch[0]) +j]["pred"]]]), output_stream)
-                    counter+=1
+                    ref_counter += 1
                
             elif model.type == "ersilia":
                 output = model(batch[1])
@@ -286,7 +292,8 @@ def gen_model_output(
             	for j, elem in enumerate(batch[1]):
             	    dump((j, elem, batch[2][j], output[j].tolist()), output_stream)
 
-        ### Remove zairachem folder
+        # Remove zairachem folder
+        shutil.rmtree(os.path.join(get_workspace_path(), "zairachem_output_dir"))
         
     model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))
     return model_output_dm
@@ -328,7 +335,7 @@ def clean_workspace(
         shutil.rmtree(Path(working_dir) / (model.name), ignore_errors=True)
         os.makedirs(Path(working_dir) / (model.name), exist_ok=True)
 
-    if featurizer:
+    if featurizer and os.path.exists(Path(working_dir) / "reference" / "reference_smiles_dl.joblib"):
         os.remove(Path(working_dir) / "reference" / "reference_smiles_dl.joblib")
         os.remove(
             Path(working_dir)

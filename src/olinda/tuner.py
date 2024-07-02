@@ -100,13 +100,13 @@ class KerasTuner(ModelTuner):
             generator=train_tensor_wrapper.__iter__,
             output_signature=train_tensor_wrapper.output_signature(),
         )
-        
         self.output_shape = train_tensor_wrapper.output_signature()[1].shape[0] #Length of output tensor
+        
         val_tensor_wrapper = TensorflowDatasetWrapper(
             datamodule, "val", only_X=True, only_Y=True
         )
         val_dataset = tf.data.Dataset.from_generator(
-            generator=train_tensor_wrapper.__iter__,
+            generator=val_tensor_wrapper.__iter__,
             output_signature=val_tensor_wrapper.output_signature(),
         )
 
@@ -114,7 +114,7 @@ class KerasTuner(ModelTuner):
         val_dataset = val_dataset.batch(32)
         self._search(train_dataset, val_dataset)
         self._get_best_epoch(train_dataset, val_dataset)
-        #self._final_train(train_dataset, val_dataset)
+        self._final_train(train_dataset, val_dataset)
         return GenericModel(self.hypermodel)
 
     def _model_builder(self: "KerasTuner", hp: Any):
@@ -151,6 +151,7 @@ class KerasTuner(ModelTuner):
     def _search(
         self: "KerasTuner", train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset
     ) -> None:
+        print("Hyperparameter Search")
         self.tuner = kt.Hyperband(
             self._model_builder,
             objective="val_loss",
@@ -171,6 +172,7 @@ class KerasTuner(ModelTuner):
     def _get_best_epoch(
         self: "KerasTuner", train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset
     ) -> None:
+        print("Best Epoch Search")
         # Build the model with the optimal hyperparameters and train it on the data for 50 epochs
         model = self.tuner.hypermodel.build(self.best_hps)
         history = model.fit(
@@ -180,17 +182,11 @@ class KerasTuner(ModelTuner):
         val_per_epoch = history.history["val_loss"]
         self.best_epoch = val_per_epoch.index(min(val_per_epoch)) + 1
         print("Best epoch: %d" % (self.best_epoch,))
-        
-        #FIX NEEDED: When a new model is created and trained, a Graph Execution error occurs. When overwritten here, it proceeds ok.
-        model = self.tuner.hypermodel.build(self.best_hps)
-        history = model.fit(
-            train_dataset, epochs=self.best_epoch, validation_data=val_dataset
-        )
-        self.hypermodel = model
 
     def _final_train(
         self: "KerasTuner", train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset
     ):
+        print("Final Model")
         self.hypermodel = self.tuner.hypermodel.build(self.best_hps)
 
         # Retrain the model
