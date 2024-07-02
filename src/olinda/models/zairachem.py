@@ -11,11 +11,13 @@ from zairachem.finish.finisher import Finisher
 from zairachem.reports.report import Reporter
 import pandas as pd
 import os
+from os import devnull
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import shutil
 import json
 import sys
 import warnings
-import logging.config
+import logging
 import glob
 
 class ZairaChemPredictor(object):
@@ -28,33 +30,39 @@ class ZairaChemPredictor(object):
 
     def predict(self):
         print("ZairaChem: Setup")
-        self.s = PredictSetup(
-	    input_file=self.input_file,
-	    output_dir=self.output_dir,
-	    model_dir=self.model_dir,
-	    time_budget=60, 
-        )
-        self.s.setup() ### Reduce mellody tuner time?
+        with HiddenPrints():
+            self.s = PredictSetup(
+	        input_file=self.input_file,
+	        output_dir=self.output_dir,
+	        model_dir=self.model_dir,
+	        time_budget=60, 
+            )
+            self.s.setup() ### Reduce mellody tuner time?
         
         print("ZairaChem: Describe")
-        d = Describer(path=self.output_dir)
-        self.run_descriptors(d)
+        with HiddenPrints():
+            d = Describer(path=self.output_dir)
+            self.run_descriptors(d)
         
         print("ZairaChem: Estimate")
-        e = EstimatorPipeline(path=self.output_dir)
-        e.run()
+        with HiddenPrints():
+            e = EstimatorPipeline(path=self.output_dir)
+            e.run()
         
         print("ZairaChem: Pool")
-        p = Pooler(path=self.output_dir)
-        p.run()
+        with HiddenPrints():
+            p = Pooler(path=self.output_dir)
+            p.run()
         
         print("ZairaChem: Report")
-        r = Reporter(path=self.output_dir)
-        r._output_table()
+        with HiddenPrints():
+            r = Reporter(path=self.output_dir)
+            r._output_table()
         
         print("ZairaChem: Finish")
-        f = Finisher(path=self.output_dir, clean=self.clean, flush=self.flush)
-        f.run()
+        with HiddenPrints():
+            f = Finisher(path=self.output_dir, clean=self.clean, flush=self.flush)
+            f.run()
         
         return self.clean_output(self.output_dir)
  
@@ -95,6 +103,7 @@ class ZairaChemPredictor(object):
         #update json descriptor file
         with open(os.path.join(self.output_dir, "descriptors", "done_eos.json"), "w") as done_file:
             json.dump(done, done_file)
+
     
     def clean_output(self, path):
         results = pd.read_csv(os.path.join(path, "output.csv"))
@@ -108,4 +117,22 @@ class ZairaChemPredictor(object):
         results.rename({clf_col: 'pred'}, axis=1, inplace=True)
         return results[["smiles", 'pred']]
         
-
+@contextmanager
+def HiddenPrints():
+    """A context manager that redirects stdout and stderr to devnull"""
+    with open(devnull, 'w') as fnull:
+        with redirect_stderr(fnull) as err, redirect_stdout(fnull) as out:
+            with warnings.catch_warnings():
+                logging.config.dictConfig({
+                'version': 1,
+                'disable_existing_loggers': True
+                })
+                warnings.simplefilter('ignore')
+                try:
+                    yield (err, out)
+                finally:
+                    logging.config.dictConfig({
+                    'version': 1,
+                    'disable_existing_loggers': False
+                    })
+                    warnings.simplefilter('default')        
