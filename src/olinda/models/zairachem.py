@@ -9,6 +9,7 @@ from zairachem.estimators.pipe import EstimatorPipeline
 from zairachem.pool.pool import Pooler
 from zairachem.finish.finisher import Finisher
 from zairachem.reports.report import Reporter
+
 import pandas as pd
 import os
 from os import devnull
@@ -19,6 +20,7 @@ import sys
 import warnings
 import logging
 import glob
+from pathlib import Path
 
 class ZairaChemPredictor(object):
     def __init__(self, input_file, model_dir, output_dir, clean, flush):
@@ -27,7 +29,7 @@ class ZairaChemPredictor(object):
         self.output_dir = output_dir
         self.clean = clean
         self.flush = flush
-
+    
     def predict(self):
         print("ZairaChem: Setup")
         with HiddenPrints():
@@ -75,7 +77,7 @@ class ZairaChemPredictor(object):
         
     def precalc_descriptors(self) -> None:
         ### WIP Copy to generic home directory during install?
-        precalc_path = os.path.join("/home/jason/JHlozek_code/olinda/example_precalculated_descriptors")
+        precalc_path = Path(os.path.dirname(__file__), '..', "..", "..", "precalculated_descriptors")
         precalc_descs = [desc_path.split("/")[-1] for desc_path in list(glob.glob(os.path.join(precalc_path, "descriptors", "*")))]
         done = []
         
@@ -87,9 +89,11 @@ class ZairaChemPredictor(object):
                     shutil.copytree(os.path.join(precalc_path, "descriptors", desc), os.path.join(self.output_dir, "descriptors", desc))
                     done.append(desc)
                 else:
-                    ### Make folder and copy output h5
-                    with ErsiliaModel(model_id) as em_api:
-                        em_api.run(x, output=os.path.join(self.output_dir, "descriptors", desc + ".h5"))
+                    #make folder and copy output h5
+                    with ErsiliaModel(desc) as em_api:
+                        smiles_list = pd.read_csv(self.input_file)["SMILES"].to_list()
+                        os.makedirs(os.path.join(self.output_dir, "descriptors", desc))
+                        em_api.run(smiles_list, output=os.path.join(self.output_dir, "descriptors", desc, "raw.h5"))
                         done.append(desc)
         
         #copy remaining manifolds, ersilia compound embeddings and reference embedding

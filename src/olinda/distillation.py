@@ -14,6 +14,7 @@ from tqdm import tqdm
 import tensorflow as tf
 import tf2onnx
 import onnx
+import pandas as pd
 
 from olinda.data import ReferenceSmilesDM, FeaturizedSmilesDM, GenericOutputDM
 from olinda.featurizer import Featurizer, MorganFeaturizer, Flat2Grid
@@ -54,10 +55,11 @@ def distill(
     # Convert model to a generic model
     model = GenericModel(model)
     if model.type == "zairachem":
-        reference_smiles_dm = ReferenceSmilesDM(num_data=1000)
+        precalc_smiles_df = pd.read_csv(Path(os.path.dirname(__file__), '..', "..", "precalculated_descriptors", "reference_library.csv"))
+        reference_smiles_dm = ReferenceSmilesDM(num_data=len(precalc_smiles_df))
         reference_smiles_dm.prepare_data()
         reference_smiles_dm.setup("train")
-        featurized_smiles_dm = gen_featurized_smiles(reference_smiles_dm, featurizer, working_dir, num_data=1000, clean=clean)
+        featurized_smiles_dm = gen_featurized_smiles(reference_smiles_dm, featurizer, working_dir, num_data=len(precalc_smiles_df), clean=clean)
         featurized_smiles_dm.setup("train")
         student_training_dm = gen_model_output(featurized_smiles_dm, model, working_dir, clean)
     else:
@@ -251,7 +253,7 @@ def gen_model_output(
     ) as output_stream:
     
         if model.type == "zairachem":
-            output = model(os.path.join("/home/jason/JHlozek_code/olinda/example_precalculated_descriptors", "reference_library.csv"))
+            output = model(Path(os.path.dirname(__file__), '..', "..", "precalculated_descriptors", "reference_library.csv"))
             
             train_counter = 0
             training_output = model.get_training_preds()
