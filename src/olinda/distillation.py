@@ -55,7 +55,7 @@ def distill(
     # Convert model to a generic model
     model = GenericModel(model)
     if model.type == "zairachem":
-        precalc_smiles_df = pd.read_csv(Path(os.path.dirname(__file__), '..', "..", "precalculated_descriptors", "reference_library.csv").resolve())
+        precalc_smiles_df = pd.read_csv(os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "reference_library.csv"))
         reference_smiles_dm = ReferenceSmilesDM(num_data=len(precalc_smiles_df))
         reference_smiles_dm.prepare_data()
         reference_smiles_dm.setup("train")
@@ -253,7 +253,7 @@ def gen_model_output(
     ) as output_stream:
     
         if model.type == "zairachem":
-            output = model(Path(os.path.dirname(__file__), '..', "..", "precalculated_descriptors", "reference_library.csv").resolve())
+            output = model(os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "reference_library.csv"))
             
             train_counter = 0
             training_output = model.get_training_preds()
