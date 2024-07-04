@@ -77,7 +77,7 @@ class ZairaChemPredictor(object):
         
     def precalc_descriptors(self) -> None:
         ### WIP Copy to generic home directory during install?
-        precalc_path = Path(os.path.dirname(__file__), '..', "..", "..", "precalculated_descriptors")
+        precalc_path = Path(os.path.dirname(__file__), '..', "..", "..", "precalculated_descriptors").resolve()
         precalc_descs = [desc_path.split("/")[-1] for desc_path in list(glob.glob(os.path.join(precalc_path, "descriptors", "*")))]
         done = []
         

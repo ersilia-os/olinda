@@ -14,8 +14,11 @@ class DescriptorCalculator():
         self.smiles_list = self.df["SMILES"].to_list()
         
     def calculate(self):
-        os.makedirs(os.path.join(self.output_path, "descriptors"))
-        os.makedirs(os.path.join(self.output_path, "data"))
+        os.makedirs(os.path.join(self.output_path, "descriptors"), exist_ok=True)
+        os.makedirs(os.path.join(self.output_path, "data"), exist_ok=True)
+        
+        self._data_files()
+        self._eosce()
         
         #raw descriptors ersilia api
         base_desc = ["cc-signaturizer", "grover-embedding", "molfeat-chemgpt", "mordred", "rdkit-fingerprint"]
