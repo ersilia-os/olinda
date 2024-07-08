@@ -1,4 +1,5 @@
 import os
+import csv
 import pandas as pd
 from zairachem.descriptors.eosce import EosceEmbedder
 from ersilia import ErsiliaModel
@@ -8,14 +9,15 @@ class DescriptorCalculator():
     def __init__(self, smiles_csv, output_path):
         self.smiles_path = smiles_csv
         self.output_path = output_path
-        self.data_path = os.path.join(self.output_path, "data", "data.csv")
-        shutil.copy(self.smiles_path, os.path.join(self.output_path, "reference_library.csv"))
-        self.df = pd.read_csv(os.path.join(self.output_path, "reference_library.csv"))
-        self.smiles_list = self.df["SMILES"].to_list()
-        
-    def calculate(self):
         os.makedirs(os.path.join(self.output_path, "descriptors"), exist_ok=True)
         os.makedirs(os.path.join(self.output_path, "data"), exist_ok=True)
+        self.data_path = os.path.join(self.output_path, "data", "data.csv")
+        
+    def calculate(self):
+        self._screen_smiles()
+        
+        self.df = pd.read_csv(os.path.join(self.output_path, "reference_library.csv"))
+        self.smiles_list = self.df["SMILES"].to_list()
         
         self._data_files()
         self._eosce()
@@ -47,3 +49,32 @@ class DescriptorCalculator():
         print("Ersilia Compound Embeddings")
         eosce = EosceEmbedder()
         eosce.calculate(self.smiles_list, os.path.join(self.output_path, "descriptors", "eosce.h5"))
+        
+    def _screen_smiles(self):
+        with ErsiliaModel("eos7w6n") as em:
+                em.api(input=self.smiles_path, output=os.path.join(self.output_path, "descriptors", "eos7w6n_raw.csv"))
+        raw_smiles_path = os.path.join(self.output_path, "descriptors", "eos7w6n_raw.csv")
+        smiles_removed = []
+        indxs_removed = []
+        
+        with open(raw_smiles_path, "r") as csv_file:
+            datareader = csv.reader(csv_file)
+            next(datareader)
+            for i, row in enumerate(datareader):
+                if row[2] == "":
+                    print("Bad molecule found: ", row[1])
+                    smiles_removed.append(row[1])
+                    indxs_removed.append(i)
+        
+            df = pd.read_csv(raw_smiles_path)
+            df.drop(df.index[indxs_removed], axis=0, inplace=True)
+            df = df[["input"]]
+            df.rename(columns = {"input":"SMILES"}, inplace=True)
+            df.to_csv(os.path.join(self.output_path, "reference_library.csv"), index=False)
+        
+        os.remove(raw_smiles_path)
+        
+        with open(os.path.join(self.output_path, "removed_smiles.csv"), "w") as removed_smiles_file:
+            for smi in smiles_removed:
+                removed_smiles_file.write(smi + "\n")
+        
