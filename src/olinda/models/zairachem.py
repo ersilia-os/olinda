@@ -77,8 +77,8 @@ class ZairaChemPredictor(object):
         
     def precalc_descriptors(self) -> None:
         ### WIP Copy to generic home directory during install?
-        precalc_path = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors")
-        precalc_descs = [desc_path.split("/")[-1] for desc_path in list(glob.glob(os.path.join(precalc_path, "descriptors", "*")))]
+        precalc_path = os.path.dirname(self.input_file)
+        precalc_descs = [os.path.basename(desc_path) for desc_path in list(glob.glob(os.path.join(precalc_path, "descriptors", "*")))]
         done = []
         
         #raw descriptors
@@ -97,7 +97,7 @@ class ZairaChemPredictor(object):
                         done.append(desc)
         
         #copy remaining manifolds, ersilia compound embeddings and reference embedding
-        for f in ["reference.h5", "eosce.h5"]:
+        for f in ["reference.h5", "eosce.h5", "bidd_molmap_desc.np", "bidd_molmap_fps.np"]:
             shutil.copy(os.path.join(precalc_path, "descriptors", f), os.path.join(self.output_dir, "descriptors"))
         
         #update mapping file

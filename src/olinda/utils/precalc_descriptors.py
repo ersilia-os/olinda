@@ -1,6 +1,7 @@
 import os
 import csv
 import pandas as pd
+import numpy as np
 from zairachem.descriptors.eosce import EosceEmbedder
 from ersilia import ErsiliaModel
 import shutil
@@ -11,7 +12,7 @@ class DescriptorCalculator():
         self.output_path = output_path
         os.makedirs(os.path.join(self.output_path, "descriptors"), exist_ok=True)
         os.makedirs(os.path.join(self.output_path, "data"), exist_ok=True)
-        self.data_path = os.path.join(self.output_path, "data", "data.csv")
+        self.data_path = os.path.join(self.output_path, "data", "data.csv
         
     def calculate(self):
         self._screen_smiles()
@@ -21,6 +22,7 @@ class DescriptorCalculator():
         
         self._data_files()
         self._eosce()
+        self._molmap()
         
         #raw descriptors ersilia api
         base_desc = ["cc-signaturizer", "grover-embedding", "molfeat-chemgpt", "mordred", "rdkit-fingerprint"]
@@ -50,6 +52,21 @@ class DescriptorCalculator():
         eosce = EosceEmbedder()
         eosce.calculate(self.smiles_list, os.path.join(self.output_path, "descriptors", "eosce.h5"))
         
+    def _molmap(self):
+        with ErsiliaModel("bidd-molmap-desc") as mdl:
+            X1 = mdl.run(input=self.smiles_list, output="numpy")
+            X1 = X1.reshape(X1.shape[0], 37, 37, 1)
+
+        with ErsiliaModel("bidd-molmap-fps") as mdl:
+            X2 = mdl.run(input=self.smiles_list, output="numpy")
+            X2 = X2.reshape(X2.shape[0], 37, 36, 1)
+        
+        with open(os.path.join(self.output_path, "descriptors", "bidd_molmap_desc.np"), "wb") as f1:
+            np.save(f1, X1)
+
+        with open(os.path.join(self.output_path, "descriptors", "bidd_molmap_fps.np"), "wb") as f2:
+            np.save(f2, X2)
+    
     def _screen_smiles(self):
         with ErsiliaModel("eos7w6n") as em:
                 em.api(input=self.smiles_path, output=os.path.join(self.output_path, "descriptors", "eos7w6n_raw.csv"))
