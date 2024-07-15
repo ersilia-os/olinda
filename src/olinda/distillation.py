@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import shutil
+import glob
 from typing import Any, Optional
 
 from cbor2 import dump
@@ -28,7 +29,7 @@ def distill(
     working_dir: Path = get_workspace_path(),
     featurizer: Optional[Featurizer] = MorganFeaturizer(),
     clean: bool = True,
-    tuner: ModelTuner = KerasTuner([1, 3]),
+    tuner: ModelTuner = KerasTuner(),
     reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
     generic_output_dm: Optional[GenericOutputDM] = None,
@@ -55,7 +56,8 @@ def distill(
     # Convert model to a generic model
     model = GenericModel(model)
     if model.type == "zairachem":
-        precalc_smiles_df = pd.read_csv(os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "reference_library.csv"))
+        ref_library = Path(os.path.join(__file__, "..", ".." , ".." , "data" , "olinda_reference_library.csv")).resolve()
+        precalc_smiles_df = pd.read_csv(ref_library, header=None)
         reference_smiles_dm = ReferenceSmilesDM(num_data=len(precalc_smiles_df))
         reference_smiles_dm.prepare_data()
         reference_smiles_dm.setup("train")
@@ -247,15 +249,14 @@ def gen_model_output(
             stop_step = calculate_cbor_size(output_stream)
     except Exception:
         stop_step = 0
-        
+     
     with open(
         Path(working_dir) / (model.name) / "model_output.cbor", "wb"
     ) as output_stream:
     
         if model.type == "zairachem":
-            output = model(os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "reference_library.csv"))
-            
             train_counter = 0
+            
             training_output = model.get_training_preds()
             morganFeat = MorganFeaturizer()
             for i, row in training_output.iterrows():
@@ -264,7 +265,14 @@ def gen_model_output(
                     continue
                 dump((i, row["smiles"], fp[0].tolist(), [[row["pred"]]]), output_stream)
                 train_counter += 1
-        
+            
+            output = pd.DataFrame(columns = ["smiles", 'pred'])
+            for i, dir_item in enumerate(glob.glob(os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "*"))):
+                if os.path.isdir(dir_item):
+                    folder = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_descriptors_" + str(i*50) + "_" + str((i+1)*50) + "k")
+                    preds = model(os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", folder, "reference_library.csv"))
+                    output = pd.concat([output, preds])
+            
         ref_counter = 0        
         for i, batch in tqdm(
             enumerate(iter(featurized_smiles_dl)),
@@ -281,7 +289,8 @@ def gen_model_output(
                 for j, elem in enumerate(batch[1]):
                     if ref_counter + train_counter == target_count:
                         break
-                    dump((j, elem, batch[2][j], [[output.iloc[i*len(batch[0]) +j]["pred"]]]), output_stream)
+                    if not output[output["smiles"] == elem].empty:
+                        dump((j, elem, batch[2][j], [[output[output["smiles"] == elem]["pred"].iloc[0]]]), output_stream)
                     ref_counter += 1
                
             elif model.type == "ersilia":
@@ -296,7 +305,7 @@ def gen_model_output(
 
         # Remove zairachem folder
         shutil.rmtree(os.path.join(get_workspace_path(), "zairachem_output_dir"))
-        
+
     model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))
     return model_output_dm
 

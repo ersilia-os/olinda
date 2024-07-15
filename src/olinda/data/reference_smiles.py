@@ -2,6 +2,8 @@
 
 from pathlib import Path
 from typing import Any, Optional, Union
+import shutil
+import os
 
 from cbor2 import dump
 import pandas as pd
@@ -57,7 +59,11 @@ class ReferenceSmilesDM(pl.LightningDataModule):
             Path(self.workspace / "reference" / "reference_smiles.csv").is_file()
             is False
         ):
+            ### STORE LOCAL COPY OF FILTERED SMILES
+            ref_path = Path(os.path.join(__file__, "..", ".." , ".." , ".." , "data" , "olinda_reference_library.csv")).resolve()
+            shutil.copy(ref_path, Path(self.workspace / "reference" / "reference_smiles.csv"))
             # download reference files if not already present
+            """
             resp = requests.get(reference_download_url, stream=True)
             total = int(resp.headers.get("content-length", 0))
             with open(
@@ -72,6 +78,7 @@ class ReferenceSmilesDM(pl.LightningDataModule):
                 for data in resp.iter_content(chunk_size=1024):
                     size = file.write(data)
                     bar.update(size)
+            """
 
         # Check if processed data files already present
         if (
