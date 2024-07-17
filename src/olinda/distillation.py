@@ -62,7 +62,7 @@ def distill(
         reference_smiles_dm.prepare_data()
         reference_smiles_dm.setup("train")
         featurized_smiles_dm = gen_featurized_smiles(reference_smiles_dm, featurizer, working_dir, num_data=len(precalc_smiles_df), clean=clean)
-        featurized_smiles_dm.setup("train")
+        featurized_smiles_dm.setup("train")       
         student_training_dm = gen_model_output(featurized_smiles_dm, model, working_dir, clean)
     else:
         student_training_dm = generic_output_dm
@@ -222,6 +222,7 @@ def gen_model_output(
     Returns:
         pl.LightningDataModule: Dateset with featurized smiles.
     """
+    
     os.makedirs(Path(working_dir) / model.name, exist_ok=True)
     if clean is True:
         clean_workspace(Path(working_dir), model=model)
@@ -249,7 +250,7 @@ def gen_model_output(
             stop_step = calculate_cbor_size(output_stream)
     except Exception:
         stop_step = 0
-     
+    
     with open(
         Path(working_dir) / (model.name) / "model_output.cbor", "wb"
     ) as output_stream:
@@ -291,7 +292,7 @@ def gen_model_output(
                         break
                     if not output[output["smiles"] == elem].empty:
                         dump((j, elem, batch[2][j], [[output[output["smiles"] == elem]["pred"].iloc[0]]]), output_stream)
-                    ref_counter += 1
+                        ref_counter += 1
                
             elif model.type == "ersilia":
                 output = model(batch[1])

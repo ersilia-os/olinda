@@ -2,9 +2,20 @@ import os
 import csv
 import pandas as pd
 import numpy as np
-from zairachem.descriptors.eosce import EosceEmbedder
-from ersilia import ErsiliaModel
 import shutil
+
+from zairachem.descriptors.eosce import EosceEmbedder
+from zairachem.tools.melloddy.pipeline import MelloddyTunerPredictPipeline
+from zairachem.setup.standardize import Standardize
+from zairachem.setup.merge import DataMergerForPrediction
+from zairachem.setup.clean import SetupCleaner
+
+
+from zairachem.setup.check import SetupChecker
+
+from ersilia import ErsiliaModel
+
+DATA_SUBFOLDER = "data"
 
 class DescriptorCalculator():
     def __init__(self, smiles_csv, output_path):
@@ -12,14 +23,13 @@ class DescriptorCalculator():
         self.output_path = output_path
         os.makedirs(os.path.join(self.output_path, "descriptors"), exist_ok=True)
         os.makedirs(os.path.join(self.output_path, "data"), exist_ok=True)
-        self.data_path = os.path.join(self.output_path, "data", "data.csv
+        self.data_path = os.path.join(self.output_path, "data", "data.csv")
         
     def calculate(self):
         self._screen_smiles()
         
         self.df = pd.read_csv(os.path.join(self.output_path, "reference_library.csv"))
         self.smiles_list = self.df["SMILES"].to_list()
-        
         self._data_files()
         self._eosce()
         self._molmap()
@@ -35,17 +45,25 @@ class DescriptorCalculator():
         
         #cp grover reference to reference.h5
         shutil.copy(os.path.join(self.output_path, "descriptors", "grover-embedding", "raw.h5"), os.path.join(self.output_path, "descriptors", "reference.h5"))
-    
+        
     def _data_files(self):
         indx_list = [i for i, smi in enumerate(self.smiles_list)]
         cmpd_list = ["CID" + str(i).zfill(4) for i in indx_list]
         
         self.df.rename(columns = {"SMILES":"smiles"}, inplace=True)
         self.df["compound_id"] = cmpd_list
-        self.df.to_csv(self.data_path, index=False)
+        self.df.to_csv(os.path.join(self.output_path, "data", "compounds.csv"), index=False)
         
         mapping = pd.DataFrame(list(zip(indx_list, indx_list, cmpd_list)), columns=["orig_idx", "uniq_idx", "compound_id"])    
         mapping.to_csv(os.path.join(self.output_path, "data", "mapping.csv"))
+        
+        print("Mellody Tuner")
+        mp = MellodyPrecalculator(self.output_path)
+        mp.run()
+        
+        self.df = pd.read_csv(os.path.join(self.output_path, "data", "data.csv"))
+        self.df.rename(columns = {"smiles":"SMILES"}, inplace=True)
+        self.df[["SMILES"]].to_csv(os.path.join(self.output_path, "reference_library.csv"), index=False)
         
     def _eosce(self):
         print("Ersilia Compound Embeddings")
@@ -53,10 +71,12 @@ class DescriptorCalculator():
         eosce.calculate(self.smiles_list, os.path.join(self.output_path, "descriptors", "eosce.h5"))
         
     def _molmap(self):
+        print("bidd-molmap-desc")
         with ErsiliaModel("bidd-molmap-desc") as mdl:
             X1 = mdl.run(input=self.smiles_list, output="numpy")
             X1 = X1.reshape(X1.shape[0], 37, 37, 1)
-
+        
+        print("bidd-molmap-fps")
         with ErsiliaModel("bidd-molmap-fps") as mdl:
             X2 = mdl.run(input=self.smiles_list, output="numpy")
             X2 = X2.reshape(X2.shape[0], 37, 36, 1)
@@ -68,6 +88,7 @@ class DescriptorCalculator():
             np.save(f2, X2)
     
     def _screen_smiles(self):
+        print("Check SMILES through Grover")
         with ErsiliaModel("eos7w6n") as em:
                 em.api(input=self.smiles_path, output=os.path.join(self.output_path, "descriptors", "eos7w6n_raw.csv"))
         raw_smiles_path = os.path.join(self.output_path, "descriptors", "eos7w6n_raw.csv")
@@ -94,4 +115,28 @@ class DescriptorCalculator():
         with open(os.path.join(self.output_path, "removed_smiles.csv"), "w") as removed_smiles_file:
             for smi in smiles_removed:
                 removed_smiles_file.write(smi + "\n")
+
+class MellodyPrecalculator():
+    def __init__(self, output_dir):
+        self.output_dir = output_dir
+        
+    def _melloddy_tuner_run(self):
+        MelloddyTunerPredictPipeline(
+            os.path.join(self.output_dir, DATA_SUBFOLDER)
+            ).run(has_tasks=False)
+
+    def _standardize(self):
+        Standardize(os.path.join(self.output_dir, DATA_SUBFOLDER)).run()
+        
+    def _merge(self):
+        DataMergerForPrediction(os.path.join(self.output_dir, DATA_SUBFOLDER)).run(False)
+
+    def _clean(self):
+        SetupCleaner(os.path.join(self.output_dir, DATA_SUBFOLDER)).run()
+    
+    def run(self):
+        self._melloddy_tuner_run()
+        self._standardize()
+        self._merge()
+        self._clean()
         

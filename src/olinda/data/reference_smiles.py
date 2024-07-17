@@ -61,7 +61,8 @@ class ReferenceSmilesDM(pl.LightningDataModule):
         ):
             ### STORE LOCAL COPY OF FILTERED SMILES
             ref_path = Path(os.path.join(__file__, "..", ".." , ".." , ".." , "data" , "olinda_reference_library.csv")).resolve()
-            shutil.copy(ref_path, Path(self.workspace / "reference" / "reference_smiles.csv"))
+            df = pd.read_csv(ref_path)
+            df.to_csv(Path(self.workspace / "reference" / "reference_smiles.csv"), header=False, index=False)
             # download reference files if not already present
             """
             resp = requests.get(reference_download_url, stream=True)

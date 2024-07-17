@@ -29,6 +29,7 @@ class ZairaChemPredictor(object):
         self.output_dir = output_dir
         self.clean = clean
         self.flush = flush
+        self.precalc_path = os.path.dirname(self.input_file)
     
     def predict(self):
         print("ZairaChem: Setup")
@@ -39,7 +40,7 @@ class ZairaChemPredictor(object):
 	        model_dir=self.model_dir,
 	        time_budget=60, 
             )
-            self.s.setup() ### Reduce mellody tuner time?
+            self.data_files(self.s)            
         
         print("ZairaChem: Describe")
         with HiddenPrints():
@@ -68,6 +69,17 @@ class ZairaChemPredictor(object):
         
         return self.clean_output(self.output_dir)
  
+    def data_files(self, s):
+        s._initialize()
+        s._normalize_input()
+        
+        #update mapping file
+        shutil.copy(os.path.join(self.precalc_path, "data", "mapping.csv"), os.path.join(self.output_dir, "data"))
+        shutil.copy(os.path.join(self.precalc_path, "data", "data.csv"), os.path.join(self.output_dir, "data"))
+        shutil.copy(os.path.join(self.precalc_path, "data", "data_schema.json"), os.path.join(self.output_dir, "data"))
+        
+        s._check()
+ 
     def run_descriptors(self, d: Describer) -> None:   
         d.reset_time()
         self.precalc_descriptors()
@@ -76,9 +88,7 @@ class ZairaChemPredictor(object):
         d.update_elapsed_time()
         
     def precalc_descriptors(self) -> None:
-        ### WIP Copy to generic home directory during install?
-        precalc_path = os.path.dirname(self.input_file)
-        precalc_descs = [os.path.basename(desc_path) for desc_path in list(glob.glob(os.path.join(precalc_path, "descriptors", "*")))]
+        precalc_descs = [os.path.basename(desc_path) for desc_path in list(glob.glob(os.path.join(self.precalc_path, "descriptors", "*")))]
         done = []
         
         #raw descriptors
@@ -86,7 +96,7 @@ class ZairaChemPredictor(object):
             parameters = json.load(param_file)
             for desc in parameters["ersilia_hub"]:
                 if desc in precalc_descs:
-                    shutil.copytree(os.path.join(precalc_path, "descriptors", desc), os.path.join(self.output_dir, "descriptors", desc))
+                    shutil.copytree(os.path.join(self.precalc_path, "descriptors", desc), os.path.join(self.output_dir, "descriptors", desc))
                     done.append(desc)
                 else:
                     #make folder and copy output h5
@@ -98,11 +108,7 @@ class ZairaChemPredictor(object):
         
         #copy remaining manifolds, ersilia compound embeddings and reference embedding
         for f in ["reference.h5", "eosce.h5", "bidd_molmap_desc.np", "bidd_molmap_fps.np"]:
-            shutil.copy(os.path.join(precalc_path, "descriptors", f), os.path.join(self.output_dir, "descriptors"))
-        
-        #update mapping file
-        shutil.copy(os.path.join(precalc_path, "data", "mapping.csv"), os.path.join(self.output_dir, "data"))
-        shutil.copy(os.path.join(precalc_path, "data", "data.csv"), os.path.join(self.output_dir, "data"))
+            shutil.copy(os.path.join(self.precalc_path, "descriptors", f), os.path.join(self.output_dir, "descriptors"))
         
         #update json descriptor file
         with open(os.path.join(self.output_dir, "descriptors", "done_eos.json"), "w") as done_file:
