@@ -36,7 +36,7 @@ class DescriptorCalculator():
         self._molmap()
         
         # rest of raw descriptors ersilia api
-        base_desc = ["cc-signaturizer", "molfeat-chemgpt", "mordred", "rdkit-fingerprint"]
+        base_desc = ["cc-signaturizer", "grover-embedding", "molfeat-chemgpt", "mordred", "rdkit-fingerprint"]
         for desc in base_desc:
             print(desc)
             path = os.path.join(self.output_path, "descriptors", desc)
@@ -93,7 +93,7 @@ class DescriptorCalculator():
     
     def _screen_smiles(self):
         print("Check SMILES with Grover")
-        raw_smiles_path = os.path.join(self.output_path, "descriptors", "eos7w6n_raw.h5")
+        raw_smiles_path = os.path.join(self.output_path, "descriptors", "eos7w6n_initial.h5")
         with ErsiliaModel("eos7w6n") as em:
                 em.api(input=self.data_path, output=raw_smiles_path)
         
@@ -104,14 +104,6 @@ class DescriptorCalculator():
             values = data_file["Values"][:]
         
         drop_indxs = [i for i, row in enumerate(np.isnan(values)) if True in row]    
-        grover_path = os.path.join(self.output_path, "descriptors", "grover-embedding")
-        os.makedirs(grover_path)
-                
-        with h5py.File(os.path.join(grover_path, "raw.h5"), "w") as f:
-            f.create_dataset("Keys", data=np.delete(keys, drop_indxs))
-            f.create_dataset("Features", data=np.delete(features, drop_indxs))
-            f.create_dataset("Inputs", data=np.delete(inputs, drop_indxs))
-            f.create_dataset("Values", data=np.delete(values, drop_indxs))
         
         # filter out problematic smiles from data files
         smiles_strings = [smi.decode("utf-8") for smi in np.delete(inputs, drop_indxs)]    

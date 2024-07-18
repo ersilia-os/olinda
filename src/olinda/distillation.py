@@ -52,7 +52,10 @@ def distill(
     Returns:
         pl.LightningModule: Student Model.
     """
-
+    
+    if clean is True:
+        clean_workspace(Path(working_dir), reference=True)
+    
     # Convert model to a generic model
     model = GenericModel(model)
     if model.type == "zairachem":
@@ -339,7 +342,7 @@ def convert_to_onnx(
 
 
 def clean_workspace(
-    working_dir: Path, model: GenericModel = None, featurizer: Featurizer = None
+    working_dir: Path, model: GenericModel = None, featurizer: Featurizer = None, reference: bool = False
 ) -> None:
     """Clean workspace.
 
@@ -360,7 +363,7 @@ def clean_workspace(
         os.remove(Path(working_dir) / "reference" / f"featurized_smiles_{type(featurizer).__name__.lower()}.cbor"
         )
     
-    if os.path.exists(curr_ref_smiles_path):
+    if reference and os.path.exists(curr_ref_smiles_path):
         curr_df = pd.read_csv(curr_ref_smiles_path, header=None, names=["SMILES"])
         orig_df = pd.read_csv(orig_ref_smiles_path)
         if not curr_df.equals(orig_df):
