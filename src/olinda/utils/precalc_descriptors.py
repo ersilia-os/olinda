@@ -3,13 +3,13 @@ import csv
 import pandas as pd
 import numpy as np
 import shutil
+import h5py
 
 from zairachem.descriptors.eosce import EosceEmbedder
 from zairachem.tools.melloddy.pipeline import MelloddyTunerPredictPipeline
 from zairachem.setup.standardize import Standardize
 from zairachem.setup.merge import DataMergerForPrediction
 from zairachem.setup.clean import SetupCleaner
-
 
 from zairachem.setup.check import SetupChecker
 
@@ -26,16 +26,17 @@ class DescriptorCalculator():
         self.data_path = os.path.join(self.output_path, "data", "data.csv")
         
     def calculate(self):
-        self._screen_smiles()
+        # prepare input files and filter out problem compounds from grover calculations
+        self._data_files()
         
         self.df = pd.read_csv(os.path.join(self.output_path, "reference_library.csv"))
         self.smiles_list = self.df["SMILES"].to_list()
-        self._data_files()
+        
         self._eosce()
         self._molmap()
         
-        #raw descriptors ersilia api
-        base_desc = ["cc-signaturizer", "grover-embedding", "molfeat-chemgpt", "mordred", "rdkit-fingerprint"]
+        # rest of raw descriptors ersilia api
+        base_desc = ["cc-signaturizer", "molfeat-chemgpt", "mordred", "rdkit-fingerprint"]
         for desc in base_desc:
             print(desc)
             path = os.path.join(self.output_path, "descriptors", desc)
@@ -47,12 +48,13 @@ class DescriptorCalculator():
         shutil.copy(os.path.join(self.output_path, "descriptors", "grover-embedding", "raw.h5"), os.path.join(self.output_path, "descriptors", "reference.h5"))
         
     def _data_files(self):
-        indx_list = [i for i, smi in enumerate(self.smiles_list)]
+        raw_df = pd.read_csv(self.smiles_path)
+        indx_list = [i for i, smi in enumerate(raw_df["SMILES"].to_list())]
         cmpd_list = ["CID" + str(i).zfill(4) for i in indx_list]
         
-        self.df.rename(columns = {"SMILES":"smiles"}, inplace=True)
-        self.df["compound_id"] = cmpd_list
-        self.df.to_csv(os.path.join(self.output_path, "data", "compounds.csv"), index=False)
+        raw_df.rename(columns = {"SMILES":"smiles"}, inplace=True)
+        raw_df["compound_id"] = cmpd_list
+        raw_df.to_csv(os.path.join(self.output_path, "data", "compounds.csv"), index=False)
         
         mapping = pd.DataFrame(list(zip(indx_list, indx_list, cmpd_list)), columns=["orig_idx", "uniq_idx", "compound_id"])    
         mapping.to_csv(os.path.join(self.output_path, "data", "mapping.csv"))
@@ -60,6 +62,8 @@ class DescriptorCalculator():
         print("Mellody Tuner")
         mp = MellodyPrecalculator(self.output_path)
         mp.run()
+        
+        self._screen_smiles()
         
         self.df = pd.read_csv(os.path.join(self.output_path, "data", "data.csv"))
         self.df.rename(columns = {"smiles":"SMILES"}, inplace=True)
@@ -88,33 +92,39 @@ class DescriptorCalculator():
             np.save(f2, X2)
     
     def _screen_smiles(self):
-        print("Check SMILES through Grover")
+        print("Check SMILES with Grover")
+        raw_smiles_path = os.path.join(self.output_path, "descriptors", "eos7w6n_raw.h5")
         with ErsiliaModel("eos7w6n") as em:
-                em.api(input=self.smiles_path, output=os.path.join(self.output_path, "descriptors", "eos7w6n_raw.csv"))
-        raw_smiles_path = os.path.join(self.output_path, "descriptors", "eos7w6n_raw.csv")
-        smiles_removed = []
-        indxs_removed = []
+                em.api(input=self.data_path, output=raw_smiles_path)
         
-        with open(raw_smiles_path, "r") as csv_file:
-            datareader = csv.reader(csv_file)
-            next(datareader)
-            for i, row in enumerate(datareader):
-                if row[2] == "":
-                    print("Bad molecule found: ", row[1])
-                    smiles_removed.append(row[1])
-                    indxs_removed.append(i)
+        with h5py.File(raw_smiles_path, "r") as data_file:
+            keys = data_file["Keys"][:]
+            inputs = data_file["Inputs"][:]
+            features = data_file["Features"][:]
+            values = data_file["Values"][:]
         
-            df = pd.read_csv(raw_smiles_path)
-            df.drop(df.index[indxs_removed], axis=0, inplace=True)
-            df = df[["input"]]
-            df.rename(columns = {"input":"SMILES"}, inplace=True)
-            df.to_csv(os.path.join(self.output_path, "reference_library.csv"), index=False)
+        drop_indxs = [i for i, row in enumerate(np.isnan(values)) if True in row]    
+        grover_path = os.path.join(self.output_path, "descriptors", "grover-embedding")
+        os.makedirs(grover_path)
+                
+        with h5py.File(os.path.join(grover_path, "raw.h5"), "w") as f:
+            f.create_dataset("Keys", data=np.delete(keys, drop_indxs))
+            f.create_dataset("Features", data=np.delete(features, drop_indxs))
+            f.create_dataset("Inputs", data=np.delete(inputs, drop_indxs))
+            f.create_dataset("Values", data=np.delete(values, drop_indxs))
+        
+        # filter out problematic smiles from data files
+        smiles_strings = [smi.decode("utf-8") for smi in np.delete(inputs, drop_indxs)]    
+        indx_list = [i for i, smi in enumerate(smiles_strings)]
+        cmpd_list = ["CID" + str(i).zfill(4) for i in indx_list]
+        
+        df = pd.DataFrame(list(zip(cmpd_list, smiles_strings)), columns=["compound_id", "smiles"])
+        df.to_csv(self.data_path, index=False)
+        
+        mapping = pd.DataFrame(list(zip(indx_list, indx_list, cmpd_list)), columns=["orig_idx", "uniq_idx", "compound_id"])    
+        mapping.to_csv(os.path.join(self.output_path, "data", "mapping.csv"))
         
         os.remove(raw_smiles_path)
-        
-        with open(os.path.join(self.output_path, "removed_smiles.csv"), "w") as removed_smiles_file:
-            for smi in smiles_removed:
-                removed_smiles_file.write(smi + "\n")
 
 class MellodyPrecalculator():
     def __init__(self, output_dir):
