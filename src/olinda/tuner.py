@@ -56,12 +56,13 @@ class AutoKerasTuner(ModelTuner):
             project_name=f"autokeras-{random()*1000}",
         )
         tensor_wrapper = TensorflowDatasetWrapper(
-            datamodule, "train", only_X=True, only_Y=True
+            datamodule, "train", only_X=True, only_Y=True, weights=True
         )
         self.dataset = tf.data.Dataset.from_generator(
             generator=tensor_wrapper.__iter__,
             output_signature=(
                 tf.TensorSpec(shape=(1024,), dtype=tf.float32),
+                tf.TensorSpec(shape=(1,), dtype=tf.float32),
                 tf.TensorSpec(shape=(1,), dtype=tf.float32),
             ),
         )
@@ -73,7 +74,7 @@ class KerasTuner(ModelTuner):
     """Keras tuner based model tuner."""
 
     def __init__(
-        self: "KerasTuner", layers_range: List = [1, 6], max_epochs: int = 3
+        self: "KerasTuner", layers_range: List = [1, 3], max_epochs: int = 50
     ) -> None:
         """Initialize model tuner.
 
@@ -94,7 +95,7 @@ class KerasTuner(ModelTuner):
             GenericModel : Student model as wrapped in a generic model class.
         """
         train_tensor_wrapper = TensorflowDatasetWrapper(
-            datamodule, "train", only_X=True, only_Y=True
+            datamodule, "train", only_X=True, only_Y=True, weights=True
         )
         train_dataset = tf.data.Dataset.from_generator(
             generator=train_tensor_wrapper.__iter__,
@@ -103,7 +104,7 @@ class KerasTuner(ModelTuner):
         self.output_shape = train_tensor_wrapper.output_signature()[1].shape[0] #Length of output tensor
         
         val_tensor_wrapper = TensorflowDatasetWrapper(
-            datamodule, "val", only_X=True, only_Y=True
+            datamodule, "val", only_X=True, only_Y=True, weights=True
         )
         val_dataset = tf.data.Dataset.from_generator(
             generator=val_tensor_wrapper.__iter__,
@@ -126,7 +127,7 @@ class KerasTuner(ModelTuner):
                 units=hp_units, activation="relu", input_shape=(self.input_shape,)
             )
         )
-        for i in range(hp.Int("layers", self.layers_range[0], self.layers_range[0])):
+        for i in range(hp.Int("layers", self.layers_range[0], self.layers_range[1])):
             model.add(
                 keras.layers.Dense(
                     units=hp.Int(
@@ -137,13 +138,12 @@ class KerasTuner(ModelTuner):
             )
         model.add(keras.layers.Dense(self.output_shape))
         # Tune the learning rate for the optimizer
-        # Choose an optimal value from 0.01, 0.001, or 0.0001
         hp_learning_rate = hp.Choice("learning_rate", values=[1e-2, 1e-3, 1e-4])
 
         model.compile(
             optimizer=keras.optimizers.Adam(learning_rate=hp_learning_rate),
             loss="mean_squared_error",
-            metrics=None,
+            weighted_metrics=[],
         )
 
         return model

@@ -11,20 +11,23 @@ from olinda.utils import calculate_cbor_size
 
 
 class Segmenter:
-    def __init__(self, only_X: bool, only_Y: bool) -> None:
+    def __init__(self, only_X: bool, only_Y: bool, weights: bool) -> None:
         self.only_X = only_X
         self.only_Y = only_Y
+        self.weights = weights
 
     def segment_dataset(self, iterator: Any) -> Any:
         """Segment dataset."""
         for sample in iterator:
-            _, _, featurized_smile, output = sample
+            _, _, featurized_smile, output, weight = sample
             if self.only_X and not self.only_Y:
                 yield featurized_smile
             elif self.only_Y and not self.only_X:
                 yield output
-            elif self.only_X and self.only_Y:
+            elif self.only_X and self.only_Y and not self.weights:
                 yield featurized_smile, output
+            elif self.only_X and self.only_Y and self.weights:
+                yield featurized_smile, output, weight
             else:
                 yield sample
 
@@ -61,6 +64,7 @@ class GenericOutputDM(pl.LightningDataModule):
         stage: Optional[str],
         only_X: bool = False,
         only_Y: bool = False,
+        weights: bool = True,
         batched: bool = True,
     ) -> None:
         """Setup dataloaders.
@@ -91,7 +95,7 @@ class GenericOutputDM(pl.LightningDataModule):
                 str((Path(self.model_dir) / "model_output.cbor").absolute())
             ),
             wds.cbors2_to_samples(),
-            Segmenter(only_X, only_Y).segment_dataset,
+            Segmenter(only_X, only_Y, weights).segment_dataset,
             wds.shuffle(shuffle),
         )
         if batched:

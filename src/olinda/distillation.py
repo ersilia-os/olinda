@@ -58,12 +58,13 @@ def distill(
     if model.type == "zairachem":
         ref_library = Path(os.path.join(__file__, "..", ".." , ".." , "data" , "olinda_reference_library.csv")).resolve()
         precalc_smiles_df = pd.read_csv(ref_library, header=None)
-        reference_smiles_dm = ReferenceSmilesDM(num_data=len(precalc_smiles_df))
+        ref_size = len(precalc_smiles_df)
+        reference_smiles_dm = ReferenceSmilesDM(num_data=ref_size)
         reference_smiles_dm.prepare_data()
         reference_smiles_dm.setup("train")
-        featurized_smiles_dm = gen_featurized_smiles(reference_smiles_dm, featurizer, working_dir, num_data=len(precalc_smiles_df), clean=clean)
+        featurized_smiles_dm = gen_featurized_smiles(reference_smiles_dm, featurizer, working_dir, num_data=ref_size, clean=clean)
         featurized_smiles_dm.setup("train")       
-        student_training_dm = gen_model_output(featurized_smiles_dm, model, working_dir, clean)
+        student_training_dm = gen_model_output(featurized_smiles_dm, model, working_dir, ref_size, clean)
     else:
         student_training_dm = generic_output_dm
         
@@ -209,6 +210,7 @@ def gen_model_output(
     featurized_smiles_dm: pl.LightningDataModule,
     model: GenericModel,
     working_dir: Path,
+    ref_size: int,
     clean: bool = False,
 ) -> pl.LightningDataModule:
     """Generate featurized smiles representation dataset.
@@ -259,12 +261,15 @@ def gen_model_output(
             train_counter = 0
             
             training_output = model.get_training_preds()
+            # inverse of proportion of training compounds
+            train_weight = round((training_output.shape[0] + ref_size) / len(training_output), 2)
+            
             morganFeat = MorganFeaturizer()
             for i, row in training_output.iterrows():
                 fp = morganFeat.featurize([row["smiles"]])
                 if fp is None:
                     continue
-                dump((i, row["smiles"], fp[0].tolist(), [[row["pred"]]]), output_stream)
+                dump((i, row["smiles"], fp[0].tolist(), [[row["pred"]]], [train_weight]), output_stream)
                 train_counter += 1
             
             output = pd.DataFrame(columns = ["smiles", 'pred'])
@@ -284,16 +289,17 @@ def gen_model_output(
                 continue
 
             if model.type == "zairachem":
+                # final dataset a multiple of 32
                 combined_count = train_counter + featurized_smiles_dl.length*len(batch[0])
-                target_count = combined_count // len(batch[0]) * len(batch[0])
+                target_count = combined_count // len(batch[0]) * len(batch[0]) 
                 
                 for j, elem in enumerate(batch[1]):
                     if ref_counter + train_counter == target_count:
                         break
                     if not output[output["smiles"] == elem].empty:
-                        dump((j, elem, batch[2][j], [[output[output["smiles"] == elem]["pred"].iloc[0]]]), output_stream)
+                        dump((j, elem, batch[2][j], [[output[output["smiles"] == elem]["pred"].iloc[0]]], [1.0]), output_stream)
                         ref_counter += 1
-               
+                
             elif model.type == "ersilia":
                 output = model(batch[1])
                 for j, elem in enumerate(batch[1]):
@@ -342,15 +348,20 @@ def clean_workspace(
         model (GenericModel): Wrapped Teacher model.
         featurizer (Featurizer): Featurizer to use.
     """
-
+    curr_ref_smiles_path = Path(working_dir) / "reference" / "reference_smiles.csv"
+    orig_ref_smiles_path = Path(os.path.join(__file__, "..", ".." , ".." , "data" , "olinda_reference_library.csv")).resolve()
+    
     if model:
         shutil.rmtree(Path(working_dir) / (model.name), ignore_errors=True)
         os.makedirs(Path(working_dir) / (model.name), exist_ok=True)
 
     if featurizer and os.path.exists(Path(working_dir) / "reference" / "reference_smiles_dl.joblib"):
         os.remove(Path(working_dir) / "reference" / "reference_smiles_dl.joblib")
-        os.remove(
-            Path(working_dir)
-            / "reference"
-            / f"featurized_smiles_{type(featurizer).__name__.lower()}.cbor"
+        os.remove(Path(working_dir) / "reference" / f"featurized_smiles_{type(featurizer).__name__.lower()}.cbor"
         )
+    
+    if os.path.exists(curr_ref_smiles_path):
+        curr_df = pd.read_csv(curr_ref_smiles_path, header=None, names=["SMILES"])
+        orig_df = pd.read_csv(orig_ref_smiles_path)
+        if not curr_df.equals(orig_df):
+            shutil.rmtree(Path(working_dir) / "reference")
