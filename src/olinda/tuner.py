@@ -4,6 +4,9 @@ from abc import ABC, abstractmethod
 
 from random import random
 from typing import Any, List
+import shutil
+import os
+import copy
 
 import autokeras as ak
 import kerastuner as kt
@@ -13,6 +16,15 @@ from tensorflow import keras
 from olinda.data import GenericOutputDM, TensorflowDatasetWrapper
 from olinda.generic_model import GenericModel
 
+# overwrite checkpoint functionality
+class HyperbandTuner(kt.Hyperband):
+    def __init__(self, hypermodel, **kwargs):
+        super().__init__(hypermodel, **kwargs)
+    
+    def run_trial(self, trial, *args, **kwargs):
+        hp = trial.hyperparameters
+        model = self.hypermodel.build(hp)
+        return self.hypermodel.fit(hp, model, *args, **kwargs)
 
 class ModelTuner(ABC):
     """Automatic model tuner."""
@@ -74,7 +86,7 @@ class KerasTuner(ModelTuner):
     """Keras tuner based model tuner."""
 
     def __init__(
-        self: "KerasTuner", layers_range: List = [1, 3], max_epochs: int = 50
+        self: "KerasTuner", layers_range: List = [2, 4], max_epochs: int = 15
     ) -> None:
         """Initialize model tuner.
 
@@ -94,33 +106,40 @@ class KerasTuner(ModelTuner):
         Returns:
             GenericModel : Student model as wrapped in a generic model class.
         """
-        train_tensor_wrapper = TensorflowDatasetWrapper(
-            datamodule, "train", only_X=True, only_Y=True, weights=True
-        )
-        train_dataset = tf.data.Dataset.from_generator(
-            generator=train_tensor_wrapper.__iter__,
-            output_signature=train_tensor_wrapper.output_signature(),
-        )
-        self.output_shape = train_tensor_wrapper.output_signature()[1].shape[0] #Length of output tensor
         
-        val_tensor_wrapper = TensorflowDatasetWrapper(
-            datamodule, "val", only_X=True, only_Y=True, weights=True
-        )
-        val_dataset = tf.data.Dataset.from_generator(
-            generator=val_tensor_wrapper.__iter__,
-            output_signature=val_tensor_wrapper.output_signature(),
-        )
-
-        train_dataset = train_dataset.batch(32)
-        val_dataset = val_dataset.batch(32)
-        self._search(train_dataset, val_dataset)
+        self.datamodule = datamodule
+        self.search_datamodule = copy.deepcopy(self.datamodule)
+        train_search_dataset = self._tensor_wrapper(self.search_datamodule, "train", True)
+        val_search_dataset = self._tensor_wrapper(self.search_datamodule, "val", True)
+        
+        train_dataset = self._tensor_wrapper(self.datamodule, "train")
+        val_dataset = self._tensor_wrapper(self.datamodule,"val")
+        tensor_wrapper = TensorflowDatasetWrapper(self.datamodule, "train", only_X=True, only_Y=True, weights=True)
+        self.output_shape = tensor_wrapper.output_signature()[1].shape[0] #Length of output tensor
+               
+        self._search(train_search_dataset, val_search_dataset)
         self._get_best_epoch(train_dataset, val_dataset)
         self._final_train(train_dataset, val_dataset)
         return GenericModel(self.hypermodel)
 
+    def _tensor_wrapper(self: "KerasTuner", datamodule: GenericOutputDM, stage: str, smaller_set: bool = False):
+        stages_allowed = ["train", "val"]
+        assert stage in stages_allowed
+        
+        tensor_wrapper = TensorflowDatasetWrapper(
+            datamodule, stage, only_X=True, only_Y=True, weights=True, smaller_set=smaller_set
+        )
+        
+        dataset = tf.data.Dataset.from_generator(
+            generator=tensor_wrapper.__iter__,
+            output_signature=tensor_wrapper.output_signature(),
+        )
+        
+        return dataset.batch(32)
+
     def _model_builder(self: "KerasTuner", hp: Any):
         model = keras.Sequential()
-        hp_units = hp.Int("units", min_value=32, max_value=512, step=32)
+        hp_units = hp.Int("first_layer_units", min_value=32, max_value=512, step=32)
         model.add(keras.layers.Flatten())
         model.add(
             keras.layers.Dense(
@@ -131,7 +150,7 @@ class KerasTuner(ModelTuner):
             model.add(
                 keras.layers.Dense(
                     units=hp.Int(
-                        "units_" + str(i), min_value=32, max_value=512, step=32
+                        "hidden_units_" + str(i), min_value=32, max_value=512, step=32
                     ),
                     activation="relu",
                 )
@@ -152,22 +171,27 @@ class KerasTuner(ModelTuner):
         self: "KerasTuner", train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset
     ) -> None:
         print("Hyperparameter Search")
-        self.tuner = kt.Hyperband(
+        
+        if os.path.exists("trials"):
+            shutil.rmtree("trials")
+        
+        self.tuner = HyperbandTuner(
             self._model_builder,
             objective="val_loss",
-            max_epochs=self.max_epochs,
+            max_epochs=3,
             factor=3,
             project_name="trials",
         )
-        stop_early = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=5)
+        stop_early = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=15)
         self.tuner.search(
             train_dataset,
-            epochs=self.max_epochs,
+            epochs=3,
             validation_data=val_dataset,
             callbacks=[stop_early],
             verbose=True,
         )
         self.best_hps = self.tuner.get_best_hyperparameters(num_trials=1)[0]
+        shutil.rmtree("trials")
 
     def _get_best_epoch(
         self: "KerasTuner", train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset
@@ -182,6 +206,7 @@ class KerasTuner(ModelTuner):
         val_per_epoch = history.history["val_loss"]
         self.best_epoch = val_per_epoch.index(min(val_per_epoch)) + 1
         print("Best epoch: %d" % (self.best_epoch,))
+        self.hypermodel = model
 
     def _final_train(
         self: "KerasTuner", train_dataset: tf.data.Dataset, val_dataset: tf.data.Dataset

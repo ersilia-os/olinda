@@ -16,12 +16,14 @@ class TensorflowDatasetWrapper:
         only_X: bool = True,
         only_Y: bool = True,
         weights: bool = True,
+        smaller_set: bool = False,
     ):
         self.only_X = only_X
         self.only_Y = only_Y
         self.weights = weights
+        self.smaller_set = smaller_set
 
-        datamodule.setup(stage, only_X, only_Y, weights=True, batched=False)
+        datamodule.setup(stage, only_X, only_Y, weights=True, batched=False, smaller_set=self.smaller_set)
         self.dataset = datamodule.dataset
         sample = next(iter(self.dataset))
         #sample = np.array(sample)
