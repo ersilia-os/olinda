@@ -125,7 +125,7 @@ class ZairaChemPredictor(object):
                 clf_col = c
         
         results.rename({clf_col: 'pred'}, axis=1, inplace=True)
-        return results[["smiles", 'pred']]
+        return results[["smiles", 'pred']].dropna()
         
 @contextmanager
 def HiddenPrints():

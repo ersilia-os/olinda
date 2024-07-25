@@ -42,7 +42,7 @@ class MorganFeaturizer(Featurizer):
         Returns:
             Any: featurized outputs
         """
-        mols = [Chem.MolFromSmiles(smi) for smi in batch]
+        mols = [Chem.MolFromSmiles(smi) for smi in batch if smi is not np.nan]
         ecfps = self.ecfp_counts(mols)
         return ecfps
     
