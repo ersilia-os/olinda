@@ -86,7 +86,7 @@ class KerasTuner(ModelTuner):
     """Keras tuner based model tuner."""
 
     def __init__(
-        self: "KerasTuner", layers_range: List = [2, 4], max_epochs: int = 15
+        self: "KerasTuner", layers_range: List = [2, 4], max_epochs: int = 30
     ) -> None:
         """Initialize model tuner.
 
@@ -182,7 +182,7 @@ class KerasTuner(ModelTuner):
             factor=3,
             project_name="trials",
         )
-        stop_early = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=15)
+        stop_early = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=10)
         self.tuner.search(
             train_dataset,
             epochs=3,

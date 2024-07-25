@@ -107,7 +107,7 @@ class ZairaChemPredictor(object):
                         done.append(desc)
         
         #copy remaining manifolds, ersilia compound embeddings and reference embedding
-        for f in ["reference.h5", "eosce.h5", "bidd_molmap_desc.np", "bidd_molmap_fps.np"]:
+        for f in ["eosce.h5", "bidd_molmap_desc.np", "bidd_molmap_fps.np"]:
             shutil.copy(os.path.join(self.precalc_path, "descriptors", f), os.path.join(self.output_dir, "descriptors"))
         
         #update json descriptor file

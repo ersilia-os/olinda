@@ -6,6 +6,7 @@ import shutil
 import h5py
 
 from zairachem.descriptors.eosce import EosceEmbedder
+from zairachem.baseline import Embedder
 from zairachem.tools.melloddy.pipeline import MelloddyTunerPredictPipeline
 from zairachem.setup.standardize import Standardize
 from zairachem.setup.merge import DataMergerForPrediction
@@ -32,20 +33,18 @@ class DescriptorCalculator():
         self.df = pd.read_csv(os.path.join(self.output_path, "reference_library.csv"))
         self.smiles_list = self.df["SMILES"].to_list()
         
+        self._grover()
         self._eosce()
         self._molmap()
         
         # rest of raw descriptors ersilia api
-        base_desc = ["cc-signaturizer", "grover-embedding", "molfeat-chemgpt", "mordred", "rdkit-fingerprint"]
+        base_desc = ["cc-signaturizer", "molfeat-chemgpt", "mordred", "rdkit-fingerprint"]
         for desc in base_desc:
             print(desc)
             path = os.path.join(self.output_path, "descriptors", desc)
-            os.makedirs(path)
+            os.makedirs(path, exist_ok=True)
             with ErsiliaModel(desc) as em:
                 em.api(input=self.data_path, output=os.path.join(path, "raw.h5"))
-        
-        #cp grover reference to reference.h5
-        shutil.copy(os.path.join(self.output_path, "descriptors", "grover-embedding", "raw.h5"), os.path.join(self.output_path, "descriptors", "reference.h5"))
         
     def _data_files(self):
         raw_df = pd.read_csv(self.smiles_path)
@@ -90,6 +89,13 @@ class DescriptorCalculator():
 
         with open(os.path.join(self.output_path, "descriptors", "bidd_molmap_fps.np"), "wb") as f2:
             np.save(f2, X2)
+    
+    def _grover(self):
+        print("grover-embedding")
+        grover_path = os.path.join(self.output_path, "descriptors", "grover-embedding", "raw.h5")
+        os.makedirs(grover_path, exist_ok=True)
+        ref = Embedder()
+        ref.calculate(self.smiles_list, grover_path)
     
     def _screen_smiles(self):
         print("Check SMILES with Grover")
