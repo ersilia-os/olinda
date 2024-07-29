@@ -6,7 +6,7 @@ import shutil
 import h5py
 
 from zairachem.descriptors.eosce import EosceEmbedder
-from zairachem.baseline import Embedder
+from zairachem.descriptors.baseline import Embedder
 from zairachem.tools.melloddy.pipeline import MelloddyTunerPredictPipeline
 from zairachem.setup.standardize import Standardize
 from zairachem.setup.merge import DataMergerForPrediction

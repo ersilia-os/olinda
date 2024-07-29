@@ -109,7 +109,7 @@ class GenericOutputDM(pl.LightningDataModule):
                 self.val_dataset_size = dataset_size // 10
             
             if smaller_set:
-                self.val_dataset_size = self.val_dataset_size // 10
+                self.val_dataset_size = self.val_dataset_size // 2
                 
             self.dataset = wds.DataPipeline(
             wds.SimpleShardList(

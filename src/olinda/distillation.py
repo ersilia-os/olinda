@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 import shutil
-import glob
+import math
 from typing import Any, Optional
 
 from cbor2 import dump
@@ -34,7 +34,7 @@ def distill(
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
     generic_output_dm: Optional[GenericOutputDM] = None,
     test: bool = False,
-    num_data: int = 1999380,
+    num_data: int = 100000,
 ) -> pl.LightningModule:
     """Distill models.
 
@@ -61,13 +61,19 @@ def distill(
     if model.type == "zairachem":
         ref_library = Path(os.path.join(__file__, "..", ".." , ".." , "data" , "olinda_reference_library.csv")).resolve()
         precalc_smiles_df = pd.read_csv(ref_library, header=None)
-        ref_size = len(precalc_smiles_df)
-        reference_smiles_dm = ReferenceSmilesDM(num_data=ref_size)
+        ref_data = len(precalc_smiles_df)
+        reference_smiles_dm = ReferenceSmilesDM(num_data=num_data)
         reference_smiles_dm.prepare_data()
         reference_smiles_dm.setup("train")
-        featurized_smiles_dm = gen_featurized_smiles(reference_smiles_dm, featurizer, working_dir, num_data=ref_size, clean=clean)
+        
+        if num_data > ref_data:
+            num_data = ref_data  
+        zairachem_folds = math.ceil(num_data / 50000)   
+        fetch_descriptors(zairachem_folds)
+        
+        featurized_smiles_dm = gen_featurized_smiles(reference_smiles_dm, featurizer, working_dir, num_data=num_data, clean=clean)
         featurized_smiles_dm.setup("train")       
-        student_training_dm = gen_model_output(featurized_smiles_dm, model, working_dir, ref_size, clean)
+        student_training_dm = gen_model_output(featurized_smiles_dm, model, working_dir, num_data, clean)
     else:
         student_training_dm = generic_output_dm
         
@@ -98,6 +104,22 @@ def distill(
 
     return model_onnx
 
+def fetch_descriptors(
+    num_folds: int
+    ):
+    """Check if required precalculated descriptor folds are on disk and fetch missing folds 
+    
+    Args:
+        num_folds (int): Number of folds of 50k precalculated descriptors
+    """
+    
+    path = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors")
+    os.makedirs(path, exist_ok=True)
+    for i in range(num_folds):
+        dest = os.path.join(path, "olinda_reference_descriptors_" + str(i*50) + "_" + str((i+1)*50) + "k")
+        if os.path.exists(dest):
+            pass
+            # download zip from S3, unzip, remove zip
 
 def gen_training_dataset(
     model: pl.LightningModule,
@@ -200,6 +222,8 @@ def gen_featurized_smiles(
                 continue   
             if i >= reference_smiles_dl.length:
                 break
+            if i >= num_data:
+                break
                      
             output = featurizer.featurize(batch[1])
             for j, elem in enumerate(batch[0]):
@@ -216,6 +240,7 @@ def gen_model_output(
     ref_size: int,
     clean: bool = False,
 ) -> pl.LightningDataModule:
+
     """Generate featurized smiles representation dataset.
 
     Args:
@@ -261,26 +286,35 @@ def gen_model_output(
     ) as output_stream:
     
         if model.type == "zairachem":
-            train_counter = 0
+            output = pd.DataFrame(columns = ["smiles", 'pred'])
+            for i in range(math.ceil(ref_size/50000)):
+                folder = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_descriptors_" + str(i*50) + "_" + str((i+1)*50) + "k")
+                smiles_input_path = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", folder, "reference_library.csv")
+                preds = model(smiles_input_path)
+                output = pd.concat([output, preds])
             
+            train_counter = 0
             training_output = model.get_training_preds()
-            # inverse of proportion of training compounds
+            # inverse of proportion of training compounds to all compounds
             train_weight = round((training_output.shape[0] + ref_size) / len(training_output), 2)
             
+            # inverse of ratio of active to inactive 
+            y_bin_train = [1 if val > 0.5 else 0 for val in training_output["pred"]]
+            y_bin_ref = [1 if val > 0.5 else 0 for val in output["pred"]]
+            active_weight = (y_bin_train.count(0) + y_bin_ref.count(0)) / (y_bin_train.count(1) + y_bin_ref.count(1))
+            
+            print("Creating model prediction files")
             morganFeat = MorganFeaturizer()
             for i, row in training_output.iterrows():
                 fp = morganFeat.featurize([row["smiles"]])
                 if fp is None:
                     continue
-                dump((i, row["smiles"], fp[0].tolist(), [[row["pred"]]], [train_weight]), output_stream)
-                train_counter += 1
-            
-            output = pd.DataFrame(columns = ["smiles", 'pred'])
-            for i, dir_item in enumerate(glob.glob(os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "*"))):
-                if os.path.isdir(dir_item):
-                    folder = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_descriptors_" + str(i*50) + "_" + str((i+1)*50) + "k")
-                    preds = model(os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", folder, "reference_library.csv"))
-                    output = pd.concat([output, preds])
+                if row["pred"] > 0.5:
+                    weight = active_weight + train_weight
+                else:
+                    weight = train_weight
+                dump((i, row["smiles"], fp[0].tolist(), [row["pred"]], [weight]), output_stream)
+                train_counter += 1        
             
         ref_counter = 0        
         for i, batch in tqdm(
@@ -300,7 +334,12 @@ def gen_model_output(
                     if ref_counter + train_counter == target_count:
                         break
                     if not output[output["smiles"] == elem].empty:
-                        dump((j, elem, batch[2][j], [[output[output["smiles"] == elem]["pred"].iloc[0]]], [1.0]), output_stream)
+                        pred_val = output[output["smiles"] == elem]["pred"].iloc[0]
+                        if pred_val > 0.5:
+                            weight = active_weight
+                        else:
+                            weight = 1
+                        dump((j, elem, batch[2][j], [pred_val], [weight]), output_stream)
                         ref_counter += 1
                 
             elif model.type == "ersilia":
@@ -316,7 +355,11 @@ def gen_model_output(
         # Remove zairachem folder
         shutil.rmtree(os.path.join(get_workspace_path(), "zairachem_output_dir"))
 
-    model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))
+    if model.type == "zairachem":
+        model_output_dm = GenericOutputDM(Path(working_dir / (model.name)), zaira_training_size = training_output.shape[0])
+    else:
+         model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))   
+        
     return model_output_dm
 
 def convert_to_onnx(
