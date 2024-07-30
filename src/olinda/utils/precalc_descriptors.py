@@ -92,10 +92,10 @@ class DescriptorCalculator():
     
     def _grover(self):
         print("grover-embedding")
-        grover_path = os.path.join(self.output_path, "descriptors", "grover-embedding", "raw.h5")
+        grover_path = os.path.join(self.output_path, "descriptors", "grover-embedding")
         os.makedirs(grover_path, exist_ok=True)
         ref = Embedder()
-        ref.calculate(self.smiles_list, grover_path)
+        ref.calculate(self.smiles_list, os.path.join(grover_path, "raw.h5"))
     
     def _screen_smiles(self):
         print("Check SMILES with Grover")

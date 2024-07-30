@@ -326,7 +326,7 @@ def gen_model_output(
                 continue
 
             if model.type == "zairachem":
-                # final dataset a multiple of 32
+                # final dataset a multiple of batch
                 combined_count = train_counter + featurized_smiles_dl.length*len(batch[0])
                 target_count = combined_count // len(batch[0]) * len(batch[0]) 
                 
@@ -353,7 +353,8 @@ def gen_model_output(
             	    dump((j, elem, batch[2][j], output[j].tolist()), output_stream)
 
         # Remove zairachem folder
-        shutil.rmtree(os.path.join(get_workspace_path(), "zairachem_output_dir"))
+        if os.path.exists(os.path.join(get_workspace_path(), "zairachem_output_dir")):
+            shutil.rmtree(os.path.join(get_workspace_path(), "zairachem_output_dir"))
 
     if model.type == "zairachem":
         model_output_dm = GenericOutputDM(Path(working_dir / (model.name)), zaira_training_size = training_output.shape[0])

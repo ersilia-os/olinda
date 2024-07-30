@@ -88,9 +88,10 @@ class ZairaChemPredictor(object):
         d.update_elapsed_time()
         
     def precalc_descriptors(self) -> None:
-        precalc_descs = [os.path.basename(desc_path) for desc_path in list(glob.glob(os.path.join(self.precalc_path, "descriptors", "*")))]
-        done = []
-        
+        shutil.copytree(os.path.join(self.precalc_path, "descriptors", "grover-embedding"), os.path.join(self.output_dir, "descriptors", "grover-embedding"))
+        done = ["grover-embedding"]
+    
+        precalc_descs = [os.path.basename(desc_path) for desc_path in list(glob.glob(os.path.join(self.precalc_path, "descriptors", "*")))]        
         #raw descriptors
         with open(os.path.join(self.model_dir, "data", "parameters.json"), "r") as param_file:
             parameters = json.load(param_file)
@@ -106,7 +107,7 @@ class ZairaChemPredictor(object):
                         em_api.run(smiles_list, output=os.path.join(self.output_dir, "descriptors", desc, "raw.h5"))
                         done.append(desc)
         
-        #copy remaining manifolds, ersilia compound embeddings and reference embedding
+        #copy remaining manifolds, ersilia compound embeddings
         for f in ["eosce.h5", "bidd_molmap_desc.np", "bidd_molmap_fps.np"]:
             shutil.copy(os.path.join(self.precalc_path, "descriptors", f), os.path.join(self.output_dir, "descriptors"))
         
