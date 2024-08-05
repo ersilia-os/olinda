@@ -12,6 +12,11 @@ import pytorch_lightning as pl
 import torch
 from tqdm import tqdm
 
+import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
+import zipfile
+
 import tensorflow as tf
 import tf2onnx
 import onnx
@@ -22,6 +27,7 @@ from olinda.featurizer import Featurizer, MorganFeaturizer, Flat2Grid
 from olinda.generic_model import GenericModel
 from olinda.tuner import ModelTuner, KerasTuner
 from olinda.utils import calculate_cbor_size, get_workspace_path
+from olinda.tools.s3 import ProgressPercentage
 
 
 def distill(
@@ -59,7 +65,8 @@ def distill(
     # Convert model to a generic model
     model = GenericModel(model)
     if model.type == "zairachem":
-        ref_library = Path(os.path.join(__file__, "..", ".." , ".." , "data" , "olinda_reference_library.csv")).resolve()
+        fetch_ref_library()
+        ref_library = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_library.csv")
         precalc_smiles_df = pd.read_csv(ref_library, header=None)
         ref_data = len(precalc_smiles_df)
         reference_smiles_dm = ReferenceSmilesDM(num_data=num_data)
@@ -104,6 +111,24 @@ def distill(
 
     return model_onnx
 
+def fetch_ref_library():
+    s3 = boto3.resource('s3', config=Config(signature_version=UNSIGNED))
+    bucket = s3.Bucket('olinda')
+    
+    path = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors")
+    os.makedirs(path, exist_ok=True)
+    
+    lib_name = "olinda_reference_library.csv"
+    ref_lib = os.path.join(path, lib_name)
+    # if no reference library or the size differs to the S3 bucket version
+    if os.path.exists(ref_lib) == False or bucket.Object(key=lib_name).content_length != os.path.getsize(ref_lib):
+        if os.path.exists(ref_lib):
+            os.remove(ref_lib)
+        bucket.download_file(
+                "olinda_reference_library.csv", ref_lib,
+                Callback=ProgressPercentage(bucket, "olinda_reference_library.csv")
+                )
+
 def fetch_descriptors(
     num_folds: int
     ):
@@ -113,13 +138,27 @@ def fetch_descriptors(
         num_folds (int): Number of folds of 50k precalculated descriptors
     """
     
+    s3 = boto3.resource('s3', config=Config(signature_version=UNSIGNED))
+    bucket = s3.Bucket('olinda')
+    
     path = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors")
-    os.makedirs(path, exist_ok=True)
+    
     for i in range(num_folds):
-        dest = os.path.join(path, "olinda_reference_descriptors_" + str(i*50) + "_" + str((i+1)*50) + "k")
-        if os.path.exists(dest):
-            pass
-            # download zip from S3, unzip, remove zip
+        fold = "olinda_reference_descriptors_" + str(i*50) + "_" + str((i+1)*50) + "k"
+        dest = os.path.join(path, fold)
+        fold_zip = fold + ".zip"
+        dest_zip = dest + ".zip"
+        
+        if os.path.exists(dest) == False:
+            print("Downloading precalculated descriptors: fold " + str(i+1))
+            bucket.download_file(
+                fold_zip, dest_zip,
+                Callback=ProgressPercentage(bucket, fold_zip)
+                )
+            with zipfile.ZipFile(dest_zip, 'r') as zip_ref:
+                zip_ref.extractall(path)
+            assert os.path.exists(dest)
+            os.remove(dest_zip)
 
 def gen_training_dataset(
     model: pl.LightningModule,
@@ -296,12 +335,12 @@ def gen_model_output(
             train_counter = 0
             training_output = model.get_training_preds()
             # inverse of proportion of training compounds to all compounds
-            train_weight = round((training_output.shape[0] + ref_size) / len(training_output), 2)
+            train_weight = 1 #round((training_output.shape[0] + ref_size) / len(training_output), 2)
             
             # inverse of ratio of active to inactive 
             y_bin_train = [1 if val > 0.5 else 0 for val in training_output["pred"]]
             y_bin_ref = [1 if val > 0.5 else 0 for val in output["pred"]]
-            active_weight = (y_bin_train.count(0) + y_bin_ref.count(0)) / (y_bin_train.count(1) + y_bin_ref.count(1))
+            active_weight = 1 #(y_bin_train.count(0) + y_bin_ref.count(0)) / (y_bin_train.count(1) + y_bin_ref.count(1))
             
             print("Creating model prediction files")
             morganFeat = MorganFeaturizer()
@@ -396,7 +435,7 @@ def clean_workspace(
         featurizer (Featurizer): Featurizer to use.
     """
     curr_ref_smiles_path = Path(working_dir) / "reference" / "reference_smiles.csv"
-    orig_ref_smiles_path = Path(os.path.join(__file__, "..", ".." , ".." , "data" , "olinda_reference_library.csv")).resolve()
+    orig_ref_smiles_path = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_library.csv")
     
     if model:
         shutil.rmtree(Path(working_dir) / (model.name), ignore_errors=True)
@@ -408,7 +447,11 @@ def clean_workspace(
         )
     
     if reference and os.path.exists(curr_ref_smiles_path):
-        curr_df = pd.read_csv(curr_ref_smiles_path, header=None, names=["SMILES"])
-        orig_df = pd.read_csv(orig_ref_smiles_path)
-        if not curr_df.equals(orig_df):
+        if os.path.exists(orig_ref_smiles_path):
+            curr_df = pd.read_csv(curr_ref_smiles_path, header=None, names=["SMILES"])
+            orig_df = pd.read_csv(orig_ref_smiles_path)
+            if not curr_df.equals(orig_df):
+                shutil.rmtree(Path(working_dir) / "reference")
+        else:
             shutil.rmtree(Path(working_dir) / "reference")
+
