@@ -96,10 +96,10 @@ class ZairaChemPredictor(object):
         with open(os.path.join(self.model_dir, "data", "parameters.json"), "r") as param_file:
             parameters = json.load(param_file)
             for desc in parameters["ersilia_hub"]:
-                if desc in precalc_descs:
+                if desc in precalc_descs and desc != "grover-embedding":
                     shutil.copytree(os.path.join(self.precalc_path, "descriptors", desc), os.path.join(self.output_dir, "descriptors", desc))
                     done.append(desc)
-                else:
+                elif desc != "grover-embedding":
                     #make folder and copy output h5
                     with ErsiliaModel(desc) as em_api:
                         smiles_list = pd.read_csv(self.input_file)["SMILES"].to_list()
