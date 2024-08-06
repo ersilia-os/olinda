@@ -39,7 +39,7 @@ class GenericOutputDM(pl.LightningDataModule):
         self: "GenericOutputDM",
         model_dir: Union[str, Path],
         batch_size: int = 32,
-        num_workers: int = 1,
+        num_workers: int = 0,
         transform: Optional[Any] = None,
         target_transform: Optional[Any] = None,
         zaira_training_size = 0,
@@ -49,7 +49,7 @@ class GenericOutputDM(pl.LightningDataModule):
         Args:
             model_dir (Union[str, Path]): Path to the data files.
             batch_size (int): batch size. Defaults to 32.
-            num_workers (int): workers to use. Defaults to 2.
+            num_workers (int): workers to use. Defaults to 0.
             transform (Optional[Any]): Tranforms for the inputs. Defaults to None.
             target_transform (Optional[Any]): Transforms for the target. Defaults to None.
         """
