@@ -344,7 +344,7 @@ def gen_model_output(
             
             print("Creating model prediction files")
             morganFeat = MorganFeaturizer()
-            for i, row in training_output.iterrows():
+            for i, row in training_output.dropna().iterrows():
                 fp = morganFeat.featurize([row["smiles"]])
                 if fp is None:
                     continue
