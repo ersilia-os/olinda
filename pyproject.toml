@@ -5,7 +5,7 @@ description = "A model distillation library"
 authors = ["Ersilia Open Source Initiative <hello@ersilia.io>"]
 
 [tool.poetry.dependencies]
-python = ">=3.8, <3.10.15"
+python = ">=3.8"
 torch = "^1.12.1"
 pytorch-lightning = "^1.7.2"
 onnx = "^1.12.0"
