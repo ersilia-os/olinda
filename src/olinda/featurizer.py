@@ -42,7 +42,7 @@ class MorganFeaturizer(Featurizer):
         Returns:
             Any: featurized outputs
         """
-        mols = [Chem.MolFromSmiles(smi) for smi in batch if smi is not np.nan]
+        mols = [Chem.MolFromSmiles(smi) for smi in batch if smi is not None]
         ecfps = self.ecfp_counts(mols)
         return ecfps
     
@@ -61,12 +61,16 @@ class MorganFeaturizer(Featurizer):
             ) if mol is not None else None
             for mol in mols
         ]
-        nfp = np.zeros((len(fps), 1024), np.float32)
-        for i, fp in enumerate(fps):
+        
+        nfp = []
+        for fp in fps:
             if fp is not None:
+                tmp = np.zeros((1024), np.float32)
                 for idx, v in fp.GetNonzeroElements().items():
-                    nidx = idx % 1024
-                    nfp[i, nidx] += int(v)
+                    tmp[idx % 1024] += int(v)
+                nfp.append(tmp)
+            else:
+                nfp.append(None)
         return nfp
 
 class Flat2Grid(MorganFeaturizer):
