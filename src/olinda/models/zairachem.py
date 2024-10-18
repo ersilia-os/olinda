@@ -102,6 +102,7 @@ class ZairaChemPredictor(object):
                 elif desc != "grover-embedding":
                     #make folder and copy output h5
                     with ErsiliaModel(desc) as em_api:
+                        em_api.serve()
                         smiles_list = pd.read_csv(self.input_file)["SMILES"].to_list()
                         os.makedirs(os.path.join(self.output_dir, "descriptors", desc))
                         em_api.run(smiles_list, output=os.path.join(self.output_dir, "descriptors", desc, "raw.h5"))

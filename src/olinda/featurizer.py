@@ -71,7 +71,7 @@ class MorganFeaturizer(Featurizer):
                 nfp.append(tmp)
             else:
                 nfp.append(None)
-        return nfp
+        return np.array(nfp)
 
 class Flat2Grid(MorganFeaturizer):
     def __init__(self: "Flat2Grid") -> None:

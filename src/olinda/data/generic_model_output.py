@@ -103,7 +103,8 @@ class GenericOutputDM(pl.LightningDataModule):
                 )
             self.dataset.with_epoch(self.train_dataset_size)
         elif stage == "val":
-            if self.zaira_training_size >= 0:
+            #If the model is a zairachem model and has a relatively small training set
+            if self.zaira_training_size >= 0 and self.zaira_training_size / dataset_size < 0.1:
                 self.val_dataset_size = self.zaira_training_size
             else:
                 self.val_dataset_size = dataset_size // 10
