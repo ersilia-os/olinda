@@ -93,19 +93,17 @@ class ZairaChemPredictor(object):
     
         precalc_descs = [os.path.basename(desc_path) for desc_path in list(glob.glob(os.path.join(self.precalc_path, "descriptors", "*")))]        
         #raw descriptors
-        with open(os.path.join(self.model_dir, "data", "parameters.json"), "r") as param_file:
-            parameters = json.load(param_file)
-            for desc in parameters["ersilia_hub"]:
+        with open(os.path.join(self.model_dir, "descriptors", "done_eos.json"), "r") as calculated_desc_file:
+            parameters = json.load(calculated_desc_file)
+            for desc in parameters:
                 if desc in precalc_descs and desc != "grover-embedding":
                     shutil.copytree(os.path.join(self.precalc_path, "descriptors", desc), os.path.join(self.output_dir, "descriptors", desc))
                     done.append(desc)
                 elif desc != "grover-embedding":
                     #make folder and copy output h5
                     with ErsiliaModel(desc) as em_api:
-                        em_api.serve()
-                        smiles_list = pd.read_csv(self.input_file)["SMILES"].to_list()
                         os.makedirs(os.path.join(self.output_dir, "descriptors", desc))
-                        em_api.run(smiles_list, output=os.path.join(self.output_dir, "descriptors", desc, "raw.h5"))
+                        em_api.api(input=self.input_file, output=os.path.join(self.output_dir, "descriptors", desc, "raw.h5"))
                         done.append(desc)
         
         #copy remaining manifolds, ersilia compound embeddings

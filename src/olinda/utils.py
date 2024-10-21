@@ -7,14 +7,10 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from cbor2 import CBORDecoder
-from ersilia import ErsiliaModel
 import gin
 from xdg import xdg_data_home
 
 import onnxruntime as rt
-
-from olinda.models import zairachem
-from olinda.models.zairachem import ZairaChemPredictor
 
 
 def get_package_root_path() -> Path:
@@ -57,6 +53,7 @@ def calculate_cbor_size(fp: BufferedWriter) -> int:
 
     
 def run_zairachem(model_path: str) -> Callable:
+    from olinda.models.zairachem import ZairaChemPredictor
     """Utility function to run ZairaChem model predictions.
 
     Args:
@@ -73,6 +70,7 @@ def run_zairachem(model_path: str) -> Callable:
     return execute    
 
 def get_zairachem_training_preds(model_path: str) -> Callable:
+    from olinda.models.zairachem import ZairaChemPredictor
     """Utility function to return the training set predictions of a ZairaChem model.
 
     Args:
@@ -88,6 +86,7 @@ def get_zairachem_training_preds(model_path: str) -> Callable:
     return execute   
 
 def run_ersilia_api_in_context(model_id: str) -> Callable:
+    from ersilia import ErsiliaModel
     """Utility function to execute Ersilia API.
 
     Args:
