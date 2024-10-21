@@ -332,26 +332,33 @@ def gen_model_output(
                 preds = model(smiles_input_path)
                 output = pd.concat([output, preds])
             
-            train_counter = 0
+            # correct wrong zairachem predictions before training Olinda
             training_output = model.get_training_preds()
+            for i, row in enumerate(training_output.iterrows()):
+                if row[1]["pred"] >= 0.0 and row[1]["pred"] <= 0.5 and row[1]["true"] == 1.0:
+                    training_output.at[i, "pred"] = 1.0 - row[1]["pred"]
+                elif row[1]["pred"] >= 0.5 and row[1]["pred"] <= 1.0 and row[1]["true"] == 0:
+                    training_output.at[i, "pred"] = 1.0 - row[1]["pred"]
+                    
+            """
+            # weight by data source: training/reference
             # inverse of proportion of training compounds to all compounds
             train_weight = 1 #round((training_output.shape[0] + ref_size) / len(training_output), 2)
+            """
             
-            # inverse of ratio of active to inactive 
+            # inverse of ratio of predicted active to inactive 
             y_bin_train = [1 if val > 0.5 else 0 for val in training_output["pred"]]
             y_bin_ref = [1 if val > 0.5 else 0 for val in output["pred"]]
-            active_weight = 1 #(y_bin_train.count(0) + y_bin_ref.count(0)) / (y_bin_train.count(1) + y_bin_ref.count(1))
+            active_weight = (y_bin_train.count(0) + y_bin_ref.count(0)) / (y_bin_train.count(1) + y_bin_ref.count(1))
             
             print("Creating model prediction files")
+            train_counter = 0
             morganFeat = MorganFeaturizer()
             for i, row in training_output.dropna().iterrows():
                 fp = morganFeat.featurize([row["smiles"]])
                 if fp is None:
                     continue
-                if row["pred"] > 0.5:
-                    weight = active_weight + train_weight
-                else:
-                    weight = train_weight
+                weight = active_weight
                 dump((i, row["smiles"], fp[0].tolist(), [row["pred"]], [weight]), output_stream)
                 train_counter += 1        
             

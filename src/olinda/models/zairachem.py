@@ -116,7 +116,7 @@ class ZairaChemPredictor(object):
 
     
     def clean_output(self, path):
-        results = pd.read_csv(os.path.join(path, "output.csv"))
+        results = pd.read_csv(os.path.join(path, "output_table.csv"))
         col_names = results.columns.values.tolist()
         
         clf_col = ""
@@ -124,8 +124,9 @@ class ZairaChemPredictor(object):
             if "clf" in c and "bin" not in c:
                 clf_col = c
         
-        results.rename({clf_col: 'pred'}, axis=1, inplace=True)
-        return results[["smiles", 'pred']].dropna()
+        results.rename({'pred-value': 'pred'}, axis=1, inplace=True)
+        results.rename({"true-value": 'true'}, axis=1, inplace=True)
+        return results[["smiles", 'pred', 'true']]
         
 @contextmanager
 def HiddenPrints():
