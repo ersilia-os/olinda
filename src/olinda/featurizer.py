@@ -12,7 +12,7 @@ import tensorflow as tf
 import torch
 
 
-from olinda.utils import get_package_root_path
+from olinda.utils.utils import get_package_root_path
 
 
 

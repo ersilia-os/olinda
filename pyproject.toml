@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "olinda"
-version = "0.2.0"
+version = "0.3.0"
 description = "A model distillation library"
 authors = ["Ersilia Open Source Initiative <hello@ersilia.io>"]
 

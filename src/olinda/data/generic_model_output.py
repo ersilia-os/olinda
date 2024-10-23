@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 import webdataset as wds
 
-from olinda.utils import calculate_cbor_size
+from olinda.utils.utils import calculate_cbor_size
 
 import numpy as np
 class Segmenter:

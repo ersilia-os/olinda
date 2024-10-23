@@ -51,57 +51,6 @@ def calculate_cbor_size(fp: BufferedWriter) -> int:
         size += 1
     return size
 
-    
-def run_zairachem(model_path: str) -> Callable:
-    from olinda.models.zairachem import ZairaChemPredictor
-    """Utility function to run ZairaChem model predictions.
-
-    Args:
-        model_path (str): Path to ZairaChem model.
-
-    Returns:
-        Callable: Util function.
-    """
-
-    def execute(smiles_path: str) -> list:
-        model_output = os.path.join(get_workspace_path(), "zairachem_output_dir")     
-        zp = ZairaChemPredictor(smiles_path, model_path, model_output, False, False)
-        return zp.predict()
-    return execute    
-
-def get_zairachem_training_preds(model_path: str) -> Callable:
-    from olinda.models.zairachem import ZairaChemPredictor
-    """Utility function to return the training set predictions of a ZairaChem model.
-
-    Args:
-        model_path (str): Path to ZairaChem model.
-
-    Returns:
-        Callable: Util function.
-    """
-
-    def execute() -> Any:  
-        zp = ZairaChemPredictor("", model_path, "", False, False)
-        return zp.clean_output(model_path)
-    return execute   
-
-def run_ersilia_api_in_context(model_id: str) -> Callable:
-    from ersilia import ErsiliaModel
-    """Utility function to execute Ersilia API.
-
-    Args:
-        model_id (str): Ersilia model hub ID.
-
-    Returns:
-        Callable: Util function.
-    """
-
-    def execute(x: Any) -> Any:       
-        with ErsiliaModel(model_id) as em_api:
-            tmp = em_api.run(x, output="pandas")
-            ###WIP: Hardcoded for eos97yu but need general output adapter
-            return tmp['logPe']
-    return execute
 
 def run_onnx_runtime(onnx_model: Any) -> Callable:
     """Utility function to execute ONNX runtime.

@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import webdataset as wds
 
-from olinda.utils import get_workspace_path
+from olinda.utils.utils import get_workspace_path
 
 
 class ReferenceSmilesDM(pl.LightningDataModule):

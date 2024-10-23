@@ -26,26 +26,23 @@ from olinda.data import ReferenceSmilesDM, FeaturizedSmilesDM, GenericOutputDM
 from olinda.featurizer import Featurizer, MorganFeaturizer, Flat2Grid
 from olinda.generic_model import GenericModel
 from olinda.tuner import ModelTuner, KerasTuner
-from olinda.utils import calculate_cbor_size, get_workspace_path
-from olinda.tools.s3 import ProgressPercentage
+from olinda.utils.utils import calculate_cbor_size, get_workspace_path
+from olinda.utils.s3 import ProgressPercentage
 
-
-def distill(
-    model: Any,
-    working_dir: Path = get_workspace_path(),
-    featurizer: Optional[Featurizer] = MorganFeaturizer(),
-    clean: bool = True,
-    tuner: ModelTuner = KerasTuner(),
-    reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
-    featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
-    generic_output_dm: Optional[GenericOutputDM] = None,
-    test: bool = False,
-    num_data: int = 100000,
-) -> pl.LightningModule:
-    """Distill models.
-
-    Args:
-        model (Any): Teacher Model.
+### TODO: Improve object-oriented setup of distillation code segments
+class Distiller(object):
+    def __init__(self,
+        featurizer: Optional[Featurizer] = MorganFeaturizer(),
+        tuner: ModelTuner = KerasTuner(),
+        reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
+        featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
+        generic_output_dm: Optional[GenericOutputDM] = None,
+        num_data: int = 100000,
+        clean: bool = True,
+        test: bool = False,
+    ):
+        """
+        Args:
         featurizer (Optional[Featurizer]): Featurizer to use.
         working_dir (Path): Path to model workspace directory.
         clean (bool): Clean workspace before starting.
@@ -54,62 +51,78 @@ def distill(
         featurized_smiles_dm (Optional[FeaturizedSmilesDM]): Reference Featurized SMILES datamodules.
         generic_output_dm (Optional[GenericOutputDM]): Precalculated training dataset for student model.
         test (bool): Run a test distillation on a smaller fraction of the dataset.
-        num_data: (int) : Set the number of ChEMBL training points to use (up to 1999380)
-    Returns:
-        pl.LightningModule: Student Model.
-    """
-    
-    if clean is True:
-        clean_workspace(Path(working_dir), reference=True)
-    
-    # Convert model to a generic model
-    model = GenericModel(model)
-    if model.type == "zairachem":
-        fetch_ref_library()
-        ref_library = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_library.csv")
-        precalc_smiles_df = pd.read_csv(ref_library, header=None)
-        ref_data = len(precalc_smiles_df)
-        reference_smiles_dm = ReferenceSmilesDM(num_data=num_data)
-        reference_smiles_dm.prepare_data()
-        reference_smiles_dm.setup("train")
+        """     
+        self.working_dir = get_workspace_path()
+        self.featurizer = featurizer
+        self.tuner = tuner
+        self.reference_smiles_dm = reference_smiles_dm
+        self.featurized_smiles_dm = featurized_smiles_dm
+        self.generic_output_dm = generic_output_dm
+        self.num_data = num_data
+        self.clean = clean
+        self.test = test      
+
+    def distill(self, model: Any, num_data: int = 100000) -> pl.LightningModule:
+        """Distill models.
         
-        if num_data > ref_data:
-            num_data = ref_data  
-        zairachem_folds = math.ceil(num_data / 50000)   
-        fetch_descriptors(zairachem_folds)
+        Args:
+            model (Any): Teacher Model.
+            num_data: (int) : Set the number of ChEMBL training points to use (up to 100000)
+        Returns:
+            pl.LightningModule: Student Model.
+        """
         
-        featurized_smiles_dm = gen_featurized_smiles(reference_smiles_dm, featurizer, working_dir, num_data=num_data, clean=clean)
-        featurized_smiles_dm.setup("train")       
-        student_training_dm = gen_model_output(featurized_smiles_dm, model, working_dir, num_data, clean)
-    else:
-        student_training_dm = generic_output_dm
+        if self.clean is True:
+            clean_workspace(Path(self.working_dir), reference=True)
         
-    if student_training_dm is None:
-        # Prepare reference smiles datamodule
-        if reference_smiles_dm is None:
-            reference_smiles_dm = ReferenceSmilesDM(num_data=num_data)
-        reference_smiles_dm.prepare_data()
-        if not test:
-            reference_smiles_dm.setup("train")
+        # Convert model to a generic model
+        model = GenericModel(model)
+        if model.type == "zairachem":
+            fetch_ref_library()
+            ref_library = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_library.csv")
+            precalc_smiles_df = pd.read_csv(ref_library, header=None)
+            ref_data = len(precalc_smiles_df)
+            self.reference_smiles_dm = ReferenceSmilesDM(num_data=num_data)
+            self.reference_smiles_dm.prepare_data()
+            self.reference_smiles_dm.setup("train")
+            
+            if self.num_data > ref_data:
+                self.num_data = ref_data  
+            zairachem_folds = math.ceil(num_data / 50000)   
+            fetch_descriptors(zairachem_folds)
+            
+            self.featurized_smiles_dm = gen_featurized_smiles(self.reference_smiles_dm, self.featurizer, self.working_dir, num_data=self.num_data, clean=self.clean)
+            self.featurized_smiles_dm.setup("train")       
+            student_training_dm = gen_model_output(model, self.featurized_smiles_dm, self.working_dir, self.num_data, self.clean)
         else:
-            reference_smiles_dm.setup("val")
-
-        # Generate student model training dataset
-        student_training_dm = gen_training_dataset(
-            model,
-            featurizer,
-            reference_smiles_dm,
-            featurized_smiles_dm,
-            working_dir,
-            num_data,
-            clean,
-        )
-
-    # Select and Train student model
-    student_model = tuner.fit(student_training_dm)
-    model_onnx = convert_to_onnx(student_model, featurizer)
-
-    return model_onnx
+            student_training_dm = self.generic_output_dm
+            
+        if student_training_dm is None:
+            # Prepare reference smiles datamodule
+            if reference_smiles_dm is None:
+                self.reference_smiles_dm = ReferenceSmilesDM(num_data=num_data)
+            self.reference_smiles_dm.prepare_data()
+            if not test:
+                self.reference_smiles_dm.setup("train")
+            else:
+                self.reference_smiles_dm.setup("val")
+        
+            # Generate student model training dataset
+            student_training_dm = gen_training_dataset(
+                model,
+                self.featurizer,
+                self.reference_smiles_dm,
+                self.featurized_smiles_dm,
+                self.working_dir,
+                self.num_data,
+                self.clean,
+            )
+        
+        # Select and Train student model
+        student_model = self.tuner.fit(student_training_dm)
+        model_onnx = convert_to_onnx(student_model, self.featurizer)
+    
+        return model_onnx
 
 def fetch_ref_library():
     s3 = boto3.resource('s3', config=Config(signature_version=UNSIGNED))
@@ -273,8 +286,8 @@ def gen_featurized_smiles(
     return featurized_smiles_dm
 
 def gen_model_output(
-    featurized_smiles_dm: pl.LightningDataModule,
     model: GenericModel,
+    featurized_smiles_dm: pl.LightningDataModule,
     working_dir: Path,
     ref_size: int,
     clean: bool = False,
@@ -291,8 +304,8 @@ def gen_model_output(
     Returns:
         pl.LightningDataModule: Dateset with featurized smiles.
     """
-    
-    os.makedirs(Path(working_dir) / model.name, exist_ok=True)
+
+    os.makedirs(os.path.join(working_dir, model.name), exist_ok=True)
     if clean is True:
         clean_workspace(Path(working_dir), model=model)
         featurized_smiles_dl = featurized_smiles_dm.train_dataloader()
@@ -405,7 +418,7 @@ def gen_model_output(
     if model.type == "zairachem":
         model_output_dm = GenericOutputDM(Path(working_dir / (model.name)), zaira_training_size = training_output.shape[0])
     else:
-         model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))   
+        model_output_dm = GenericOutputDM(Path(working_dir / (model.name)))   
         
     return model_output_dm
 
@@ -441,6 +454,7 @@ def clean_workspace(
         model (GenericModel): Wrapped Teacher model.
         featurizer (Featurizer): Featurizer to use.
     """
+    
     curr_ref_smiles_path = Path(working_dir) / "reference" / "reference_smiles.csv"
     orig_ref_smiles_path = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_library.csv")
     

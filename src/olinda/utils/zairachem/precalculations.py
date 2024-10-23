@@ -1,3 +1,5 @@
+#Script to calculate new folds of ZairaChem descriptors to be stored in AWS S3
+
 import os
 import csv
 import pandas as pd

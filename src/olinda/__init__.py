@@ -3,7 +3,7 @@
 from importlib.metadata import PackageNotFoundError, version  # type: ignore
 from warnings import filterwarnings
 
-from olinda.distillation import distill  # noqa: F401
+from olinda import distillation  # noqa: F401
 
 try:
     __version__ = version(__name__)

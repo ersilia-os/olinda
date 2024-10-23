@@ -100,7 +100,7 @@ class ZairaChemPredictor(object):
                     shutil.copytree(os.path.join(self.precalc_path, "descriptors", desc), os.path.join(self.output_dir, "descriptors", desc))
                     done.append(desc)
                 elif desc != "grover-embedding":
-                    #make folder and copy output h5
+                    #make folder and run ersilia model
                     with ErsiliaModel(desc) as em_api:
                         os.makedirs(os.path.join(self.output_dir, "descriptors", desc))
                         em_api.api(input=self.input_file, output=os.path.join(self.output_dir, "descriptors", desc, "raw.h5"))
