@@ -5,9 +5,7 @@ from warnings import filterwarnings
 
 from olinda import distillation  # noqa: F401
 
-try:
-    __version__ = version(__name__)
-except PackageNotFoundError:  # pragma: no cover
-    __version__ = "unknown"
+# Version
+__version__ = "0.3.0"
 
 filterwarnings(action="ignore", category=DeprecationWarning, module="tensorboard")
