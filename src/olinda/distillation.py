@@ -59,15 +59,17 @@ class Distiller(object):
         self.featurized_smiles_dm = featurized_smiles_dm
         self.generic_output_dm = generic_output_dm
         self.num_data = num_data
+        if test:
+            self.num_data = self.num_data // 10
+        print(self.num_data)
         self.clean = clean
         self.test = test      
 
-    def distill(self, model: Any, num_data: int = 100000) -> pl.LightningModule:
+    def distill(self, model: Any) -> pl.LightningModule:
         """Distill models.
         
         Args:
             model (Any): Teacher Model.
-            num_data: (int) : Set the number of ChEMBL training points to use (up to 100000)
         Returns:
             pl.LightningModule: Student Model.
         """
@@ -82,13 +84,13 @@ class Distiller(object):
             ref_library = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_library.csv")
             precalc_smiles_df = pd.read_csv(ref_library, header=None)
             ref_data = len(precalc_smiles_df)
-            self.reference_smiles_dm = ReferenceSmilesDM(num_data=num_data)
+            self.reference_smiles_dm = ReferenceSmilesDM(num_data=self.num_data)
             self.reference_smiles_dm.prepare_data()
             self.reference_smiles_dm.setup("train")
             
             if self.num_data > ref_data:
                 self.num_data = ref_data  
-            zairachem_folds = math.ceil(num_data / 50000)   
+            zairachem_folds = math.ceil(self.num_data / 50000)
             fetch_descriptors(zairachem_folds)
             
             self.featurized_smiles_dm = gen_featurized_smiles(self.reference_smiles_dm, self.featurizer, self.working_dir, num_data=self.num_data, clean=self.clean)
@@ -100,12 +102,9 @@ class Distiller(object):
         if student_training_dm is None:
             # Prepare reference smiles datamodule
             if reference_smiles_dm is None:
-                self.reference_smiles_dm = ReferenceSmilesDM(num_data=num_data)
+                self.reference_smiles_dm = ReferenceSmilesDM(num_data=self.num_data)
             self.reference_smiles_dm.prepare_data()
-            if not test:
-                self.reference_smiles_dm.setup("train")
-            else:
-                self.reference_smiles_dm.setup("val")
+            self.reference_smiles_dm.setup("train")
         
             # Generate student model training dataset
             student_training_dm = gen_training_dataset(
@@ -281,7 +280,7 @@ def gen_featurized_smiles(
             for j, elem in enumerate(batch[0]):
                 dump((elem.tolist(), batch[1][j], output[j].tolist()), feature_stream)
 
-    featurized_smiles_dm = FeaturizedSmilesDM(Path(working_dir), featurizer)
+    featurized_smiles_dm = FeaturizedSmilesDM(Path(working_dir), featurizer, num_data=num_data)
     
     return featurized_smiles_dm
 
