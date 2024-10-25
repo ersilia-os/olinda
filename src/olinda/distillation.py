@@ -1,5 +1,8 @@
 """Distillation module."""
 
+from warnings import filterwarnings
+filterwarnings(action="ignore")
+
 import os
 from pathlib import Path
 import shutil
@@ -11,6 +14,7 @@ import joblib
 import pytorch_lightning as pl
 import torch
 from tqdm import tqdm
+from loguru import logger
 
 import boto3
 from botocore import UNSIGNED
@@ -61,7 +65,6 @@ class Distiller(object):
         self.num_data = num_data
         if test:
             self.num_data = self.num_data // 10
-        print(self.num_data)
         self.clean = clean
         self.test = test      
 
@@ -339,6 +342,7 @@ def gen_model_output(
         if model.type == "zairachem":
             output = pd.DataFrame(columns = ["smiles", 'pred'])
             for i in range(math.ceil(ref_size/50000)):
+                logger.info("Getting ZairaChem predictions for fold " + str(i+1) + " of " + str(math.ceil(ref_size/50000)))
                 folder = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_descriptors_" + str(i*50) + "_" + str((i+1)*50) + "k")
                 smiles_input_path = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", folder, "reference_library.csv")
                 preds = model(smiles_input_path)

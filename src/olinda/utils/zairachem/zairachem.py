@@ -19,8 +19,10 @@ import json
 import sys
 import warnings
 import logging
+from loguru import logger
 import glob
 from pathlib import Path
+from progress.bar import Bar
 
 class ZairaChemPredictor(object):
     def __init__(self, input_file, model_dir, output_dir, clean, flush):
@@ -32,40 +34,36 @@ class ZairaChemPredictor(object):
         self.precalc_path = os.path.dirname(self.input_file)
     
     def predict(self):
-        print("ZairaChem: Setup")
-        with HiddenPrints():
-            self.s = PredictSetup(
-	        input_file=self.input_file,
-	        output_dir=self.output_dir,
-	        model_dir=self.model_dir,
-	        time_budget=60, 
-            )
-            self.data_files(self.s)            
-        
-        print("ZairaChem: Describe")
-        with HiddenPrints():
-            d = Describer(path=self.output_dir)
-            self.run_descriptors(d)
-        
-        print("ZairaChem: Estimate")
-        with HiddenPrints():
-            e = EstimatorPipeline(path=self.output_dir)
-            e.run()
-        
-        print("ZairaChem: Pool")
-        with HiddenPrints():
-            p = Pooler(path=self.output_dir)
-            p.run()
-        
-        print("ZairaChem: Report")
-        with HiddenPrints():
-            r = Reporter(path=self.output_dir)
-            r._output_table()
-        
-        print("ZairaChem: Finish")
-        with HiddenPrints():
-            f = Finisher(path=self.output_dir, clean=self.clean, flush=self.flush)
-            f.run()
+        with Bar("ZairaChem Stage", max=6) as bar:
+            with HiddenPrints():
+                self.s = PredictSetup(
+	            input_file=self.input_file,
+	            output_dir=self.output_dir,
+	            model_dir=self.model_dir,
+	            time_budget=60, 
+                )
+                self.data_files(self.s)
+                bar.next()
+                            
+                d = Describer(path=self.output_dir)
+                self.run_descriptors(d)
+                bar.next()
+                
+                e = EstimatorPipeline(path=self.output_dir)
+                e.run()
+                bar.next()
+                
+                p = Pooler(path=self.output_dir)
+                p.run()
+                bar.next()
+                
+                r = Reporter(path=self.output_dir)
+                r._output_table()
+                bar.next()
+                
+                f = Finisher(path=self.output_dir, clean=self.clean, flush=self.flush)
+                f.run()
+                bar.next()
         
         return self.clean_output(self.output_dir)
  
@@ -131,19 +129,14 @@ class ZairaChemPredictor(object):
 @contextmanager
 def HiddenPrints():
     """A context manager that redirects stdout and stderr to devnull"""
+    
     with open(devnull, 'w') as fnull:
         with redirect_stderr(fnull) as err, redirect_stdout(fnull) as out:
             with warnings.catch_warnings():
-                logging.config.dictConfig({
-                'version': 1,
-                'disable_existing_loggers': True
-                })
+                logger.disable("zairachem")
                 warnings.simplefilter('ignore')
-                try:
-                    yield (err, out)
-                finally:
-                    logging.config.dictConfig({
-                    'version': 1,
-                    'disable_existing_loggers': False
-                    })
-                    warnings.simplefilter('default')        
+            try:
+                yield (err, out)
+            finally:
+                warnings.simplefilter('default')
+            

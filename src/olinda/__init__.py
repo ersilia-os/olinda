@@ -1,11 +1,10 @@
 """Olinda."""
-
-from importlib.metadata import PackageNotFoundError, version  # type: ignore
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 from warnings import filterwarnings
 
-from olinda import distillation  # noqa: F401
 
 # Version
 __version__ = "0.3.0"
 
-filterwarnings(action="ignore", category=DeprecationWarning, module="tensorboard")
+filterwarnings(action="ignore")
