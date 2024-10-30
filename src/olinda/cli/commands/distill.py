@@ -1,7 +1,7 @@
 import click
 
 from . import olinda_cli
-from olinda.distillation import Distiller
+from ...distillation import Distiller
 
 def distill_cmd():
     @olinda_cli.command(help="Distill model to ONNX surrogate model")

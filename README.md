@@ -26,12 +26,18 @@ To distill ZairaChem models, install the [ZairaChem](https://github.com/JHlozek/
 
 
 ## Usage
-Within the conda environment, models can be distilled quickly with a single function.
+Within the conda environment, models can be distilled quickly with a single function:
+
+```olinda distill -m path/to/model -o save/path.onnx
+```
+
+Alternatively, you can run the distillation in Python code:
 
 ```python
-from olinda import distill
+from olinda import Distiller
 
-student_model = distill("path_to_model")
+d = Distiller()
+student_model = d.distill("path_to_model")
 student_model.save("path_to_save.onnx")
 ```
 
@@ -41,7 +47,16 @@ Use the 'num_data' parameter to use a smaller training dataset to test the pipel
 student_model = distill("path_to_model", num_data=1000)
 ```
 
-## Run ONNX inference
+## Run ONNX inference with Python api
+A wrapper class for model input/output can be found [here](https://github.com/JHlozek/olinda_model_runner).
+
+```
+import onnx_runner
+model = onnx_runner.onnx_runner("path/to/model.onnx")
+model.predict(["CCC", "CCO"])
+```
+
+## Run inference manually with ONNX framework in Python
 To run predictions, we need to use the ONNX runtime framework.
 
 ```python
@@ -57,8 +72,6 @@ onnx_rt = rt.InferenceSession(onnx_model.SerializeToString())
 output_names = [n.name for n in onnx_model.graph.output]
 preds = [onnx_rt.run(output_names, {"input": [x]}) for x in X]
 ```
-
-WIP: A wrapper class for model input/output can be found [here](https://github.com/JHlozek/olinda_model_runner).
 
 ### How the distillation works?
 
