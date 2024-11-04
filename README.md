@@ -58,7 +58,7 @@ def distill(
     tuner: ModelTuner = AutoKerasTuner(),
     reference_smiles_dm: Optional[ReferenceSmilesDM] = None,
     featurized_smiles_dm: Optional[FeaturizedSmilesDM] = None,
-    generic_output_dm: Optional[GenericOutputDM] = Nonei,
+    generic_output_dm: Optional[GenericOutputDM] = None,
     test: bool = False,
     num_data: int = 1999380,
 ) -> pl.LightningModule:
