@@ -346,7 +346,14 @@ def gen_model_output(
                 folder = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_descriptors_" + str(i*50) + "_" + str((i+1)*50) + "k")
                 smiles_input_path = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", folder, "reference_library.csv")
                 preds = model(smiles_input_path)
-                output = pd.concat([output, preds])
+                output = pd.concat([output, preds])    
+            output = output[["smiles", "pred"]]   
+             
+            # save to zairachem model folder
+            zaira_distill_path = os.path.join(model.name, "distill")
+            if os.path.exists(zaira_distill_path) == False:
+                os.mkdir(zaira_distill_path)
+            output.to_csv(os.path.join(zaira_distill_path, "reference_predictions.csv"), index=False)
             
             # correct wrong zairachem predictions before training Olinda
             training_output = model.get_training_preds()

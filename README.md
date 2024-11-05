@@ -28,7 +28,8 @@ To distill ZairaChem models, install the [ZairaChem](https://github.com/JHlozek/
 ## Usage
 Within the conda environment, models can be distilled quickly with a single function:
 
-```olinda distill -m path/to/model -o save/path.onnx
+```
+olinda distill -m path/to/model -o save/path.onnx
 ```
 
 Alternatively, you can run the distillation in Python code:
