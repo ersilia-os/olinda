@@ -14,7 +14,6 @@ import joblib
 import pytorch_lightning as pl
 import torch
 from tqdm import tqdm
-from loguru import logger
 
 import boto3
 from botocore import UNSIGNED
@@ -340,6 +339,7 @@ def gen_model_output(
     ) as output_stream:
     
         if model.type == "zairachem":
+            from loguru import logger
             output = pd.DataFrame(columns = ["smiles", 'pred'])
             for i in range(math.ceil(ref_size/50000)):
                 logger.info("Getting ZairaChem predictions for fold " + str(i+1) + " of " + str(math.ceil(ref_size/50000)))
