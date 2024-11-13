@@ -1,1 +1,1 @@
-from .onnx_runner import onnx_runner
+from .onnx_runner import ONNX_Runner

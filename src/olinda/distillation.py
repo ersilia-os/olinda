@@ -350,7 +350,7 @@ def gen_model_output(
             output = output[["smiles", "pred"]]   
              
             # save to zairachem model folder
-            zaira_distill_path = os.path.join(model.name, "distill")
+            zaira_distill_path = os.path.join(model.name[len(model.type)+1:], "distill") #get model root
             if os.path.exists(zaira_distill_path) == False:
                 os.mkdir(zaira_distill_path)
             output.to_csv(os.path.join(zaira_distill_path, "reference_predictions.csv"), index=False)

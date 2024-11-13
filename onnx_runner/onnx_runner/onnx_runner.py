@@ -2,7 +2,7 @@ import onnx
 import onnxruntime as rt
 from .morgan_featurizer import MorganFeaturizer
 
-class onnx_runner(object):
+class ONNX_Runner(object):
     def __init__(self, model_path, featurizer=MorganFeaturizer()):
         self.onnx_model = self.load(model_path)
         self.featurizer = featurizer

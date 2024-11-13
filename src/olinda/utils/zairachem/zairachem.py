@@ -3,7 +3,7 @@ import zairachem
 import ersilia
 from ersilia import ErsiliaModel
 
-from zairachem.setup.prediction import PredictSetup
+from zairachem.setup.prediction import ZairaPredictSetup
 from zairachem.descriptors.describe import Describer
 from zairachem.estimators.pipe import EstimatorPipeline
 from zairachem.pool.pool import Pooler
@@ -36,7 +36,7 @@ class ZairaChemPredictor(object):
     def predict(self):
         with Bar("ZairaChem Stage", max=6) as bar:
             with HiddenPrints():
-                self.s = PredictSetup(
+                self.s = ZairaPredictSetup(
 	            input_file=self.input_file,
 	            output_dir=self.output_dir,
 	            model_dir=self.model_dir,

@@ -4,7 +4,6 @@ import onnx_runner
 
 from . import olinda_cli
 from ...featurizer import MorganFeaturizer
-from ...utils.utils import run_onnx_runtime
 
 def predict_cmd():
     @olinda_cli.command(help="Run ONNX model predictions")
@@ -16,7 +15,7 @@ def predict_cmd():
         df = pd.read_csv(input_file)
         smiles_list = df['smiles'].tolist()
         
-        onnx_model = onnx_runner.onnx_runner(model)
+        onnx_model = onnx_runner.ONNX_Runner(model)
         output = onnx_model.predict(smiles_list)
 
         df["pred"] = output

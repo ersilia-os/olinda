@@ -9,7 +9,7 @@ It can automatically distill models from Pytorch, Tensorflow, ONNX amd ZairaChem
 Create a conda environment
 
 ```bash
-conda create -n olinda python=3.9
+conda create -n olinda python=3.10
 conda activate olinda
 ```
 
@@ -22,14 +22,14 @@ python -m pip install -e .
 ```
 
 ### ZairaChem models
-To distill ZairaChem models, install the [ZairaChem](https://github.com/JHlozek/zaira-chem.git) pipeline which automatically installs Olinda into the same environment.
+To distill ZairaChem models, install the [ZairaChem](https://github.com/JHlozek/zaira-chem.git) pipeline which installs Olinda into the same environment
 
 
 ## Usage
 Within the conda environment, models can be distilled quickly with a single function:
 
 ```
-olinda distill -m path/to/model -o save/path.onnx
+olinda distill -m path_to_model -o path_to_save.onnx
 ```
 
 Alternatively, you can run the distillation in Python code:
@@ -42,37 +42,32 @@ student_model = d.distill("path_to_model")
 student_model.save("path_to_save.onnx")
 ```
 
-Use the 'num_data' parameter to use a smaller training dataset to test the pipeline.
+Use the 'num_data' parameter (or -t flag in the cli) to specify a smaller training dataset to test the pipeline.
 
 ```python
 student_model = distill("path_to_model", num_data=1000)
 ```
 
 ## Run ONNX inference with Python api
-A wrapper class for model input/output can be found [here](https://github.com/JHlozek/olinda_model_runner).
+Model inference can be run from the cli with the predict command by specifying an input csv file with a 'smiles' column.
 
 ```
+olinda predict -i input_file.csv -m path_to_model -o output_file.csv
+```
+
+A lite version for running model predictions can be found by installing the onnx_runner package.
+```bash
+cd onnx_runner
+python -m pip install -e .
+```
+
+Then run predictions in Python with:
+```
 import onnx_runner
-model = onnx_runner.onnx_runner("path/to/model.onnx")
+model = onnx_runner.ONNX_Runner("path/to/model.onnx")
 model.predict(["CCC", "CCO"])
 ```
 
-## Run inference manually with ONNX framework in Python
-To run predictions, we need to use the ONNX runtime framework.
-
-```python
-from olinda.featurizer import MorganFeaturizer
-import onnx
-import onnxruntime as rt
-
-smiles_list = ["CCC", "CCCO"]
-X = MorganFeaturizer().featurize(smiles_list)
-
-onnx_model = onnx.load(save_path)
-onnx_rt = rt.InferenceSession(onnx_model.SerializeToString())
-output_names = [n.name for n in onnx_model.graph.output]
-preds = [onnx_rt.run(output_names, {"input": [x]}) for x in X]
-```
 
 ### How the distillation works?
 
@@ -109,7 +104,5 @@ The [Ersilia Open Source Initiative](https://ersilia.io) is a Non Profit Organiz
 CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF -DProtobuf_USE_STATIC_LIBS=ON" poetry install
 ```
 
-- [ ] Optimize weighting scheme for imbalanced data as well as for training vs reference data
 - [ ] ErsiliaModel compatibility (Currently hard-coded for eos97yu. Ersilia models require an output adapter to standardise prediction formatting)
-- [ ] Wrapper class for cleaner ONNX input/output
 - [ ] Multi-output models
