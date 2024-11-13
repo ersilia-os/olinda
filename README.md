@@ -88,7 +88,7 @@ Distilled models are returned in ONNX format for cross-platform use.
 
 The Olinda pipeline has been implemented with the following technical decisions below. These parameters are not exposed through an API but are detailed here for more advanced users.
 
-- ZairaChem Prediction Changes: When distilling ZairaChem models, Olinda fetches the predictions for the original ZairaChem training set in addition to using predictions for a reference library of public compounds. The ZairaChem predictions are first checked for compounds that have been incorrectly predicted, which are then changed by 1 - pred_score for the incorrectly predicted compounds before using the score to train the Olinda model. The relevant code snippet can be found within ```olinda/distillation.py``` in ```gen_model_output()```:
+- **ZairaChem Prediction Changes**: When distilling ZairaChem models, Olinda fetches the predictions for the original ZairaChem training set in addition to using predictions for a reference library of public compounds. The ZairaChem predictions are first checked for compounds that have been incorrectly predicted, which are then changed by 1 - pred_score for the incorrectly predicted compounds before using the score to train the Olinda model. The relevant code snippet can be found within ```olinda/distillation.py``` in ```gen_model_output()```:
 ```
 # correct wrong zairachem predictions before training Olinda
 training_output = model.get_training_preds()
@@ -98,7 +98,7 @@ for i, row in enumerate(training_output.iterrows()):
     elif row[1]["pred"] >= 0.5 and row[1]["pred"] <= 1.0 and row[1]["true"] == 0:
         training_output.at[i, "pred"] = 1.0 - row[1]["pred"]
 ```
--  KerasTuner 30 epochs: The Olinda surrogate model is trained with KerasTuner using a max_epochs of 30 and 2-4 additional hidden layers. These can be changed in ```olinda/tuner.py``` within the ```KerasTuner()``` class:
+-  **KerasTuner 30 epochs**: The Olinda surrogate model is trained with KerasTuner using a max_epochs of 30 and 2-4 additional hidden layers. These can be changed in ```olinda/tuner.py``` within the ```KerasTuner()``` class:
 ```
 class KerasTuner(ModelTuner):
     """Keras tuner based model tuner."""
@@ -107,9 +107,9 @@ class KerasTuner(ModelTuner):
         self: "KerasTuner", layers_range: List = [2, 4], max_epochs: int = 30
     ) -> None:
 ```
--  Reference library size: 100k compounds are used as the default number of literature reference compounds. This can be reduced by adjusting the ```num_data``` parameter of the ```Distiller()``` class in ```olinda/distillation.py```. The current maximum precalculated descriptors available in the S3 bucket is for this 100k compounds. Additional compounds will be precalculated in future.
--  
--  Class weighting scheme: Olinda assigns weights to compounds to address class imbalance based on the prediction scores. The pipeline counts the number of predicted actives/inactives, based on a prediction score threshhold of 0.5, and wieghts compounds according to the inverse proportion of the two classes. This can be disabled by assigning ```active_weight=1``` in ```olinda/distillation.py```: 
+-  **Reference library size**: 100k compounds are used as the default number of literature reference compounds. This can be reduced by adjusting the ```num_data``` parameter of the ```Distiller()``` class in ```olinda/distillation.py```. The current maximum precalculated descriptors available in the S3 bucket is for this 100k compounds. Additional compounds will be precalculated in future.
+  
+-  **Class weighting scheme**: Olinda assigns weights to compounds to address class imbalance based on the prediction scores. The pipeline counts the number of predicted actives/inactives, based on a prediction score threshhold of 0.5, and wieghts compounds according to the inverse proportion of the two classes. This can be disabled by assigning ```active_weight=1``` in ```olinda/distillation.py```: 
 ```
 # inverse of ratio of predicted active to inactive 
 y_bin_train = [1 if val > 0.5 else 0 for val in training_output["pred"]]
