@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "onnx_runner"
+version = "0.1.0"
+description = "Minimal requirements to run Olinda models"
+authors = ["Ersilia Open Source Initiative <hello@ersilia.io>"]
+
+[tool.poetry.dependencies]
+rdkit = "^2022.3.5"
+typing-extensions="=4.12.2"
+numpy = "^1.23.4"
+onnx = "^1.12.0"
+onnxruntime = ">=1.17.3"
+
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

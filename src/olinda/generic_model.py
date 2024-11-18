@@ -11,7 +11,7 @@ import os
 import pickle
 
 from olinda.models.base import DistillBaseModel
-from olinda.utils import run_ersilia_api_in_context, run_onnx_runtime
+from olinda.utils.utils import run_onnx_runtime
 
 
 class GenericModel(DistillBaseModel):
@@ -44,16 +44,18 @@ class GenericModel(DistillBaseModel):
 
         elif type(model) is str:
             if model[:3] == "eos":
+            	from olinda.utils.ersilia.utils import run_ersilia_api_in_context
             	self.nn = run_ersilia_api_in_context(model)
             	self.type = "ersilia"
             	self.name = self.type + "_" + model
             elif model[-5:] == ".onnx":
             	self.load(model)
-            #WIP ZairaChem models
-            #else:
-            #	self.nn = run_zairachem(model_path)
-            #	self.type = "zairachem"
-            #	self.name = self.type + "_" + model
+            else:
+            	from olinda.utils.zairachem.utils import run_zairachem, get_zairachem_training_preds
+            	self.nn = run_zairachem(model)
+            	self.type = "zairachem"
+            	self.name = self.type + "_" + model
+            	self.get_training_preds = get_zairachem_training_preds(model)
 
         else:
             raise Exception(f"Unsupported Model type: {type(model)}")

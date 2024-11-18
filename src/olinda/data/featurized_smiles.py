@@ -7,8 +7,8 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 import webdataset as wds
 
-from olinda.featurizer import Featurizer, Flat2Grid
-from olinda.utils import calculate_cbor_size
+from olinda.featurizer import Featurizer, MorganFeaturizer
+from olinda.utils.utils import calculate_cbor_size
 
 
 class FeaturizedSmilesDM(pl.LightningDataModule):
@@ -17,7 +17,8 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
     def __init__(
         self: "FeaturizedSmilesDM",
         workspace_dir: Union[str, Path],
-        featurizer: Featurizer = Flat2Grid(),
+        featurizer: Featurizer = MorganFeaturizer(),
+        num_data: int = 100000,
         batch_size: int = 32,
         num_workers: int = 1,
         transform: Optional[Any] = None,
@@ -40,6 +41,7 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
         self.num_workers = num_workers
         self.transform = transform
         self.target_transform = target_transform
+        self.num_data = num_data
         
 
     def setup(self: "FeaturizedSmilesDM", stage: Optional[str]) -> None:
@@ -61,20 +63,14 @@ class FeaturizedSmilesDM(pl.LightningDataModule):
         if file_path.is_file() is not True:
             raise Exception(f"Data file not available at {file_path.absolute()}")
 
-        with open(file_path, "rb") as fp:
-            dataset_size = calculate_cbor_size(fp)
-        #print(dataset_size)
         if stage == "train":
-            self.train_dataset_size = dataset_size
-            shuffle = 5000
+            self.train_dataset_size = self.num_data
         elif stage == "val":
-            self.val_dataset_size = dataset_size // 10
-            shuffle = None
+            self.val_dataset_size = self.num_data // 10
 
         self.dataset = wds.DataPipeline(
             wds.SimpleShardList(str(file_path.absolute())),
             wds.cbors2_to_samples(),
-            wds.shuffle(shuffle),
             wds.batched(self.batch_size, partial=False),
         )
 

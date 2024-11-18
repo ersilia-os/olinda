@@ -2,6 +2,8 @@
 
 from pathlib import Path
 from typing import Any, Optional, Union
+import shutil
+import os
 
 from cbor2 import dump
 import pandas as pd
@@ -11,13 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import webdataset as wds
 
-
-from olinda.utils import get_workspace_path
-
-
-reference_download_url = (
-    "https://github.com/ersilia-os/groverfeat/raw/main/data/reference_library.csv"
-)
+from olinda.utils.utils import get_workspace_path
 
 
 class ReferenceSmilesDM(pl.LightningDataModule):
@@ -57,22 +53,12 @@ class ReferenceSmilesDM(pl.LightningDataModule):
             Path(self.workspace / "reference" / "reference_smiles.csv").is_file()
             is False
         ):
-            # download reference files if not already present
-            resp = requests.get(reference_download_url, stream=True)
-            total = int(resp.headers.get("content-length", 0))
-            with open(
-                self.workspace / "reference" / "reference_smiles.csv", "wb"
-            ) as file, tqdm(
-                desc="Downloading Reference SMILES data files",
-                total=total,
-                unit="iB",
-                unit_scale=True,
-                unit_divisor=1024,
-            ) as bar:
-                for data in resp.iter_content(chunk_size=1024):
-                    size = file.write(data)
-                    bar.update(size)
-
+            ref_path = os.path.join(os.path.expanduser("~"), "olinda", "precalculated_descriptors", "olinda_reference_library.csv")
+            # check if reference files not already present
+            if os.path.exists(Path(self.workspace / "reference" / "reference_smiles.csv")) == False or os.path.getsize(ref_path) != os.path.getsize(ref_path):
+                df = pd.read_csv(ref_path)
+                df.to_csv(Path(self.workspace / "reference" / "reference_smiles.csv"), header=False, index=False)
+            
         # Check if processed data files already present
         if (
             Path(self.workspace / "reference" / "reference_smiles.cbor").is_file()
@@ -83,8 +69,8 @@ class ReferenceSmilesDM(pl.LightningDataModule):
             is False
         ):
             # preprocess csv into a cbor file
-            df = pd.read_csv(self.workspace / "reference" / "reference_smiles.csv")
-            truncated_df = df.iloc[:100000]
+            df = pd.read_csv(self.workspace / "reference" / "reference_smiles.csv", header=None)
+            truncated_df = df.iloc[:self.num_data]
             with open(
                 self.workspace / "reference" / "reference_smiles.cbor", "wb"
             ) as stream:
@@ -112,7 +98,6 @@ class ReferenceSmilesDM(pl.LightningDataModule):
         """
         if stage == "train":
             self.dataset_size = self.num_data
-            shuffle = 5000
             self.dataset = wds.DataPipeline(
                 wds.SimpleShardList(
                     str(
@@ -122,12 +107,10 @@ class ReferenceSmilesDM(pl.LightningDataModule):
                     )
                 ),
                 wds.cbors2_to_samples(),
-                wds.shuffle(shuffle),
                 wds.batched(self.batch_size, partial=False),
             )
         elif stage == "val":
-            self.dataset_size = self.num_data
-            shuffle = 5000
+            self.dataset_size = self.num_data//10
             self.dataset = wds.DataPipeline(
                 wds.SimpleShardList(
                     str(
@@ -139,7 +122,6 @@ class ReferenceSmilesDM(pl.LightningDataModule):
                     )
                 ),
                 wds.cbors2_to_samples(),
-                wds.shuffle(shuffle),
                 wds.batched(self.batch_size, partial=False),
             )
 

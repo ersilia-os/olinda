@@ -12,7 +12,7 @@ import tensorflow as tf
 import torch
 
 
-from olinda.utils import get_package_root_path
+from olinda.utils.utils import get_package_root_path
 
 
 
@@ -42,7 +42,7 @@ class MorganFeaturizer(Featurizer):
         Returns:
             Any: featurized outputs
         """
-        mols = [Chem.MolFromSmiles(smi) for smi in batch]
+        mols = [Chem.MolFromSmiles(smi) for smi in batch if smi is not None]
         ecfps = self.ecfp_counts(mols)
         return ecfps
     
@@ -58,15 +58,20 @@ class MorganFeaturizer(Featurizer):
         fps = [
             AllChem.GetMorganFingerprint(
                 mol, radius=3, useCounts=True, useFeatures=True
-            )
+            ) if mol is not None else None
             for mol in mols
         ]
-        nfp = np.zeros((len(fps), 1024), np.float32)
-        for i, fp in enumerate(fps):
-            for idx, v in fp.GetNonzeroElements().items():
-                nidx = idx % 1024
-                nfp[i, nidx] += int(v)
-        return nfp
+        
+        nfp = []
+        for fp in fps:
+            if fp is not None:
+                tmp = np.zeros((1024), np.float32)
+                for idx, v in fp.GetNonzeroElements().items():
+                    tmp[idx % 1024] += int(v)
+                nfp.append(tmp)
+            else:
+                nfp.append(None)
+        return np.array(nfp)
 
 class Flat2Grid(MorganFeaturizer):
     def __init__(self: "Flat2Grid") -> None:
