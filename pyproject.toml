@@ -1,0 +1,40 @@
+[project]
+name = "olinda"
+version = "1.0.0"
+description = "A model distillation library"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "loguru>=0.7.3",
+    "onnxmltools>=1.16.0",
+    "onnxruntime>=1.24.2",
+    "pandas>=2.3.3",
+    "pyarrow>=23.0.1",
+    "rdkit>=2025.9.5",
+    "rich-click>=1.9.7",
+    "xgboost-cpu>=3.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.15.2",
+]
+train = [
+    "optuna>=4.7.0",
+]
+viz = [
+    "matplotlib>=3.10.8",
+]
+[project.scripts]
+olinda = "olinda.cli:cli"
+
+[tool.setuptools.package-data]
+olinda = ["assets/**", "configs/**"]
+
+[tool.setuptools.packages.find]
+include = ["olinda*"]
+exclude = ["files*", "tests*", "docs*"]
+
+[build-system]
+requires = ["setuptools>=78.1.0", "wheel>=0.45.1"]
+build-backend = "setuptools.build_meta"
