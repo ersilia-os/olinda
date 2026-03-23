@@ -8,14 +8,23 @@ class StudentModel:
     self.featurizer = featurizer
     self.metadata = metadata or {}
 
-  def predict(self, X=None, smiles: list[str] | None = None) -> np.ndarray:
+  def predict(self, X=None, smiles: list[str] | None = None, batch_size: int = 65536) -> np.ndarray:
     if X is None:
       if self.featurizer is None or smiles is None:
         raise ValueError("provide X or (smiles + featurizer)")
-      X = self.featurizer.transform(smiles).astype(np.float32)
+      # Batch featurize + predict to keep memory bounded
+      preds = []
+      for i in range(0, len(smiles), batch_size):
+        Xb = self.featurizer.transform(smiles[i : i + batch_size]).astype(np.float32)
+        preds.append(self.booster.predict(xgb.DMatrix(Xb)))
+      return np.concatenate(preds) if preds else np.zeros(0, dtype=np.float32)
+    if len(X) > batch_size:
+      preds = []
+      for i in range(0, len(X), batch_size):
+        preds.append(self.booster.predict(xgb.DMatrix(X[i : i + batch_size])))
+      return np.concatenate(preds)
     d = xgb.DMatrix(X)
-    y = self.booster.predict(d)
-    return np.asarray(y)
+    return np.asarray(self.booster.predict(d))
 
   def save(self, out_dir: str | Path) -> None:
     """Save booster + training metadata. Never overwrites pack meta.json."""

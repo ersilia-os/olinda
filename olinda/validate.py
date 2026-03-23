@@ -119,6 +119,40 @@ def _coverage(y, p, std_scale: float = 1.0) -> float:
   return float(np.mean(np.abs(r) <= std_scale * s))
 
 
+def _auc_roc(y, p, threshold: float = 0.5) -> float:
+  """AUC-ROC: binarise *y* at *threshold*, score with *p*.
+
+  Pure-NumPy implementation using the trapezoidal rule on the ROC curve.
+  Returns NaN when only one class is present after binarisation.
+  """
+  y = np.asarray(y, dtype=np.float64)
+  p = np.asarray(p, dtype=np.float64)
+  labels = (y >= threshold).astype(np.int64)
+
+  # AUC is undefined when only one class is present
+  if labels.sum() == 0 or labels.sum() == len(labels):
+    return float("nan")
+
+  # Sort by descending predicted score
+  order = np.argsort(-p)
+  labels_sorted = labels[order]
+
+  # Cumulative TP / FP counts
+  tps = np.cumsum(labels_sorted)
+  fps = np.cumsum(1 - labels_sorted)
+
+  # Append origin (0, 0)
+  tps = np.concatenate([[0], tps])
+  fps = np.concatenate([[0], fps])
+
+  # Normalise to rates
+  tpr = tps / tps[-1]
+  fpr = fps / fps[-1]
+
+  # Trapezoidal AUC
+  return float(np.trapezoid(tpr, fpr))
+
+
 def _bootstrap_ci(y, p, metric_fn, n_boot: int = 200, seed: int = 0) -> tuple[float, float]:
   rng = np.random.default_rng(seed)
   n = len(y)
@@ -301,6 +335,45 @@ def _erfinv(x: float) -> float:
   return s * math.sqrt(math.sqrt(t * t - ln / a) - t)
 
 
+def _plot_roc_curve(y, p, out_png: Path, threshold: float = 0.5):
+  """Plot the ROC curve (FPR vs TPR) with AUC annotated."""
+  y = np.asarray(y, dtype=np.float64)
+  p = np.asarray(p, dtype=np.float64)
+  labels = (y >= threshold).astype(np.int64)
+
+  n_pos = int(labels.sum())
+  n_neg = int(len(labels) - n_pos)
+  if n_pos == 0 or n_neg == 0:
+    return  # ROC undefined with a single class
+
+  order = np.argsort(-p)
+  labels_sorted = labels[order]
+
+  tps = np.cumsum(labels_sorted)
+  fps = np.cumsum(1 - labels_sorted)
+
+  tps = np.concatenate([[0], tps])
+  fps = np.concatenate([[0], fps])
+
+  tpr = tps / n_pos
+  fpr = fps / n_neg
+
+  auc = float(np.trapezoid(tpr, fpr))
+
+  plt.figure()
+  plt.plot(fpr, tpr, linewidth=2, label=f"ROC (AUC = {auc:.4f})")
+  plt.plot([0, 1], [0, 1], linestyle="--", color="grey", linewidth=1, label="Random")
+  plt.xlim(-0.01, 1.01)
+  plt.ylim(-0.01, 1.01)
+  plt.xlabel("False Positive Rate")
+  plt.ylabel("True Positive Rate")
+  plt.title("ROC Curve")
+  plt.legend(loc="lower right")
+  plt.tight_layout()
+  plt.savefig(out_png, dpi=200)
+  plt.close()
+
+
 def _plot_qq_residuals(y, p, out_png: Path):
   r = (p - y).astype(np.float64)
   if len(r) == 0:
@@ -353,6 +426,7 @@ def validate_regression(
     "concordance": _concordance_index(y, p),
     "coverage_1std": _coverage(y, p, std_scale=1.0),
     "coverage_2std": _coverage(y, p, std_scale=2.0),
+    "auc_roc": _auc_roc(y, p, threshold=0.5),
   }
 
   ci = {
@@ -361,6 +435,7 @@ def validate_regression(
     "r2_ci95": _bootstrap_ci(y, p, _r2, n_boot=n_boot, seed=3),
     "pearson_ci95": _bootstrap_ci(y, p, _pearsonr, n_boot=n_boot, seed=4),
     "spearman_ci95": _bootstrap_ci(y, p, _spearmanr, n_boot=n_boot, seed=5),
+    "auc_roc_ci95": _bootstrap_ci(y, p, _auc_roc, n_boot=n_boot, seed=6),
   }
 
   logger.info(
@@ -373,7 +448,8 @@ def validate_regression(
     f"spearman={metrics['spearman']:.6f} "
     f"concordance={metrics['concordance']:.6f} "
     f"coverage_1std={metrics['coverage_1std']:.6f} "
-    f"coverage_2std={metrics['coverage_2std']:.6f}"
+    f"coverage_2std={metrics['coverage_2std']:.6f} "
+    f"auc_roc={metrics['auc_roc']:.6f}"
   )
   logger.debug(
     "Validation CI95: "
@@ -381,7 +457,8 @@ def validate_regression(
     f"rmse_ci95={ci['rmse_ci95']} "
     f"r2_ci95={ci['r2_ci95']} "
     f"pearson_ci95={ci['pearson_ci95']} "
-    f"spearman_ci95={ci['spearman_ci95']}"
+    f"spearman_ci95={ci['spearman_ci95']} "
+    f"auc_roc_ci95={ci['auc_roc_ci95']}"
   )
 
   _plot_pred_vs_true(y, p, vdir / "pred_vs_true.png")
@@ -389,6 +466,7 @@ def validate_regression(
   _plot_residual_vs_pred(y, p, vdir / "residual_vs_pred.png")
   _plot_calibration_bins(y, p, vdir / "calibration_bins.png")
   _plot_qq_residuals(y, p, vdir / "residuals_qq.png")
+  _plot_roc_curve(y, p, vdir / "roc_curve.png")
 
   report = {"metrics": metrics, "ci": ci}
 

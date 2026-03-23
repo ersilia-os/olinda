@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 import xgboost as xgb
 
 from olinda.helpers import logger
@@ -88,7 +89,6 @@ class ParquetDataIter(xgb.DataIter):
     self.shuffle_row_groups = bool(shuffle_row_groups)
     self.seed = int(seed)
 
-    self._batches: list | None = None
     self._iter = None
 
   def reset(self) -> None:
@@ -96,16 +96,23 @@ class ParquetDataIter(xgb.DataIter):
     if self.w_col:
       cols.append(self.w_col)
 
-    scanner = self.dataset.scanner(columns=cols, batch_size=self.batch_rows)
-    batches = list(scanner.to_batches())
+    if self.shuffle_row_groups:
+      # Shuffle at file (fragment) level — only metadata in memory
+      fragments = list(self.dataset.get_fragments())
+      if len(fragments) > 1:
+        rng = np.random.default_rng(self.seed)
+        rng.shuffle(fragments)
 
-    if self.shuffle_row_groups and len(batches) > 1:
-      rng = np.random.default_rng(self.seed)
-      order = rng.permutation(len(batches))
-      batches = [batches[i] for i in order]
+      def _lazy():
+        for frag in fragments:
+          pf = pq.ParquetFile(frag.path)
+          for batch in pf.iter_batches(batch_size=self.batch_rows, columns=cols):
+            yield batch
 
-    self._batches = batches
-    self._iter = iter(self._batches)
+      self._iter = _lazy()
+    else:
+      scanner = self.dataset.scanner(columns=cols, batch_size=self.batch_rows)
+      self._iter = scanner.to_batches()
 
   def next(self, input_data) -> bool:  # type: ignore[override]
     if self._iter is None:

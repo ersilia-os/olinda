@@ -102,14 +102,25 @@ def _smiles_to_fp(smi, fp_size, radius, is_smarts, which, sanitize):
 
 
 def smiles_to_fps(smiles, fp_size, which, radius, is_smarts, sanitize, njobs):
+  from functools import partial
+
   xs = list(smiles)
+  n = len(xs)
+  if n == 0:
+    return np.empty((0, fp_size), dtype=np.float32)
+  out = np.empty((n, fp_size), dtype=np.float32)
   if njobs and njobs > 1:
-    args = [(s, fp_size, radius, is_smarts, which, sanitize) for s in xs]
+    _fn = partial(
+      _smiles_to_fp, fp_size=fp_size, radius=radius,
+      is_smarts=is_smarts, which=which, sanitize=sanitize,
+    )
     with Pool(processes=njobs) as pool:
-      fps = pool.starmap(_smiles_to_fp, args)
+      for i, fp in enumerate(pool.imap(_fn, xs, chunksize=max(1, n // (njobs * 4)))):
+        out[i] = fp
   else:
-    fps = [_smiles_to_fp(s, fp_size, radius, is_smarts, which, sanitize) for s in xs]
-  return np.asarray(fps, dtype=np.float32)
+    for i, s in enumerate(xs):
+      out[i] = _smiles_to_fp(s, fp_size, radius, is_smarts, which, sanitize)
+  return out
 
 
 @dataclass(frozen=True)

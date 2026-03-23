@@ -70,10 +70,17 @@ opt_task = click.option(
   "--task", type=click.Choice(["regression", "classification"]), default="regression", show_default=True
 )
 opt_time_budget = click.option(
-  "--time-budget", required=False, default=None, type=int, help="Optuna time budget (seconds)"
+  "--time-budget", required=False, default=600, type=int, show_default=True, help="Optuna time budget (seconds)"
 )
-opt_trials = click.option("--trials", default=50, type=int, show_default=True)
+opt_trials = click.option("--trials", default=10, type=int, show_default=True)
 opt_no_onnx = click.option("--no-onnx", is_flag=True, default=False, help="Skip ONNX export")
+opt_class_weight = click.option(
+  "--class-weight",
+  type=click.Choice(["auto", "none"]),
+  default="none",
+  show_default=True,
+  help="Class weighting for imbalanced binary classification (auto: detect and compensate)",
+)
 
 
 @cli.command("pack", help="PACK: convert teacher Parquet into sharded distill dataset.")
@@ -146,6 +153,8 @@ def _fit_impl(
   fp_size,
   radius,
   njobs,
+  fp_batch_rows,
+  robustness,
   seed,
   num_boost_round,
   early_stopping,
@@ -156,6 +165,7 @@ def _fit_impl(
   time_budget,
   trials,
   no_onnx,
+  class_weight="none",
 ):
   input_path = Path(input_path)
   out_dir = Path(out_dir)
@@ -170,13 +180,25 @@ def _fit_impl(
       y_col=y_col,
       split_col=split_col,
       w_col=w_col,
+      smiles_col=smiles_col,
+      fp_kind=fp,
+      fp_size=fp_size,
+      radius=radius,
+      njobs=njobs,
+      fp_batch_rows=fp_batch_rows,
       val_frac=split_frac,
       seed=seed,
+      class_weight=class_weight,
     )
 
   d = ParquetDistillDataset(packed_dir)
   ntr, nva = d.count()
   logger.info(f"Packed dataset rows: train={ntr} val={nva}")
+
+  # Read class imbalance info from packing metadata
+  scale_pos_weight = d.meta.get("scale_pos_weight") if task == "classification" else None
+  if scale_pos_weight is not None:
+    logger.info(f"Class imbalance: scale_pos_weight={scale_pos_weight:.6f} (from packed meta)")
 
   train_iter = ParquetDataIter(
     d.train,
@@ -202,7 +224,10 @@ def _fit_impl(
       seed=seed,
     )
 
-  trainer = XGBTrainer(task=task, num_boost_round=num_boost_round, early_stopping_rounds=early_stopping)
+  trainer = XGBTrainer(
+    task=task, num_boost_round=num_boost_round, early_stopping_rounds=early_stopping,
+    scale_pos_weight=scale_pos_weight,
+  )
   booster, meta = trainer.fit_external(
     train_iter=train_iter, val_iter=val_iter, time_budget=time_budget, n_trials=trials
   )
@@ -212,6 +237,8 @@ def _fit_impl(
 
   if not no_onnx:
     export_xgb_onnx(student.booster, out_dir / "student.onnx", input_dim=int(d.x_dim))
+
+  _plot_training_loss(meta, out_dir)
 
   if nva > 0:
     validate_regression(
@@ -223,7 +250,11 @@ def _fit_impl(
       n_boot=200,
     )
 
-    if input_path.is_file() and input_path.suffix.lower() in (".csv", ".tsv", ".parquet", ".pq"):
+    if (
+      robustness
+      and input_path.is_file()
+      and input_path.suffix.lower() in (".csv", ".tsv", ".parquet", ".pq")
+    ):
       try:
         robustness_eval_smiles(
           data_path=input_path,
@@ -264,13 +295,15 @@ def _fit_impl(
 @click.option("--fp-size", default=2048, type=int, show_default=True)
 @click.option("--radius", default=2, type=int, show_default=True)
 @click.option("--njobs", default=8, type=int, show_default=True)
+@click.option("--fp-batch-rows", default=512, type=int, show_default=True)
+@click.option("--robustness", is_flag=True, default=False, help="Run robustness evaluation")
 @click.option("--seed", default=42, type=int, show_default=True)
 @click.option("--num-boost-round", default=1000, type=int, show_default=True)
 @click.option("--early-stopping", default=50, type=int, show_default=True)
 @click.option("--val-frac", default=0.1, type=float, show_default=True)
 @click.option("--enum-max", default=8, type=int, show_default=True)
 @click.option("--ensemble-size", default=5, type=int, show_default=True)
-@apply_opts(opt_task, opt_time_budget, opt_trials, opt_no_onnx)
+@apply_opts(opt_task, opt_time_budget, opt_trials, opt_no_onnx, opt_class_weight)
 def fit_cmd(
   input_path,
   out_dir,
@@ -285,6 +318,8 @@ def fit_cmd(
   fp_size,
   radius,
   njobs,
+  fp_batch_rows,
+  robustness,
   seed,
   num_boost_round,
   early_stopping,
@@ -295,6 +330,7 @@ def fit_cmd(
   time_budget,
   trials,
   no_onnx,
+  class_weight,
 ):
   _fit_impl(
     input_path=input_path,
@@ -310,6 +346,8 @@ def fit_cmd(
     fp_size=fp_size,
     radius=radius,
     njobs=njobs,
+    fp_batch_rows=fp_batch_rows,
+    robustness=robustness,
     seed=seed,
     num_boost_round=num_boost_round,
     early_stopping=early_stopping,
@@ -320,6 +358,7 @@ def fit_cmd(
     time_budget=time_budget,
     trials=trials,
     no_onnx=no_onnx,
+    class_weight=class_weight,
   )
 
 
@@ -392,7 +431,7 @@ def predict_cmd(
       )
       logger.info(
         "Using Fingerprint featurizer: "
-        f"which={fp} fp_size={fp_size} radius={radius} smarts={smarts} sanitize={not no_sanitize} njobs={njobs}"
+        f"which={fp} fp_size={fp_size} radius={radius} sanitize={not no_sanitize} njobs={njobs}"
       )
     logger.info(f"Predicting smiles rows={len(smiles)}")
     y = student.predict(smiles=smiles)
@@ -489,6 +528,8 @@ def distill_cmd(
     fp_size=2048,
     radius=2,
     njobs=8,
+    fp_batch_rows=512,
+    robustness=False,
     seed=seed,
     num_boost_round=1000,
     early_stopping=50,
@@ -509,6 +550,52 @@ def _load_default_featurizer():
     "Loading default featurizer for hard labels (Fingerprint morgan fp_size=768 is NOT valid; configure yours)"
   )
   return Fingerprint(which="morgan", fp_size=768, radius=2, njobs=1)
+
+
+def _plot_training_loss(meta: dict, out_dir: Path) -> None:
+  evals = meta.get("evals_result")
+  if not evals:
+    return
+  train = evals.get("train") or {}
+  val = evals.get("val") or {}
+  if not train and not val:
+    return
+  metric = None
+  if val:
+    metric = next(iter(val.keys()), None)
+  if metric is None and train:
+    metric = next(iter(train.keys()), None)
+  if metric is None:
+    return
+  train_vals = train.get(metric, []) if train else []
+  val_vals = val.get(metric, []) if val else []
+  if not train_vals and not val_vals:
+    return
+
+  try:
+    import matplotlib.pyplot as plt
+  except Exception as exc:
+    logger.warning(f"Skipping training loss plot: {exc}")
+    return
+
+  try:
+    fig, ax = plt.subplots(figsize=(7, 4), dpi=120)
+    if train_vals:
+      ax.plot(range(1, len(train_vals) + 1), train_vals, label="train")
+    if val_vals:
+      ax.plot(range(1, len(val_vals) + 1), val_vals, label="val")
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel(metric)
+    ax.set_title("Training loss")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    out_path = out_dir / "train_loss.png"
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    logger.info(f"Training loss plot saved to {out_path}")
+  except Exception as exc:
+    logger.warning(f"Failed to write training loss plot: {exc}")
 
 
 def _load_predict_input(input_path: Path, columns: str | None, smiles_col: str) -> dict:

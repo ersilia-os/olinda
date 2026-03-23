@@ -12,6 +12,7 @@ from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 
+from olinda.train.xgb import detect_training_device
 from olinda.helpers import logger
 from olinda.featurizer import Fingerprint
 from olinda.validate import _mae, _rmse, _spearmanr
@@ -170,6 +171,10 @@ def _fit_xgb(
     "eval_metric": "mae",
     "seed": int(seed),
   }
+  device, device_reason = detect_training_device()
+  if device == "cuda":
+    params["device"] = "cuda"
+  logger.info(f"Robustness XGBoost device: {device} ({device_reason})")
 
   dtrain = xgb.DMatrix(X_train, label=y_train)
   evals = []
@@ -256,7 +261,15 @@ def robustness_eval_smiles(
   logger.info(f"Loaded dataset rows={len(smiles)}")
 
   featurizer = Fingerprint(which=fp, fp_size=int(fp_size), radius=int(radius), njobs=int(njobs))
-  X = featurizer.transform(smiles).astype(np.float32)
+
+  # Batch featurization to avoid materialising the full matrix at once
+  _FEAT_BATCH = 50_000
+  n = len(smiles)
+  X = np.empty((n, int(fp_size)), dtype=np.float32)
+  for _i in range(0, n, _FEAT_BATCH):
+    _j = min(_i + _FEAT_BATCH, n)
+    X[_i:_j] = featurizer.transform(smiles[_i:_j]).astype(np.float32)
+
   fps = _morgan_bit_fps(smiles, fp_size=int(fp_size), radius=int(radius))
 
   random_split = _random_split(len(smiles), test_frac=test_frac, seed=seed)

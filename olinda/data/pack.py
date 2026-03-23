@@ -108,6 +108,52 @@ def _make_split(n: int, val_frac: float, seed: int) -> np.ndarray:
   return split
 
 
+def _make_stratified_split(
+  y: np.ndarray, val_frac: float, seed: int, threshold: float = 0.5,
+) -> np.ndarray:
+  """Stratified train/val split: each class is split proportionally."""
+  rng = np.random.default_rng(seed)
+  n = len(y)
+  split = np.zeros(n, dtype=np.int8)
+
+  pos_idx = np.where(y >= threshold)[0]
+  neg_idx = np.where(y < threshold)[0]
+
+  for idx_group in (pos_idx, neg_idx):
+    if len(idx_group) == 0:
+      continue
+    perm = rng.permutation(len(idx_group))
+    n_val = max(1, int(round(len(idx_group) * val_frac)))
+    split[idx_group[perm[:n_val]]] = 1
+
+  return split
+
+
+def _count_classes(
+  input_path: Path, y_col: str, threshold: float = 0.5,
+) -> tuple[int, int]:
+  """Count positive (y >= threshold) and negative samples in a single y-only pass."""
+  suffix = input_path.suffix.lower()
+  n_pos = 0
+  n_neg = 0
+  if suffix in (".parquet", ".pq"):
+    dset = ds.dataset(str(input_path), format="parquet")
+    for batch in dset.scanner(columns=[y_col]).to_batches():
+      y = batch.column(y_col).to_numpy()
+      n_pos += int((y >= threshold).sum())
+      n_neg += int((y < threshold).sum())
+  elif suffix in (".csv", ".tsv"):
+    sep = "\t" if suffix == ".tsv" else ","
+    for chunk in pd.read_csv(str(input_path), sep=sep, usecols=[y_col], chunksize=100_000):
+      y = chunk[y_col].to_numpy()
+      n_pos += int((y >= threshold).sum())
+      n_neg += int((y < threshold).sum())
+  return n_pos, n_neg
+
+
+_IMBALANCE_THRESHOLD = 10.0
+
+
 def _write_shards(
   out_dir: Path,
   table: pa.Table,
@@ -165,8 +211,8 @@ def pack_distill_dataset(
 
   meta_path = out_dir / "meta.json"
   if meta_path.exists():
-    with open(meta_path, "r") as fp:
-      meta = json.load(fp)
+    with open(meta_path, "r") as fh:
+      meta = json.load(fh)
     logger.info(f"Found existing packed dataset: {out_dir} (fingerprint={meta.get('fingerprint')})")
     return out_dir
 
@@ -181,7 +227,8 @@ def pack_distill_dataset(
   scanner = dset.scanner(
     columns=[x_col, y_soft_col]
     + ([w_col] if w_col and w_col in schema.names else [])
-    + ([split_col] if split_col in schema.names else [])
+    + ([split_col] if split_col in schema.names else []),
+    batch_size=shard_rows,
   )
 
   total_rows = dset.count_rows()
@@ -197,7 +244,13 @@ def pack_distill_dataset(
   ) as prog:
     task = prog.add_task("writing shards", total=total_rows)
 
-    tables = []
+    tr_dir = out_dir / "train"
+    va_dir = out_dir / "val"
+    _ensure_dir(tr_dir)
+    _ensure_dir(va_dir)
+
+    train_rows = 0
+    val_rows = 0
     seen = 0
     for batch in scanner.to_batches():
       t = pa.Table.from_batches([batch])
@@ -212,14 +265,30 @@ def pack_distill_dataset(
       t = _coerce_cols(
         t, y_col=y_soft_col, w_col=w_col if w_col in t.column_names else None, split_col=split_col
       )
-      tables.append(t)
+
+      # Stream train/val portions directly to shard files — no accumulation
+      split_arr = t.column(split_col).to_numpy(zero_copy_only=False).astype(np.int8)
+      tr_mask = pa.array(split_arr == 0)
+      va_mask = pa.array(split_arr == 1)
+
+      tr_sub = t.filter(tr_mask)
+      if tr_sub.num_rows > 0:
+        pq.write_table(
+          tr_sub, tr_dir / f"part-{uuid.uuid4().hex[:10]}.parquet",
+          compression=compression, use_dictionary=False,
+        )
+        train_rows += tr_sub.num_rows
+
+      va_sub = t.filter(va_mask)
+      if va_sub.num_rows > 0:
+        pq.write_table(
+          va_sub, va_dir / f"part-{uuid.uuid4().hex[:10]}.parquet",
+          compression=compression, use_dictionary=False,
+        )
+        val_rows += va_sub.num_rows
+
       seen += t.num_rows
       prog.update(task, advance=t.num_rows)
-
-    full = pa.concat_tables(tables, promote=True)
-    train_rows, val_rows = _write_shards(
-      out_dir, full, split_col=split_col, shard_rows=shard_rows, compression=compression
-    )
 
   hard_rows = 0
   if hard_labels is not None:
@@ -345,10 +414,17 @@ def pack_feature_table(
   y_col: str = "y",
   split_col: str = "split",
   w_col: str | None = None,
+  smiles_col: str = "smiles",
+  fp_kind: str = "morgan",
+  fp_size: int = 2048,
+  radius: int = 2,
+  njobs: int = 8,
+  fp_batch_rows: int = 512,
   val_frac: float | None = None,
   seed: int = 42,
   shard_rows: int = 200_000,
   compression: str = "zstd",
+  class_weight: str = "none",
 ) -> Path:
   input_path = Path(input_path)
   out_dir = Path(out_dir)
@@ -356,8 +432,8 @@ def pack_feature_table(
 
   meta_path = out_dir / "meta.json"
   if meta_path.exists():
-    with open(meta_path, "r") as fp:
-      meta = json.load(fp)
+    with open(meta_path, "r") as fh:
+      meta = json.load(fh)
     logger.info(f"Found existing packed dataset: {out_dir} (fingerprint={meta.get('fingerprint')})")
     return out_dir
 
@@ -367,10 +443,43 @@ def pack_feature_table(
   _ensure_dir(va_dir)
 
   rng = np.random.default_rng(seed)
+
+  # ── Class imbalance detection ──
+  n_pos = n_neg = 0
+  imbalance_ratio = 1.0
+  scale_pos_weight = None
+  if class_weight == "auto":
+    logger.info(f"Scanning '{y_col}' for class imbalance...")
+    n_pos, n_neg = _count_classes(input_path, y_col)
+    imbalance_ratio = max(n_pos, n_neg) / max(min(n_pos, n_neg), 1)
+    if imbalance_ratio > _IMBALANCE_THRESHOLD:
+      scale_pos_weight = n_neg / max(n_pos, 1)
+      logger.info(
+        f"Imbalance detected: {n_pos:,} pos / {n_neg:,} neg "
+        f"(ratio={imbalance_ratio:.1f}x) → scale_pos_weight={scale_pos_weight:.6f}"
+      )
+    else:
+      logger.info(f"Class balance OK: {n_pos:,} pos / {n_neg:,} neg (ratio={imbalance_ratio:.1f}x)")
+
   x_cols = None
   x_dim = None
   train_rows = 0
   val_rows = 0
+  use_smiles = False
+  featurizer = None
+  if fp_batch_rows > 1000:
+    logger.warning(f"fp_batch_rows capped at 1000 (requested {fp_batch_rows})")
+    fp_batch_rows = 1000
+  fp_batch_rows = max(1, int(fp_batch_rows))
+
+  def _should_use_smiles(df: pd.DataFrame, num_cols: list[str]) -> bool:
+    if smiles_col not in df.columns:
+      return False
+    if not num_cols:
+      return True
+    if len(num_cols) >= 32:
+      return False
+    return True
 
   def write_parts(table: pa.Table):
     nonlocal train_rows, val_rows
@@ -395,7 +504,7 @@ def pack_feature_table(
     val_rows += int(len(va_idx))
 
   def chunk_to_table(df: pd.DataFrame) -> pa.Table:
-    nonlocal x_cols, x_dim
+    nonlocal x_cols, x_dim, use_smiles, featurizer
     if y_col not in df.columns:
       raise ValueError(f"missing y column: {y_col}")
 
@@ -403,13 +512,43 @@ def pack_feature_table(
       exclude = {y_col, split_col}
       if w_col:
         exclude.add(w_col)
+      if smiles_col in df.columns:
+        exclude.add(smiles_col)
       num_cols = [c for c in df.select_dtypes(include=[np.number]).columns if c not in exclude]
-      if not num_cols:
-        raise ValueError("no numeric feature columns found")
-      x_cols = num_cols
-      x_dim = len(x_cols)
+      use_smiles_local = _should_use_smiles(df, num_cols)
+      if use_smiles_local:
+        use_smiles = True
+        x_cols = []
+        x_dim = int(fp_size)
+        from olinda.featurizer import Fingerprint
 
-    X = df[x_cols].to_numpy(dtype=np.float32, copy=False)
+        featurizer = Fingerprint(which=fp_kind, fp_size=int(fp_size), radius=int(radius), njobs=int(njobs))
+        logger.info(
+          "Using SMILES fingerprints for features: "
+          f"smiles_col={smiles_col} fp={fp_kind} fp_size={fp_size} radius={radius} "
+          f"njobs={njobs} fp_batch_rows={fp_batch_rows}"
+        )
+      else:
+        if not num_cols:
+          raise ValueError("no numeric feature columns found")
+        x_cols = num_cols
+        x_dim = len(x_cols)
+        logger.info(f"Using numeric feature columns: {x_dim} columns")
+
+    if use_smiles:
+      if smiles_col not in df.columns:
+        raise ValueError(f"missing smiles column: {smiles_col}")
+      if featurizer is None:
+        raise ValueError("fingerprint featurizer was not initialized")
+      fz = featurizer
+      smiles = df[smiles_col].astype(str).tolist()
+      fps = []
+      for i in range(0, len(smiles), fp_batch_rows):
+        fps.append(fz.transform(smiles[i : i + fp_batch_rows]))
+      X = np.vstack(fps).astype(np.float32)
+    else:
+      X = df[x_cols].to_numpy(dtype=np.float32, copy=False)
+
     y = df[y_col].to_numpy(dtype=np.float32, copy=False)
 
     if w_col and w_col in df.columns:
@@ -420,7 +559,7 @@ def pack_feature_table(
     if split_col in df.columns:
       split = df[split_col].to_numpy(dtype=np.int8, copy=False)
     elif val_frac and val_frac > 0:
-      split = (rng.random(len(X)) < float(val_frac)).astype(np.int8)
+      split = _make_stratified_split(y, val_frac=float(val_frac), seed=seed)
     else:
       split = np.zeros(len(X), dtype=np.int8)
 
@@ -434,18 +573,38 @@ def pack_feature_table(
       "split": pa.array(split, type=pa.int8()),
     })
 
-  if input_path.suffix.lower() in (".parquet", ".pq"):
+  suffix = input_path.suffix.lower()
+  logger.info(f"Packing feature table from {input_path}")
+  if suffix in (".parquet", ".pq"):
     dset = ds.dataset(str(input_path), format="parquet")
+    total_rows = dset.count_rows()
+    logger.info(f"Input rows: {total_rows}")
     scanner = dset.scanner(batch_size=shard_rows)
+    logger.info("Writing shards...")
+    seen = 0
     for batch in scanner.to_batches():
       df = pa.Table.from_batches([batch]).to_pandas()
       table = chunk_to_table(df)
       write_parts(table)
-  elif input_path.suffix.lower() in (".csv", ".tsv"):
-    sep = "\t" if input_path.suffix.lower() == ".tsv" else ","
+      seen += int(table.num_rows)
+    logger.info(f"Processed rows: {seen}")
+  elif suffix in (".csv", ".tsv"):
+    sep = "\t" if suffix == ".tsv" else ","
+    total_rows = None
+    try:
+      with open(input_path, "r", encoding="utf-8") as fh:
+        total_rows = int(sum(1 for _ in fh)) - 1
+    except Exception:
+      total_rows = None
+    if total_rows is not None and total_rows > 0:
+      logger.info(f"Input rows: {total_rows}")
+    logger.info("Writing shards...")
+    seen = 0
     for df in pd.read_csv(str(input_path), sep=sep, chunksize=shard_rows):
       table = chunk_to_table(df)
       write_parts(table)
+      seen += int(table.num_rows)
+    logger.info(f"Processed rows: {seen}")
   else:
     raise ValueError("input must be .csv/.tsv/.parquet")
 
@@ -468,11 +627,28 @@ def pack_feature_table(
       "w_col": w_col,
       "val_frac": val_frac,
       "seed": seed,
+      "smiles_col": smiles_col,
+      "fp": fp_kind,
+      "fp_size": int(fp_size),
+      "radius": int(radius),
+      "njobs": int(njobs),
+      "class_weight": class_weight,
     }),
   }
+  if class_weight == "auto" and imbalance_ratio > _IMBALANCE_THRESHOLD:
+    meta["class_weight"] = "auto"
+    meta["n_pos"] = int(n_pos)
+    meta["n_neg"] = int(n_neg)
+    meta["imbalance_ratio"] = round(float(imbalance_ratio), 2)
+    meta["scale_pos_weight"] = float(scale_pos_weight)
 
-  with open(meta_path, "w") as fp:
-    json.dump(meta, fp, indent=2)
+  if use_smiles and featurizer is not None:
+    meta["feature_source"] = "smiles"
+    meta["featurizer"] = featurizer.to_dict()
+    meta["featurizer_class"] = type(featurizer).__name__
+
+  with open(meta_path, "w") as fh:
+    json.dump(meta, fh, indent=2)
 
   logger.info(f"Packed dataset summary: train_rows={train_rows} val_rows={val_rows} x_dim={x_dim}")
   logger.success(f"Packed dataset written to {out_dir}")

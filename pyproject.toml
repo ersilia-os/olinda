@@ -12,11 +12,12 @@ dependencies = [
     "pyarrow>=23.0.1",
     "rdkit>=2025.9.5",
     "rich-click>=1.9.7",
-    "xgboost-cpu>=3.2.0",
+    "xgboost>=3.2.0",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "pytest>=8.0",
     "ruff>=0.15.2",
 ]
 train = [
