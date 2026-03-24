@@ -34,8 +34,9 @@ Olinda fits a student model from either packed feature tables or SMILES-derived 
 - **Automatic GPU detection** &mdash; seamlessly switches between CPU and CUDA at runtime
 - **Efficient hyperparameter tuning** &mdash; three-phase Optuna search with DMatrix caching and Hyperband pruning
 - **Streaming data pipeline** &mdash; `QuantileDMatrix` with Parquet-backed iterators for datasets that exceed RAM
-- **Comprehensive evaluation** &mdash; regression metrics with bootstrap CIs, ROC curves, calibration plots, and QQ diagnostics
+- **Comprehensive evaluation** &mdash; regression metrics with bootstrap CIs, ROC curves, calibration plots, QQ diagnostics, and density scatter maps
 - **Robustness analysis** &mdash; scaffold/similarity splits, SMILES perturbation invariance, and ensemble uncertainty
+- **Combined soft + hard label training** &mdash; mix teacher soft labels with ground-truth hard labels via `--hard-labels`
 - **One-command distillation** &mdash; pack, train, evaluate, and export in a single `olinda distill` call
 
 ---
@@ -51,7 +52,7 @@ Optional extras:
 | Extra | Purpose | Install |
 |-------|---------|---------|
 | `train` | Hyperparameter tuning (Optuna) | `pip install -e ".[train]"` |
-| `viz` | Validation plots (Matplotlib) | `pip install -e ".[viz]"` |
+| `viz` | Validation plots (Matplotlib, stylia, scipy) | `pip install -e ".[viz]"` |
 | `dev` | Linting and testing (Ruff, pytest) | `pip install -e ".[dev]"` |
 
 Olinda ships with standard `xgboost`; GPU boosting activates automatically when a CUDA-enabled build and compatible GPU are detected.
@@ -68,6 +69,21 @@ olinda fit \
   --out runs/my_model \
   --y-col activity \
   --split 0.15
+```
+
+### Train with combined soft + hard labels
+
+```bash
+olinda fit \
+  --input soft_labels.csv \
+  --out runs/combined \
+  --y-col clf \
+  --smiles-col smiles \
+  --split 0.15 \
+  --hard-labels hard_labels.csv \
+  --hard-smiles-col Drug \
+  --hard-y-col Y \
+  --hard-weight 1.0
 ```
 
 ### Predict
@@ -132,6 +148,10 @@ olinda fit \
 | `--no-onnx` | `false` | Skip ONNX export |
 | `--fp` | `morgan` | Fingerprint type for SMILES input |
 | `--fp-size` | `2048` | Fingerprint bit length |
+| `--hard-labels` | *none* | CSV/Parquet with hard labels (SMILES + target) |
+| `--hard-smiles-col` | `smiles` | SMILES column in hard-labels file |
+| `--hard-y-col` | `y` | Target column in hard-labels file |
+| `--hard-weight` | `1.0` | Sample weight for hard-label rows |
 
 ### `olinda predict`
 
@@ -206,7 +226,7 @@ All metrics include bootstrap 95% confidence intervals (200 replicates).
 
 | File | Description |
 |------|-------------|
-| `pred_vs_true.png` | Predicted vs. true scatter |
+| `pred_vs_true.png` | Predicted vs. true density scatter (viridis colormap) |
 | `residual_hist.png` | Residual distribution |
 | `residual_vs_pred.png` | Residuals vs. predicted values |
 | `calibration_bins.png` | Binned calibration curve |

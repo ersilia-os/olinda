@@ -425,6 +425,10 @@ def pack_feature_table(
   shard_rows: int = 200_000,
   compression: str = "zstd",
   class_weight: str = "none",
+  hard_labels: str | Path | None = None,
+  hard_smiles_col: str = "smiles",
+  hard_y_col: str = "y",
+  hard_weight: float = 1.0,
 ) -> Path:
   input_path = Path(input_path)
   out_dir = Path(out_dir)
@@ -608,6 +612,75 @@ def pack_feature_table(
   else:
     raise ValueError("input must be .csv/.tsv/.parquet")
 
+  # ── Append hard labels (if provided) ──
+  hard_rows = 0
+  if hard_labels is not None:
+    hard_labels = Path(hard_labels)
+    logger.info(f"Packing hard labels from {hard_labels}")
+
+    if hard_labels.suffix.lower() in (".parquet", ".pq"):
+      hdf = pd.read_parquet(str(hard_labels))
+    else:
+      hdf = pd.read_csv(str(hard_labels))
+
+    if hard_smiles_col not in hdf.columns or hard_y_col not in hdf.columns:
+      raise ValueError(f"hard labels must contain columns: {hard_smiles_col}, {hard_y_col}")
+
+    from olinda.featurizer import Fingerprint
+
+    hard_fz = featurizer if featurizer is not None else Fingerprint(
+      which=fp_kind, fp_size=int(x_dim or fp_size), radius=int(radius), njobs=int(njobs),
+    )
+    hard_dim = getattr(hard_fz, "fp_size", x_dim)
+
+    if hard_dim != x_dim:
+      raise ValueError(f"hard featurizer dim={hard_dim} != soft x_dim={x_dim}")
+
+    h_smiles = hdf[hard_smiles_col].astype(str).tolist()
+    h_y = hdf[hard_y_col].to_numpy(dtype=np.float32)
+    h_w = np.full(len(hdf), float(hard_weight), dtype=np.float32)
+
+    if val_frac and val_frac > 0:
+      h_split = _make_stratified_split(h_y, val_frac=float(val_frac), seed=seed)
+    else:
+      h_split = np.zeros(len(hdf), dtype=np.int8)
+
+    for i in range(0, len(h_smiles), fp_batch_rows):
+      j = min(i + fp_batch_rows, len(h_smiles))
+      X = hard_fz.transform(h_smiles[i:j]).astype(np.float32)
+      xs = pa.FixedSizeListArray.from_arrays(pa.array(X.reshape(-1), type=pa.float32()), x_dim)
+
+      ht = pa.table({
+        "x": xs,
+        "y": pa.array(h_y[i:j], type=pa.float32()),
+        "w": pa.array(h_w[i:j], type=pa.float32()),
+        "split": pa.array(h_split[i:j], type=pa.int8()),
+      })
+
+      s = h_split[i:j]
+      tr_idx = np.where(s == 0)[0]
+      va_idx = np.where(s == 1)[0]
+
+      if len(tr_idx):
+        pq.write_table(
+          ht.take(pa.array(tr_idx)),
+          tr_dir / f"part-hard-{uuid.uuid4().hex[:10]}.parquet",
+          compression=compression, use_dictionary=False,
+        )
+        train_rows += int(len(tr_idx))
+
+      if len(va_idx):
+        pq.write_table(
+          ht.take(pa.array(va_idx)),
+          va_dir / f"part-hard-{uuid.uuid4().hex[:10]}.parquet",
+          compression=compression, use_dictionary=False,
+        )
+        val_rows += int(len(va_idx))
+
+      hard_rows += j - i
+
+    logger.info(f"Hard labels packed: {hard_rows} rows (weight={hard_weight})")
+
   meta = {
     "format": "olinda.distill.parquet.v1",
     "x_col": "x",
@@ -617,6 +690,7 @@ def pack_feature_table(
     "x_dim": int(x_dim) if x_dim else 0,
     "train_rows": int(train_rows),
     "val_rows": int(val_rows),
+    "hard_rows": int(hard_rows),
     "val_frac": float(val_frac) if val_frac is not None else 0.0,
     "seed": int(seed),
     "compression": compression,

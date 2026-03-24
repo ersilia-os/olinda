@@ -25,6 +25,8 @@ train = [
 ]
 viz = [
     "matplotlib>=3.10.8",
+    "scipy>=1.11.0",
+    "stylia>=1.0.1",
 ]
 [project.scripts]
 olinda = "olinda.cli:cli"

@@ -10,6 +10,9 @@ import pyarrow.dataset as ds
 import xgboost as xgb
 
 import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
+
+from stylia import label, create_figure, save_figure
 
 from olinda.helpers import logger
 
@@ -239,14 +242,24 @@ def _plot_pred_vs_true(y, p, out_png: Path, max_scatter: int = 200_000):
   lo = float(min(yy.min(), pp.min()))
   hi = float(max(yy.max(), pp.max()))
 
-  plt.figure()
-  plt.scatter(yy, pp, s=6, alpha=0.35)
-  plt.plot([lo, hi], [lo, hi])
-  plt.xlabel("True (val)")
-  plt.ylabel("Predicted (val)")
-  plt.title("Predicted vs True")
-  plt.tight_layout()
-  plt.savefig(out_png, dpi=200)
+  # Compute point density via KDE
+  xy = np.vstack([yy.astype(np.float64), pp.astype(np.float64)])
+  density = gaussian_kde(xy)(xy)
+
+  # Sort by density so densest points render on top
+  order = np.argsort(density)
+
+  fig, am = create_figure(nrows=1, ncols=1)
+  ax = am[0]
+  sc = ax.scatter(
+    yy[order], pp[order],
+    c=density[order], cmap="viridis", s=6, edgecolors="none",
+  )
+  ax.plot([lo, hi], [lo, hi], color="grey", linewidth=1, linestyle="--")
+  cbar = plt.colorbar(sc, ax=ax)
+  cbar.set_label("Density")
+  label(ax, xlabel="True (val)", ylabel="Predicted (val)", title="Predicted vs True")
+  save_figure(str(out_png))
   plt.close()
 
 

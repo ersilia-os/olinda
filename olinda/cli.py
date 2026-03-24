@@ -166,6 +166,10 @@ def _fit_impl(
   trials,
   no_onnx,
   class_weight="none",
+  hard_labels=None,
+  hard_smiles_col="smiles",
+  hard_y_col="y",
+  hard_weight=1.0,
 ):
   input_path = Path(input_path)
   out_dir = Path(out_dir)
@@ -189,6 +193,10 @@ def _fit_impl(
       val_frac=split_frac,
       seed=seed,
       class_weight=class_weight,
+      hard_labels=hard_labels,
+      hard_smiles_col=hard_smiles_col,
+      hard_y_col=hard_y_col,
+      hard_weight=hard_weight,
     )
 
   d = ParquetDistillDataset(packed_dir)
@@ -304,6 +312,7 @@ def _fit_impl(
 @click.option("--enum-max", default=8, type=int, show_default=True)
 @click.option("--ensemble-size", default=5, type=int, show_default=True)
 @apply_opts(opt_task, opt_time_budget, opt_trials, opt_no_onnx, opt_class_weight)
+@apply_opts(opt_hard, opt_hard_smiles, opt_hard_y, opt_hard_weight)
 def fit_cmd(
   input_path,
   out_dir,
@@ -331,6 +340,10 @@ def fit_cmd(
   trials,
   no_onnx,
   class_weight,
+  hard_labels,
+  hard_smiles_col,
+  hard_y_col,
+  hard_weight,
 ):
   _fit_impl(
     input_path=input_path,
@@ -359,6 +372,10 @@ def fit_cmd(
     trials=trials,
     no_onnx=no_onnx,
     class_weight=class_weight,
+    hard_labels=hard_labels,
+    hard_smiles_col=hard_smiles_col,
+    hard_y_col=hard_y_col,
+    hard_weight=hard_weight,
   )
 
 

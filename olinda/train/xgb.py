@@ -414,8 +414,10 @@ class XGBTrainer:
     time_budget: int,
     n_trials: int,
   ) -> tuple[dict, dict]:
+    import warnings
     import optuna
 
+    warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
     optuna.logging.set_verbosity(optuna.logging.INFO)
 
     class _OptunaLogHandler(logging.Handler):
@@ -535,9 +537,10 @@ class XGBTrainer:
           "value": trial_value,
           "params": dict(trial.params),
         })
-        best_value = getattr(study, "best_value", None)
-        if best_value is not None:
-          best_value = float(best_value)
+        try:
+          best_value = float(study.best_value)
+        except ValueError:
+          best_value = None
         logger.info(
           "tune trial: "
           f"id={trial.number} value={trial_value} best={best_value} "
@@ -557,6 +560,11 @@ class XGBTrainer:
       for t in study.trials
       if t.value is not None and t.state == optuna.trial.TrialState.COMPLETE
     ]
+
+    if not completed:
+      logger.warning("tune phase 1: all trials failed — falling back to default parameters")
+      return {}, {"elapsed_seconds": round(time.time() - start, 2), "phase1": {"n_trials": len(study.trials), "all_failed": True}, "best_params": {}}
+
     _worst = float("-inf") if higher else float("inf")
     completed.sort(
       key=lambda t: float(t.value) if t.value is not None else _worst,
