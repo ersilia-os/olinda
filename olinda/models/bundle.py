@@ -3,28 +3,32 @@ from pathlib import Path
 
 
 class StudentModel:
-  def __init__(self, booster: xgb.Booster, featurizer=None, metadata: dict | None = None) -> None:
+  def __init__(self, booster: xgb.Booster, featurizer=None, calibrator=None, metadata: dict | None = None) -> None:
     self.booster = booster
     self.featurizer = featurizer
+    self.calibrator = calibrator
     self.metadata = metadata or {}
 
-  def predict(self, X=None, smiles: list[str] | None = None, batch_size: int = 65536) -> np.ndarray:
+  def predict(self, X=None, smiles: list[str] | None = None, batch_size: int = 65536, calibrate: bool = True) -> np.ndarray:
     if X is None:
       if self.featurizer is None or smiles is None:
         raise ValueError("provide X or (smiles + featurizer)")
-      # Batch featurize + predict to keep memory bounded
       preds = []
       for i in range(0, len(smiles), batch_size):
         Xb = self.featurizer.transform(smiles[i : i + batch_size]).astype(np.float32)
         preds.append(self.booster.predict(xgb.DMatrix(Xb)))
-      return np.concatenate(preds) if preds else np.zeros(0, dtype=np.float32)
-    if len(X) > batch_size:
+      raw = np.concatenate(preds) if preds else np.zeros(0, dtype=np.float32)
+    elif len(X) > batch_size:
       preds = []
       for i in range(0, len(X), batch_size):
         preds.append(self.booster.predict(xgb.DMatrix(X[i : i + batch_size])))
-      return np.concatenate(preds)
-    d = xgb.DMatrix(X)
-    return np.asarray(self.booster.predict(d))
+      raw = np.concatenate(preds)
+    else:
+      raw = np.asarray(self.booster.predict(xgb.DMatrix(X)))
+
+    if calibrate and self.calibrator is not None:
+      return self.calibrator.transform(raw)
+    return raw
 
   def save(self, out_dir: str | Path) -> None:
     """Save booster + training metadata. Never overwrites pack meta.json."""
@@ -57,4 +61,10 @@ class StudentModel:
     if featurizer_factory and "featurizer" in meta:
       fz = featurizer_factory(meta.get("featurizer_class"), meta["featurizer"])
 
-    return cls(booster=booster, featurizer=fz, metadata=meta)
+    cal = None
+    cal_path = out_dir / "calibrator.json"
+    if cal_path.exists():
+      from olinda.calibrate import IsotonicCalibrator
+      cal = IsotonicCalibrator.load(cal_path)
+
+    return cls(booster=booster, featurizer=fz, calibrator=cal, metadata=meta)

@@ -66,23 +66,11 @@ opt_hard_smiles = click.option("--hard-smiles-col", default="smiles", show_defau
 opt_hard_y = click.option("--hard-y-col", default="y", show_default=True)
 opt_hard_weight = click.option("--hard-weight", default=1.0, type=float, show_default=True)
 
-opt_task = click.option(
-  "--task", type=click.Choice(["regression", "classification"]), default="regression", show_default=True
-)
 opt_time_budget = click.option(
   "--time-budget", required=False, default=600, type=int, show_default=True, help="Optuna time budget (seconds)"
 )
 opt_trials = click.option("--trials", default=10, type=int, show_default=True)
 opt_no_onnx = click.option("--no-onnx", is_flag=True, default=False, help="Skip ONNX export")
-opt_class_weight = click.option(
-  "--class-weight",
-  type=click.Choice(["auto", "none"]),
-  default="none",
-  show_default=True,
-  help="Class weighting for imbalanced binary classification (auto: detect and compensate)",
-)
-
-
 @cli.command("pack", help="PACK: convert teacher Parquet into sharded distill dataset.")
 @apply_opts(
   opt_teacher_parquet,
@@ -161,11 +149,9 @@ def _fit_impl(
   val_frac,
   enum_max,
   ensemble_size,
-  task,
   time_budget,
   trials,
   no_onnx,
-  class_weight="none",
   hard_labels=None,
   hard_smiles_col="smiles",
   hard_y_col="y",
@@ -192,7 +178,6 @@ def _fit_impl(
       fp_batch_rows=fp_batch_rows,
       val_frac=split_frac,
       seed=seed,
-      class_weight=class_weight,
       hard_labels=hard_labels,
       hard_smiles_col=hard_smiles_col,
       hard_y_col=hard_y_col,
@@ -202,11 +187,6 @@ def _fit_impl(
   d = ParquetDistillDataset(packed_dir)
   ntr, nva = d.count()
   logger.info(f"Packed dataset rows: train={ntr} val={nva}")
-
-  # Read class imbalance info from packing metadata
-  scale_pos_weight = d.meta.get("scale_pos_weight") if task == "classification" else None
-  if scale_pos_weight is not None:
-    logger.info(f"Class imbalance: scale_pos_weight={scale_pos_weight:.6f} (from packed meta)")
 
   train_iter = ParquetDataIter(
     d.train,
@@ -233,8 +213,7 @@ def _fit_impl(
     )
 
   trainer = XGBTrainer(
-    task=task, num_boost_round=num_boost_round, early_stopping_rounds=early_stopping,
-    scale_pos_weight=scale_pos_weight,
+    num_boost_round=num_boost_round, early_stopping_rounds=early_stopping,
   )
   booster, meta = trainer.fit_external(
     train_iter=train_iter, val_iter=val_iter, time_budget=time_budget, n_trials=trials
@@ -311,7 +290,7 @@ def _fit_impl(
 @click.option("--val-frac", default=0.1, type=float, show_default=True)
 @click.option("--enum-max", default=8, type=int, show_default=True)
 @click.option("--ensemble-size", default=5, type=int, show_default=True)
-@apply_opts(opt_task, opt_time_budget, opt_trials, opt_no_onnx, opt_class_weight)
+@apply_opts(opt_time_budget, opt_trials, opt_no_onnx)
 @apply_opts(opt_hard, opt_hard_smiles, opt_hard_y, opt_hard_weight)
 def fit_cmd(
   input_path,
@@ -335,11 +314,9 @@ def fit_cmd(
   val_frac,
   enum_max,
   ensemble_size,
-  task,
   time_budget,
   trials,
   no_onnx,
-  class_weight,
   hard_labels,
   hard_smiles_col,
   hard_y_col,
@@ -367,11 +344,9 @@ def fit_cmd(
     val_frac=val_frac,
     enum_max=enum_max,
     ensemble_size=ensemble_size,
-    task=task,
     time_budget=time_budget,
     trials=trials,
     no_onnx=no_onnx,
-    class_weight=class_weight,
     hard_labels=hard_labels,
     hard_smiles_col=hard_smiles_col,
     hard_y_col=hard_y_col,
@@ -473,7 +448,6 @@ def predict_cmd(
 @apply_opts(
   opt_teacher_parquet,
   opt_out,
-  opt_task,
   opt_time_budget,
   opt_trials,
   opt_no_onnx,
@@ -494,7 +468,6 @@ def predict_cmd(
 def distill_cmd(
   teacher_parquet,
   out,
-  task,
   time_budget,
   trials,
   no_onnx,
@@ -553,7 +526,6 @@ def distill_cmd(
     val_frac=0.1,
     enum_max=8,
     ensemble_size=5,
-    task=task,
     time_budget=time_budget,
     trials=trials,
     no_onnx=no_onnx,

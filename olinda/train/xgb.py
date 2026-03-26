@@ -24,18 +24,19 @@ from olinda.helpers import logger
 
 _TASK_SPECS = {
   "regression": {"objective": "reg:squarederror", "eval_metric": "mae"},
-  "classification": {"objective": "binary:logistic", "eval_metric": "aucpr"},
 }
 
 _MAXIMIZE_METRICS = frozenset({"aucpr", "auc", "map", "ndcg"})
 
 _BASE_PARAMS = {
-  "max_depth": 8,
+  "max_depth": 6,
   "eta": 0.05,
-  "subsample": 0.9,
-  "colsample_bytree": 0.9,
+  "subsample": 0.8,
+  "colsample_bytree": 0.8,
+  "gamma": 0.0,
+  "min_child_weight": 1.0,
   "lambda": 1.0,
-  "alpha": 0.0,
+  "alpha": 0.1,
   "tree_method": "hist",
 }
 
@@ -251,25 +252,20 @@ class _LimitedDataIter(xgb.DataIter):
 class XGBTrainer:
   def __init__(
     self,
-    task: str = "regression",
     params: dict | None = None,
     num_boost_round: int = 2000,
     early_stopping_rounds: int | None = 50,
     batch_rows: int = 65536,
     seed: int = 42,
     max_bin: int = 256,
-    scale_pos_weight: float | None = None,
   ) -> None:
-    if task not in _TASK_SPECS:
-      raise ValueError(f"task must be one of {list(_TASK_SPECS)}")
-    self.task = task
+    self.task = "regression"
     self.params = params or {}
     self.num_boost_round = int(num_boost_round)
     self.early_stopping_rounds = early_stopping_rounds
     self.batch_rows = int(batch_rows)
     self.seed = int(seed)
     self.max_bin = int(max_bin)
-    self.scale_pos_weight = scale_pos_weight
 
   def resolved_params(self) -> dict:
     p = {}
@@ -277,9 +273,6 @@ class XGBTrainer:
     p.update(_TASK_SPECS[self.task])
     p.update(self.params)
     p["seed"] = self.seed
-    if self.scale_pos_weight is not None and self.task == "classification":
-      p["scale_pos_weight"] = self.scale_pos_weight
-      logger.info(f"Imbalance-aware: scale_pos_weight={self.scale_pos_weight:.6f}")
     device, device_reason = detect_training_device()
     if device == "cuda":
       p["device"] = "cuda"
@@ -453,22 +446,23 @@ class XGBTrainer:
 
     def suggest(trial):
       p = dict(base_params)
-      p["max_depth"] = trial.suggest_int("max_depth", 3, 12)
-      p["eta"] = trial.suggest_float("eta", 1e-3, 0.3, log=True)
-      p["subsample"] = trial.suggest_float("subsample", 0.5, 1.0)
-      p["colsample_bytree"] = trial.suggest_float("colsample_bytree", 0.5, 1.0)
-      p["lambda"] = trial.suggest_float("lambda", 1e-9, 50.0, log=True)
-      p["alpha"] = trial.suggest_float("alpha", 1e-9, 50.0, log=True)
-      p["min_child_weight"] = trial.suggest_float("min_child_weight", 0.1, 20.0, log=True)
+      p["max_depth"] = trial.suggest_int("max_depth", 3, 8)
+      p["eta"] = trial.suggest_float("eta", 0.01, 0.3, log=True)
+      p["subsample"] = trial.suggest_float("subsample", 0.6, 1.0)
+      p["colsample_bytree"] = trial.suggest_float("colsample_bytree", 0.4, 1.0)
+      p["gamma"] = trial.suggest_float("gamma", 0.0, 5.0)
+      p["min_child_weight"] = trial.suggest_float("min_child_weight", 1.0, 20.0, log=True)
+      p["lambda"] = trial.suggest_float("lambda", 0.01, 10.0, log=True)
+      p["alpha"] = trial.suggest_float("alpha", 0.001, 5.0, log=True)
       return p
 
-    cheap_rounds = max(50, int(self.num_boost_round * 0.3))
-    cheap_early = None
+    explore_rounds = max(100, int(self.num_boost_round * 0.4))
+    explore_early = None
     if self.early_stopping_rounds is not None:
-      cheap_early = max(10, int(self.early_stopping_rounds * 0.5))
+      explore_early = max(15, int(self.early_stopping_rounds * 0.6))
 
     # ── Build subsampled DMatrix ONCE for Phase 1 ──
-    PHASE1_FRAC = 0.15
+    PHASE1_FRAC = 0.30
     if train_rows is not None:
       sub_tr = max(1, int(train_rows * PHASE1_FRAC))
       sub_va = max(1, int(val_rows * PHASE1_FRAC)) if val_rows is not None else None
@@ -480,7 +474,7 @@ class XGBTrainer:
     logger.info(
       "tune config: "
       f"train_rows={train_rows} val_rows={val_rows} "
-      f"phase1_frac={PHASE1_FRAC} cheap_rounds={cheap_rounds} cheap_early={cheap_early} "
+      f"phase1_frac={PHASE1_FRAC} explore_rounds={explore_rounds} explore_early={explore_early} "
       f"full_rounds={self.num_boost_round} full_early={self.early_stopping_rounds}"
     )
     logger.info("Building cached DMatrix for phase 1 (subsampled)...")
@@ -493,15 +487,14 @@ class XGBTrainer:
     higher = eval_metric in _MAXIMIZE_METRICS
     direction = "maximize" if higher else "minimize"
 
-    phase1_pruner = optuna.pruners.HyperbandPruner()
     study = optuna.create_study(
       direction=direction,
-      pruner=phase1_pruner,
+      pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=20),
       sampler=optuna.samplers.TPESampler(multivariate=True, seed=self.seed),
     )
     trials_log: list[dict] = []
 
-    logger.info("tune phase 1: cheap search with pruning")
+    logger.info("tune phase 1: explore on subsampled data")
     t_phase1 = time.perf_counter()
 
     with make_progress(transient=True) as prog:
@@ -514,9 +507,9 @@ class XGBTrainer:
         booster = xgb.train(
           params=p,
           dtrain=dtrain_cheap,
-          num_boost_round=cheap_rounds,
+          num_boost_round=explore_rounds,
           evals=[(dval_cheap, "val")],
-          early_stopping_rounds=cheap_early,
+          early_stopping_rounds=explore_early,
           verbose_eval=False,
           evals_result=evals_result,
           callbacks=[_OptunaPruningCallback(trial, em)],
@@ -570,11 +563,11 @@ class XGBTrainer:
       key=lambda t: float(t.value) if t.value is not None else _worst,
       reverse=higher,
     )
-    top_k = min(10, len(completed))
+    top_k = min(5, len(completed))
     phase2_trials = completed[:top_k]
 
-    # ── Build full DMatrix ONCE for Phase 2 & 3 ──
-    logger.info("Building cached DMatrix for phase 2/3 (full data)...")
+    # ── Build full DMatrix ONCE for Phase 2 ──
+    logger.info("Building cached DMatrix for phase 2 (full data)...")
     t0 = time.perf_counter()
     dtrain_full = xgb.QuantileDMatrix(train_iter, max_bin=self.max_bin)
     dval_full = xgb.QuantileDMatrix(val_iter, ref=dtrain_full, max_bin=self.max_bin)
@@ -600,7 +593,7 @@ class XGBTrainer:
         vals = evals_result.get("val", {}).get(eval_metric, [])
         return float(vals[-1]) if vals else fallback
 
-    logger.info(f"tune phase 2: evaluating top {top_k} configs on full data (cached DMatrix)")
+    logger.info(f"tune phase 2: validating top {top_k} configs on full data")
     t_phase2 = time.perf_counter()
     phase2_results = []
     with make_progress(transient=True) as prog:
@@ -620,53 +613,13 @@ class XGBTrainer:
 
     logger.info(f"tune phase 2 complete in {time.perf_counter() - t_phase2:.2f}s")
 
-    phase2_results.sort(key=lambda r: r["value"], reverse=higher)
-    top_m = min(3, len(phase2_results))
-    phase3_candidates = phase2_results[:top_m]
-    seeds = [self.seed, self.seed + 1, self.seed + 2]
-
-    logger.info(f"tune phase 3: confirming top {top_m} configs with {len(seeds)} seeds")
-    t_phase3 = time.perf_counter()
-    phase3_results = []
-    total_phase3 = top_m * len(seeds)
-    with make_progress(transient=True) as prog:
-      task_id = prog.add_task("tune phase3", total=total_phase3, desc="tune phase3")
-      for cand in phase3_candidates:
-        if time.time() - start > time_budget:
-          logger.info("tune phase 3: time budget exceeded, stopping early")
-          break
-        vals = []
-        for sd in seeds:
-          params = dict(cand["params"])
-          params["seed"] = int(sd)
-          vals.append(
-            _train_eval_cached(
-              params,
-              rounds=self.num_boost_round,
-              early_stop=self.early_stopping_rounds,
-            )
-          )
-          prog.update(task_id, advance=1, refresh=True)
-        vals = np.asarray(vals, dtype=np.float64)
-        phase3_results.append({
-          "params": dict(cand["params"]),
-          "mean": float(vals.mean()),
-          "std": float(vals.std()),
-          "seeds": list(seeds),
-        })
-        logger.info(
-          f"tune phase3 candidate: mean={float(vals.mean())} std={float(vals.std())} params={cand['params']}"
-        )
-
-    logger.info(f"tune phase 3 complete in {time.perf_counter() - t_phase3:.2f}s")
-
     del dtrain_full, dval_full  # free full DMatrix memory
 
-    phase3_results.sort(key=lambda r: r["mean"], reverse=higher)
-    best = phase3_results[0] if phase3_results else None
+    phase2_results.sort(key=lambda r: r["value"], reverse=higher)
+    best = phase2_results[0] if phase2_results else None
     best_params = dict(best["params"]) if best else dict(study.best_trial.params)
     if best:
-      logger.info(f"tune best: mean={best['mean']} std={best['std']} params={best_params}")
+      logger.info(f"tune best: value={best['value']} params={best_params}")
     else:
       logger.info(f"tune best (phase1): params={best_params}")
 
@@ -681,10 +634,6 @@ class XGBTrainer:
       "phase2": {
         "top_k": int(top_k),
         "results": phase2_results,
-      },
-      "phase3": {
-        "top_m": int(top_m),
-        "results": phase3_results,
       },
       "best_params": dict(best_params),
     }

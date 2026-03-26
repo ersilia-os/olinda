@@ -32,9 +32,10 @@ Olinda fits a student model from either packed feature tables or SMILES-derived 
 **Key capabilities:**
 
 - **Automatic GPU detection** &mdash; seamlessly switches between CPU and CUDA at runtime
-- **Efficient hyperparameter tuning** &mdash; three-phase Optuna search with DMatrix caching and Hyperband pruning
+- **Efficient hyperparameter tuning** &mdash; two-phase Optuna search with DMatrix caching and median pruning
 - **Streaming data pipeline** &mdash; `QuantileDMatrix` with Parquet-backed iterators for datasets that exceed RAM
-- **Comprehensive evaluation** &mdash; regression metrics with bootstrap CIs, ROC curves, calibration plots, QQ diagnostics, and density scatter maps
+- **Comprehensive evaluation** &mdash; regression metrics with bootstrap CIs, calibration plots, QQ diagnostics, and density scatter maps
+- **Post-hoc isotonic calibration** &mdash; automatic monotonic calibrator fitted on validation predictions, ensuring student outputs stay within the teacher's range
 - **Robustness analysis** &mdash; scaffold/similarity splits, SMILES perturbation invariance, and ensemble uncertainty
 - **Combined soft + hard label training** &mdash; mix teacher soft labels with ground-truth hard labels via `--hard-labels`
 - **One-command distillation** &mdash; pack, train, evaluate, and export in a single `olinda distill` call
@@ -125,7 +126,6 @@ Train an XGBoost student with optional hyperparameter tuning.
 olinda fit \
   --input <packed_dir_or_file> \
   --out <output_dir> \
-  --task regression \
   --num-boost-round 1000 \
   --early-stopping 50 \
   --time-budget 600 \
@@ -137,7 +137,6 @@ olinda fit \
 |--------|---------|-------------|
 | `--input` | *required* | Packed directory or CSV/Parquet file |
 | `--out` | *required* | Output directory |
-| `--task` | `regression` | `regression` or `classification` |
 | `--y-col` | `y` | Target column name |
 | `--split` | *none* | Validation fraction (e.g. `0.15`) if no `split` column |
 | `--num-boost-round` | `1000` | Maximum boosting rounds |
@@ -192,17 +191,16 @@ olinda distill \
 
 ## Hyperparameter Tuning
 
-When `--time-budget > 0`, Olinda runs a three-phase Optuna search:
+When `--time-budget > 0`, Olinda runs a two-phase Optuna search:
 
 | Phase | Data | Purpose |
 |-------|------|---------|
-| **1. Cheap search** | 15% subsample | Explore the search space with Hyperband pruning. DMatrix is built **once** and reused across all trials. |
-| **2. Full evaluation** | 100% data | Re-evaluate the top 10 configurations on the full dataset using a single cached DMatrix. |
-| **3. Seed stability** | 100% data | Confirm the top 3 configurations across multiple seeds to guard against lucky runs. |
+| **1. Explore** | 30% subsample | Search the parameter space with median pruning. DMatrix is built **once** and reused across all trials. |
+| **2. Validate** | 100% data | Re-evaluate the top 5 configurations on the full dataset using a single cached DMatrix. |
 
-**Tuned parameters:** `max_depth`, `eta`, `subsample`, `colsample_bytree`, `lambda`, `alpha`, `min_child_weight`
+**Tuned parameters:** `max_depth`, `eta`, `gamma`, `subsample`, `colsample_bytree`, `lambda`, `alpha`, `min_child_weight`
 
-The tuning pipeline caches `QuantileDMatrix` objects across trials, avoiding the expensive per-trial data reconstruction that dominates wall time on large datasets. A time budget is enforced across all three phases.
+The tuning pipeline caches `QuantileDMatrix` objects across trials, avoiding the expensive per-trial data reconstruction that dominates wall time on large datasets. A time budget is enforced across both phases.
 
 ---
 
@@ -218,20 +216,29 @@ When a validation split exists, Olinda generates a full evaluation suite under `
 | R², Pearson, Spearman | Correlation |
 | Concordance (Harrell's C) | Ranking accuracy |
 | Coverage (1/2 std) | Calibration coverage |
-| AUC-ROC | Discriminative power (binarized at threshold) |
 
 All metrics include bootstrap 95% confidence intervals (200 replicates).
+
+### Post-hoc Calibration
+
+After computing raw metrics, Olinda automatically fits an **isotonic regression** calibrator (Pool Adjacent Violators) from raw predictions to teacher soft labels on the validation set. This produces:
+
+- A `calibrator.json` saved alongside the model, applied transparently at prediction time
+- Before/after metrics showing calibration improvement
+- Calibrated predictions that stay within the teacher's output range and preserve rank ordering
 
 ### Plots
 
 | File | Description |
 |------|-------------|
 | `pred_vs_true.png` | Predicted vs. true density scatter (viridis colormap) |
+| `pred_vs_true_calibrated.png` | Same, after isotonic calibration |
+| `calibration_comparison.png` | Side-by-side before/after calibration with distribution overlay |
 | `residual_hist.png` | Residual distribution |
 | `residual_vs_pred.png` | Residuals vs. predicted values |
-| `calibration_bins.png` | Binned calibration curve |
+| `calibration_bins.png` | Binned calibration curve (raw) |
+| `calibration_bins_calibrated.png` | Binned calibration curve (calibrated) |
 | `residuals_qq.png` | QQ plot of standardized residuals |
-| `roc_curve.png` | ROC curve with AUC annotation |
 | `train_loss.png` | Training and validation loss curves |
 
 ---
@@ -255,17 +262,20 @@ A training run produces the following artifacts:
 ```
 <out>/
   xgb.json                    # Trained XGBoost model
+  calibrator.json             # Isotonic calibrator (applied at predict time)
   train_meta.json             # Training configuration and metrics
   student.onnx                # ONNX export (unless --no-onnx)
   train_loss.png              # Loss curve
   validation/
-    validation_report.json    # Metrics + bootstrap CIs
+    validation_report.json    # Raw + calibrated metrics, bootstrap CIs
     pred_vs_true.png
+    pred_vs_true_calibrated.png
+    calibration_comparison.png
     residual_hist.png
     residual_vs_pred.png
     calibration_bins.png
+    calibration_bins_calibrated.png
     residuals_qq.png
-    roc_curve.png
   robustness_report.json      # When --robustness is enabled
 ```
 

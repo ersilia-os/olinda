@@ -10,7 +10,6 @@ import pyarrow.dataset as ds
 import xgboost as xgb
 
 import matplotlib.pyplot as plt
-from scipy.stats import gaussian_kde
 
 from stylia import label, create_figure, save_figure
 
@@ -85,26 +84,46 @@ def _rmse(y, p) -> float:
   return float(np.sqrt(np.mean((y - p) ** 2)))
 
 
-def _concordance_index(y, p) -> float:
-  """Harrell's C-index for continuous outcomes."""
+def _concordance_index(y, p, max_pairs: int = 50_000) -> float:
+  """Harrell's C-index for continuous outcomes (sampled for speed)."""
   y = np.asarray(y, dtype=np.float64)
   p = np.asarray(p, dtype=np.float64)
   n = len(y)
   if n < 2:
     return float("nan")
 
-  concordant = 0.0
-  permissible = 0.0
-  for i in range(n):
-    dy = y[i] - y[i + 1 :]
-    dp = p[i] - p[i + 1 :]
+  # For large n the O(n²) pair loop is too slow; sample pairs instead.
+  n_all_pairs = n * (n - 1) // 2
+  if n_all_pairs <= max_pairs:
+    # Small enough — exhaustive via broadcasting on blocks
+    concordant = 0.0
+    permissible = 0.0
+    for i in range(n):
+      dy = y[i] - y[i + 1 :]
+      dp = p[i] - p[i + 1 :]
+      mask = dy != 0
+      if not np.any(mask):
+        continue
+      dy = dy[mask]
+      dp = dp[mask]
+      permissible += len(dy)
+      concordant += np.sum(np.sign(dy) == np.sign(dp)) + 0.5 * np.sum(dp == 0)
+  else:
+    rng = np.random.default_rng(0)
+    i = rng.integers(0, n, size=max_pairs)
+    j = rng.integers(0, n, size=max_pairs)
+    # Ensure i != j
+    dup = i == j
+    j[dup] = (j[dup] + 1) % n
+    dy = y[i] - y[j]
+    dp = p[i] - p[j]
     mask = dy != 0
     if not np.any(mask):
-      continue
+      return float("nan")
     dy = dy[mask]
     dp = dp[mask]
-    permissible += len(dy)
-    concordant += np.sum(np.sign(dy) == np.sign(dp)) + 0.5 * np.sum(dp == 0)
+    permissible = float(len(dy))
+    concordant = float(np.sum(np.sign(dy) == np.sign(dp)) + 0.5 * np.sum(dp == 0))
 
   if permissible == 0:
     return float("nan")
@@ -120,40 +139,6 @@ def _coverage(y, p, std_scale: float = 1.0) -> float:
   if s == 0:
     return 1.0
   return float(np.mean(np.abs(r) <= std_scale * s))
-
-
-def _auc_roc(y, p, threshold: float = 0.5) -> float:
-  """AUC-ROC: binarise *y* at *threshold*, score with *p*.
-
-  Pure-NumPy implementation using the trapezoidal rule on the ROC curve.
-  Returns NaN when only one class is present after binarisation.
-  """
-  y = np.asarray(y, dtype=np.float64)
-  p = np.asarray(p, dtype=np.float64)
-  labels = (y >= threshold).astype(np.int64)
-
-  # AUC is undefined when only one class is present
-  if labels.sum() == 0 or labels.sum() == len(labels):
-    return float("nan")
-
-  # Sort by descending predicted score
-  order = np.argsort(-p)
-  labels_sorted = labels[order]
-
-  # Cumulative TP / FP counts
-  tps = np.cumsum(labels_sorted)
-  fps = np.cumsum(1 - labels_sorted)
-
-  # Append origin (0, 0)
-  tps = np.concatenate([[0], tps])
-  fps = np.concatenate([[0], fps])
-
-  # Normalise to rates
-  tpr = tps / tps[-1]
-  fpr = fps / fps[-1]
-
-  # Trapezoidal AUC
-  return float(np.trapezoid(tpr, fpr))
 
 
 def _bootstrap_ci(y, p, metric_fn, n_boot: int = 200, seed: int = 0) -> tuple[float, float]:
@@ -242,9 +227,18 @@ def _plot_pred_vs_true(y, p, out_png: Path, max_scatter: int = 200_000):
   lo = float(min(yy.min(), pp.min()))
   hi = float(max(yy.max(), pp.max()))
 
-  # Compute point density via KDE
-  xy = np.vstack([yy.astype(np.float64), pp.astype(np.float64)])
-  density = gaussian_kde(xy)(xy)
+  # Fast density estimation via 2D histogram (binned), then look up per point
+  GRID = 200
+  yf = yy.astype(np.float64)
+  pf = pp.astype(np.float64)
+  hist, xedges, yedges = np.histogram2d(yf, pf, bins=GRID)
+  # Map each point to its bin
+  xi = np.clip(np.digitize(yf, xedges) - 1, 0, GRID - 1)
+  yi = np.clip(np.digitize(pf, yedges) - 1, 0, GRID - 1)
+  density = hist[xi, yi].astype(np.float64)
+  dmin, dmax = density.min(), density.max()
+  if dmax > dmin:
+    density = (density - dmin) / (dmax - dmin)
 
   # Sort by density so densest points render on top
   order = np.argsort(density)
@@ -348,45 +342,6 @@ def _erfinv(x: float) -> float:
   return s * math.sqrt(math.sqrt(t * t - ln / a) - t)
 
 
-def _plot_roc_curve(y, p, out_png: Path, threshold: float = 0.5):
-  """Plot the ROC curve (FPR vs TPR) with AUC annotated."""
-  y = np.asarray(y, dtype=np.float64)
-  p = np.asarray(p, dtype=np.float64)
-  labels = (y >= threshold).astype(np.int64)
-
-  n_pos = int(labels.sum())
-  n_neg = int(len(labels) - n_pos)
-  if n_pos == 0 or n_neg == 0:
-    return  # ROC undefined with a single class
-
-  order = np.argsort(-p)
-  labels_sorted = labels[order]
-
-  tps = np.cumsum(labels_sorted)
-  fps = np.cumsum(1 - labels_sorted)
-
-  tps = np.concatenate([[0], tps])
-  fps = np.concatenate([[0], fps])
-
-  tpr = tps / n_pos
-  fpr = fps / n_neg
-
-  auc = float(np.trapezoid(tpr, fpr))
-
-  plt.figure()
-  plt.plot(fpr, tpr, linewidth=2, label=f"ROC (AUC = {auc:.4f})")
-  plt.plot([0, 1], [0, 1], linestyle="--", color="grey", linewidth=1, label="Random")
-  plt.xlim(-0.01, 1.01)
-  plt.ylim(-0.01, 1.01)
-  plt.xlabel("False Positive Rate")
-  plt.ylabel("True Positive Rate")
-  plt.title("ROC Curve")
-  plt.legend(loc="lower right")
-  plt.tight_layout()
-  plt.savefig(out_png, dpi=200)
-  plt.close()
-
-
 def _plot_qq_residuals(y, p, out_png: Path):
   r = (p - y).astype(np.float64)
   if len(r) == 0:
@@ -406,6 +361,46 @@ def _plot_qq_residuals(y, p, out_png: Path):
   plt.title("QQ Plot (Residuals)")
   plt.tight_layout()
   plt.savefig(out_png, dpi=200)
+  plt.close()
+
+
+def _plot_before_after_calibration(y, p_raw, p_cal, out_png: Path):
+  """Side-by-side: raw vs calibrated predictions against true values."""
+  n = len(y)
+  if n == 0:
+    return
+
+  fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+  lo = float(min(y.min(), p_raw.min(), p_cal.min()))
+  hi = float(max(y.max(), p_raw.max(), p_cal.max()))
+
+  # Raw pred vs true
+  axes[0].scatter(y, p_raw, s=6, alpha=0.35)
+  axes[0].plot([lo, hi], [lo, hi], "--", color="grey", linewidth=1)
+  axes[0].set_xlabel("True (val)")
+  axes[0].set_ylabel("Raw prediction")
+  axes[0].set_title(f"Before calibration\nMAE={_mae(y, p_raw):.5f}  RMSE={_rmse(y, p_raw):.5f}")
+
+  # Calibrated pred vs true
+  axes[1].scatter(y, p_cal, s=6, alpha=0.35, color="darkorange")
+  axes[1].plot([lo, hi], [lo, hi], "--", color="grey", linewidth=1)
+  axes[1].set_xlabel("True (val)")
+  axes[1].set_ylabel("Calibrated prediction")
+  axes[1].set_title(f"After calibration\nMAE={_mae(y, p_cal):.5f}  RMSE={_rmse(y, p_cal):.5f}")
+
+  # Prediction range comparison
+  axes[2].hist(p_raw, bins=60, alpha=0.6, label="Raw", color="steelblue", density=True)
+  axes[2].hist(p_cal, bins=60, alpha=0.6, label="Calibrated", color="darkorange", density=True)
+  axes[2].hist(y, bins=60, alpha=0.4, label="True", color="grey", density=True)
+  axes[2].set_xlabel("Value")
+  axes[2].set_ylabel("Density")
+  axes[2].set_title("Distribution comparison")
+  axes[2].legend()
+
+  fig.suptitle("Post-hoc Isotonic Calibration", fontsize=13, fontweight="bold")
+  fig.tight_layout()
+  fig.savefig(out_png, dpi=150)
   plt.close()
 
 
@@ -439,7 +434,6 @@ def validate_regression(
     "concordance": _concordance_index(y, p),
     "coverage_1std": _coverage(y, p, std_scale=1.0),
     "coverage_2std": _coverage(y, p, std_scale=2.0),
-    "auc_roc": _auc_roc(y, p, threshold=0.5),
   }
 
   ci = {
@@ -448,7 +442,6 @@ def validate_regression(
     "r2_ci95": _bootstrap_ci(y, p, _r2, n_boot=n_boot, seed=3),
     "pearson_ci95": _bootstrap_ci(y, p, _pearsonr, n_boot=n_boot, seed=4),
     "spearman_ci95": _bootstrap_ci(y, p, _spearmanr, n_boot=n_boot, seed=5),
-    "auc_roc_ci95": _bootstrap_ci(y, p, _auc_roc, n_boot=n_boot, seed=6),
   }
 
   logger.info(
@@ -461,8 +454,7 @@ def validate_regression(
     f"spearman={metrics['spearman']:.6f} "
     f"concordance={metrics['concordance']:.6f} "
     f"coverage_1std={metrics['coverage_1std']:.6f} "
-    f"coverage_2std={metrics['coverage_2std']:.6f} "
-    f"auc_roc={metrics['auc_roc']:.6f}"
+    f"coverage_2std={metrics['coverage_2std']:.6f}"
   )
   logger.debug(
     "Validation CI95: "
@@ -470,8 +462,7 @@ def validate_regression(
     f"rmse_ci95={ci['rmse_ci95']} "
     f"r2_ci95={ci['r2_ci95']} "
     f"pearson_ci95={ci['pearson_ci95']} "
-    f"spearman_ci95={ci['spearman_ci95']} "
-    f"auc_roc_ci95={ci['auc_roc_ci95']}"
+    f"spearman_ci95={ci['spearman_ci95']}"
   )
 
   _plot_pred_vs_true(y, p, vdir / "pred_vs_true.png")
@@ -479,9 +470,42 @@ def validate_regression(
   _plot_residual_vs_pred(y, p, vdir / "residual_vs_pred.png")
   _plot_calibration_bins(y, p, vdir / "calibration_bins.png")
   _plot_qq_residuals(y, p, vdir / "residuals_qq.png")
-  _plot_roc_curve(y, p, vdir / "roc_curve.png")
 
   report = {"metrics": metrics, "ci": ci}
+
+  # ── Post-hoc isotonic calibration ──
+  from olinda.calibrate import IsotonicCalibrator
+
+  calibrator = IsotonicCalibrator().fit(raw=p, target=y)
+  p_cal = calibrator.transform(p)
+
+  cal_metrics = {
+    "val_rows": int(len(y)),
+    "mae": _mae(y, p_cal),
+    "rmse": _rmse(y, p_cal),
+    "r2": _r2(y, p_cal),
+    "pearson": _pearsonr(y, p_cal),
+    "spearman": _spearmanr(y, p_cal),
+    "concordance": _concordance_index(y, p_cal),
+    "coverage_1std": _coverage(y, p_cal, std_scale=1.0),
+    "coverage_2std": _coverage(y, p_cal, std_scale=2.0),
+  }
+
+  logger.info(
+    "Calibrated metrics: "
+    f"mae={cal_metrics['mae']:.6f} (was {metrics['mae']:.6f}) "
+    f"rmse={cal_metrics['rmse']:.6f} (was {metrics['rmse']:.6f}) "
+    f"r2={cal_metrics['r2']:.6f} (was {metrics['r2']:.6f}) "
+    f"spearman={cal_metrics['spearman']:.6f} (was {metrics['spearman']:.6f})"
+  )
+
+  _plot_pred_vs_true(y, p_cal, vdir / "pred_vs_true_calibrated.png")
+  _plot_calibration_bins(y, p_cal, vdir / "calibration_bins_calibrated.png")
+  _plot_before_after_calibration(y, p, p_cal, vdir / "calibration_comparison.png")
+
+  calibrator.save(model_dir / "calibrator.json")
+  report["calibrated_metrics"] = cal_metrics
+  report["calibrator_path"] = str(model_dir / "calibrator.json")
 
   with open(vdir / "validation_report.json", "w") as fp:
     json.dump(report, fp, indent=2)

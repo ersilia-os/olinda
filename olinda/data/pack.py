@@ -108,52 +108,6 @@ def _make_split(n: int, val_frac: float, seed: int) -> np.ndarray:
   return split
 
 
-def _make_stratified_split(
-  y: np.ndarray, val_frac: float, seed: int, threshold: float = 0.5,
-) -> np.ndarray:
-  """Stratified train/val split: each class is split proportionally."""
-  rng = np.random.default_rng(seed)
-  n = len(y)
-  split = np.zeros(n, dtype=np.int8)
-
-  pos_idx = np.where(y >= threshold)[0]
-  neg_idx = np.where(y < threshold)[0]
-
-  for idx_group in (pos_idx, neg_idx):
-    if len(idx_group) == 0:
-      continue
-    perm = rng.permutation(len(idx_group))
-    n_val = max(1, int(round(len(idx_group) * val_frac)))
-    split[idx_group[perm[:n_val]]] = 1
-
-  return split
-
-
-def _count_classes(
-  input_path: Path, y_col: str, threshold: float = 0.5,
-) -> tuple[int, int]:
-  """Count positive (y >= threshold) and negative samples in a single y-only pass."""
-  suffix = input_path.suffix.lower()
-  n_pos = 0
-  n_neg = 0
-  if suffix in (".parquet", ".pq"):
-    dset = ds.dataset(str(input_path), format="parquet")
-    for batch in dset.scanner(columns=[y_col]).to_batches():
-      y = batch.column(y_col).to_numpy()
-      n_pos += int((y >= threshold).sum())
-      n_neg += int((y < threshold).sum())
-  elif suffix in (".csv", ".tsv"):
-    sep = "\t" if suffix == ".tsv" else ","
-    for chunk in pd.read_csv(str(input_path), sep=sep, usecols=[y_col], chunksize=100_000):
-      y = chunk[y_col].to_numpy()
-      n_pos += int((y >= threshold).sum())
-      n_neg += int((y < threshold).sum())
-  return n_pos, n_neg
-
-
-_IMBALANCE_THRESHOLD = 10.0
-
-
 def _write_shards(
   out_dir: Path,
   table: pa.Table,
@@ -424,7 +378,6 @@ def pack_feature_table(
   seed: int = 42,
   shard_rows: int = 200_000,
   compression: str = "zstd",
-  class_weight: str = "none",
   hard_labels: str | Path | None = None,
   hard_smiles_col: str = "smiles",
   hard_y_col: str = "y",
@@ -447,23 +400,6 @@ def pack_feature_table(
   _ensure_dir(va_dir)
 
   rng = np.random.default_rng(seed)
-
-  # ── Class imbalance detection ──
-  n_pos = n_neg = 0
-  imbalance_ratio = 1.0
-  scale_pos_weight = None
-  if class_weight == "auto":
-    logger.info(f"Scanning '{y_col}' for class imbalance...")
-    n_pos, n_neg = _count_classes(input_path, y_col)
-    imbalance_ratio = max(n_pos, n_neg) / max(min(n_pos, n_neg), 1)
-    if imbalance_ratio > _IMBALANCE_THRESHOLD:
-      scale_pos_weight = n_neg / max(n_pos, 1)
-      logger.info(
-        f"Imbalance detected: {n_pos:,} pos / {n_neg:,} neg "
-        f"(ratio={imbalance_ratio:.1f}x) → scale_pos_weight={scale_pos_weight:.6f}"
-      )
-    else:
-      logger.info(f"Class balance OK: {n_pos:,} pos / {n_neg:,} neg (ratio={imbalance_ratio:.1f}x)")
 
   x_cols = None
   x_dim = None
@@ -563,7 +499,7 @@ def pack_feature_table(
     if split_col in df.columns:
       split = df[split_col].to_numpy(dtype=np.int8, copy=False)
     elif val_frac and val_frac > 0:
-      split = _make_stratified_split(y, val_frac=float(val_frac), seed=seed)
+      split = _make_split(len(X), val_frac=float(val_frac), seed=seed)
     else:
       split = np.zeros(len(X), dtype=np.int8)
 
@@ -641,7 +577,7 @@ def pack_feature_table(
     h_w = np.full(len(hdf), float(hard_weight), dtype=np.float32)
 
     if val_frac and val_frac > 0:
-      h_split = _make_stratified_split(h_y, val_frac=float(val_frac), seed=seed)
+      h_split = _make_split(len(hdf), val_frac=float(val_frac), seed=seed)
     else:
       h_split = np.zeros(len(hdf), dtype=np.int8)
 
@@ -706,15 +642,8 @@ def pack_feature_table(
       "fp_size": int(fp_size),
       "radius": int(radius),
       "njobs": int(njobs),
-      "class_weight": class_weight,
     }),
   }
-  if class_weight == "auto" and imbalance_ratio > _IMBALANCE_THRESHOLD:
-    meta["class_weight"] = "auto"
-    meta["n_pos"] = int(n_pos)
-    meta["n_neg"] = int(n_neg)
-    meta["imbalance_ratio"] = round(float(imbalance_ratio), 2)
-    meta["scale_pos_weight"] = float(scale_pos_weight)
 
   if use_smiles and featurizer is not None:
     meta["feature_source"] = "smiles"
