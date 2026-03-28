@@ -463,11 +463,7 @@ def pack_feature_table(
         from olinda.featurizer import Fingerprint
 
         featurizer = Fingerprint(which=fp_kind, fp_size=int(fp_size), radius=int(radius), njobs=int(njobs))
-        logger.info(
-          "Using SMILES fingerprints for features: "
-          f"smiles_col={smiles_col} fp={fp_kind} fp_size={fp_size} radius={radius} "
-          f"njobs={njobs} fp_batch_rows={fp_batch_rows}"
-        )
+        logger.info("Using Clamp descriptors to calculate molecular fingerprints")
       else:
         if not num_cols:
           raise ValueError("no numeric feature columns found")

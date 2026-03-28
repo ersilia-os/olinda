@@ -411,6 +411,7 @@ def validate_regression(
   batch_rows: int = 65536,
   max_points: int | None = None,
   n_boot: int = 200,
+  calibrate: bool = True,
 ):
   packed_dir = Path(packed_dir)
   model_dir = Path(model_dir) if model_dir else packed_dir
@@ -474,38 +475,41 @@ def validate_regression(
   report = {"metrics": metrics, "ci": ci}
 
   # ── Post-hoc isotonic calibration ──
-  from olinda.calibrate import IsotonicCalibrator
+  if calibrate:
+    from olinda.calibrate import IsotonicCalibrator
 
-  calibrator = IsotonicCalibrator().fit(raw=p, target=y)
-  p_cal = calibrator.transform(p)
+    calibrator = IsotonicCalibrator().fit(raw=p, target=y)
+    p_cal = calibrator.transform(p)
 
-  cal_metrics = {
-    "val_rows": int(len(y)),
-    "mae": _mae(y, p_cal),
-    "rmse": _rmse(y, p_cal),
-    "r2": _r2(y, p_cal),
-    "pearson": _pearsonr(y, p_cal),
-    "spearman": _spearmanr(y, p_cal),
-    "concordance": _concordance_index(y, p_cal),
-    "coverage_1std": _coverage(y, p_cal, std_scale=1.0),
-    "coverage_2std": _coverage(y, p_cal, std_scale=2.0),
-  }
+    cal_metrics = {
+      "val_rows": int(len(y)),
+      "mae": _mae(y, p_cal),
+      "rmse": _rmse(y, p_cal),
+      "r2": _r2(y, p_cal),
+      "pearson": _pearsonr(y, p_cal),
+      "spearman": _spearmanr(y, p_cal),
+      "concordance": _concordance_index(y, p_cal),
+      "coverage_1std": _coverage(y, p_cal, std_scale=1.0),
+      "coverage_2std": _coverage(y, p_cal, std_scale=2.0),
+    }
 
-  logger.info(
-    "Calibrated metrics: "
-    f"mae={cal_metrics['mae']:.6f} (was {metrics['mae']:.6f}) "
-    f"rmse={cal_metrics['rmse']:.6f} (was {metrics['rmse']:.6f}) "
-    f"r2={cal_metrics['r2']:.6f} (was {metrics['r2']:.6f}) "
-    f"spearman={cal_metrics['spearman']:.6f} (was {metrics['spearman']:.6f})"
-  )
+    logger.info(
+      "Calibrated metrics: "
+      f"mae={cal_metrics['mae']:.6f} (was {metrics['mae']:.6f}) "
+      f"rmse={cal_metrics['rmse']:.6f} (was {metrics['rmse']:.6f}) "
+      f"r2={cal_metrics['r2']:.6f} (was {metrics['r2']:.6f}) "
+      f"spearman={cal_metrics['spearman']:.6f} (was {metrics['spearman']:.6f})"
+    )
 
-  _plot_pred_vs_true(y, p_cal, vdir / "pred_vs_true_calibrated.png")
-  _plot_calibration_bins(y, p_cal, vdir / "calibration_bins_calibrated.png")
-  _plot_before_after_calibration(y, p, p_cal, vdir / "calibration_comparison.png")
+    _plot_pred_vs_true(y, p_cal, vdir / "pred_vs_true_calibrated.png")
+    _plot_calibration_bins(y, p_cal, vdir / "calibration_bins_calibrated.png")
+    _plot_before_after_calibration(y, p, p_cal, vdir / "calibration_comparison.png")
 
-  calibrator.save(model_dir / "calibrator.json")
-  report["calibrated_metrics"] = cal_metrics
-  report["calibrator_path"] = str(model_dir / "calibrator.json")
+    calibrator.save(model_dir / "calibrator.json")
+    report["calibrated_metrics"] = cal_metrics
+    report["calibrator_path"] = str(model_dir / "calibrator.json")
+  else:
+    logger.info("Calibration skipped (--no-calibrate)")
 
   with open(vdir / "validation_report.json", "w") as fp:
     json.dump(report, fp, indent=2)

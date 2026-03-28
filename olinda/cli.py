@@ -9,7 +9,14 @@ import rich_click as click
 import rich_click.rich_click as rc
 
 from olinda.helpers import logger
-from olinda.data import pack_distill_dataset, pack_feature_table, ParquetDistillDataset, ParquetDataIter
+from olinda.data import (
+  pack_distill_dataset,
+  pack_feature_table,
+  ParquetDistillDataset,
+  ParquetDataIter,
+  detect_regression_imbalance,
+  compute_regression_weights,
+)
 from olinda.train import XGBTrainer
 from olinda.models import StudentModel, export_xgb_onnx
 from olinda.featurizer import Fingerprint, OnnxEncoder
@@ -152,10 +159,13 @@ def _fit_impl(
   time_budget,
   trials,
   no_onnx,
+  no_calibrate=False,
   hard_labels=None,
   hard_smiles_col="smiles",
   hard_y_col="y",
   hard_weight=1.0,
+  reweight="auto",
+  reweight_bins=20,
 ):
   input_path = Path(input_path)
   out_dir = Path(out_dir)
@@ -188,6 +198,20 @@ def _fit_impl(
   ntr, nva = d.count()
   logger.info(f"Packed dataset rows: train={ntr} val={nva}")
 
+  bin_edges, bin_weights = None, None
+  do_reweight = reweight == "on"
+  if reweight == "auto":
+    is_imbalanced, cv, details = detect_regression_imbalance(d.train, d.y_col, n_bins=int(reweight_bins))
+    logger.info(
+      f"Imbalance detection: cv={details['cv']} empty_frac={details['empty_frac']} "
+      f"ratio={details['imbalance_ratio']} → {'REWEIGHT' if is_imbalanced else 'SKIP'}"
+    )
+    do_reweight = is_imbalanced
+
+  if do_reweight:
+    logger.info(f"Computing regression imbalance weights ({reweight_bins} equal-width bins)...")
+    bin_edges, bin_weights = compute_regression_weights(d.train, d.y_col, n_bins=int(reweight_bins))
+
   train_iter = ParquetDataIter(
     d.train,
     d.x_col,
@@ -197,6 +221,8 @@ def _fit_impl(
     batch_rows=65536,
     shuffle_row_groups=True,
     seed=seed,
+    bin_edges=bin_edges,
+    bin_weights=bin_weights,
   )
 
   val_iter = None
@@ -235,6 +261,7 @@ def _fit_impl(
       batch_rows=65536,
       max_points=None,
       n_boot=200,
+      calibrate=not no_calibrate,
     )
 
     if (
@@ -290,6 +317,9 @@ def _fit_impl(
 @click.option("--val-frac", default=0.1, type=float, show_default=True)
 @click.option("--enum-max", default=8, type=int, show_default=True)
 @click.option("--ensemble-size", default=5, type=int, show_default=True)
+@click.option("--no-calibrate", is_flag=True, default=False, help="Skip post-hoc isotonic calibration")
+@click.option("--reweight", type=click.Choice(["auto", "on", "off"]), default="auto", show_default=True, help="Regression imbalance reweighting: auto-detect, force on, or disable")
+@click.option("--reweight-bins", default=20, type=int, show_default=True, help="Number of equal-width bins for regression reweighting")
 @apply_opts(opt_time_budget, opt_trials, opt_no_onnx)
 @apply_opts(opt_hard, opt_hard_smiles, opt_hard_y, opt_hard_weight)
 def fit_cmd(
@@ -314,6 +344,9 @@ def fit_cmd(
   val_frac,
   enum_max,
   ensemble_size,
+  no_calibrate,
+  reweight,
+  reweight_bins,
   time_budget,
   trials,
   no_onnx,
@@ -347,10 +380,13 @@ def fit_cmd(
     time_budget=time_budget,
     trials=trials,
     no_onnx=no_onnx,
+    no_calibrate=no_calibrate,
     hard_labels=hard_labels,
     hard_smiles_col=hard_smiles_col,
     hard_y_col=hard_y_col,
     hard_weight=hard_weight,
+    reweight=reweight,
+    reweight_bins=reweight_bins,
   )
 
 
@@ -370,6 +406,7 @@ def fit_cmd(
 @click.option("--njobs", default=8, type=int, show_default=True)
 @click.option("--smarts", is_flag=True, default=False, help="Treat input as SMARTS")
 @click.option("--no-sanitize", is_flag=True, default=False, help="Disable RDKit sanitization")
+@click.option("--no-calibrate", is_flag=True, default=False, help="Skip isotonic calibration at prediction time")
 def predict_cmd(
   model_dir,
   input_path,
@@ -382,6 +419,7 @@ def predict_cmd(
   njobs,
   smarts,
   no_sanitize,
+  no_calibrate,
 ):
   model_dir = Path(model_dir)
   input_path = Path(input_path)
@@ -426,14 +464,14 @@ def predict_cmd(
         f"which={fp} fp_size={fp_size} radius={radius} sanitize={not no_sanitize} njobs={njobs}"
       )
     logger.info(f"Predicting smiles rows={len(smiles)}")
-    y = student.predict(smiles=smiles)
+    y = student.predict(smiles=smiles, calibrate=not no_calibrate)
   else:
     X = data["X"]
     if expected_dim is not None and expected_dim > 0 and int(X.shape[1]) != expected_dim:
       logger.error(f"Feature dimension mismatch: model expects {expected_dim}, got {X.shape[1]}")
       raise click.ClickException("feature dimension mismatch")
     logger.info(f"Predicting rows={X.shape[0]} cols={X.shape[1]}")
-    y = student.predict(X=X)
+    y = student.predict(X=X, calibrate=not no_calibrate)
 
   if out_path is None:
     out_path = input_path.with_suffix(".pred.csv")
@@ -465,6 +503,8 @@ def predict_cmd(
   opt_hard_y,
   opt_hard_weight,
 )
+@click.option("--reweight", type=click.Choice(["auto", "on", "off"]), default="auto", show_default=True, help="Regression imbalance reweighting: auto-detect, force on, or disable")
+@click.option("--reweight-bins", default=20, type=int, show_default=True, help="Number of equal-width bins for regression reweighting")
 def distill_cmd(
   teacher_parquet,
   out,
@@ -484,6 +524,8 @@ def distill_cmd(
   hard_smiles_col,
   hard_y_col,
   hard_weight,
+  reweight,
+  reweight_bins,
 ):
   out_dir = Path(out)
   pack_distill_dataset(
@@ -529,6 +571,8 @@ def distill_cmd(
     time_budget=time_budget,
     trials=trials,
     no_onnx=no_onnx,
+    reweight=reweight,
+    reweight_bins=reweight_bins,
   )
 
 

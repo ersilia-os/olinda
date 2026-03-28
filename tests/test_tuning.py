@@ -68,7 +68,6 @@ class TestBasicTraining:
     """fit_external without tuning produces a valid booster + metadata."""
     train_iter, val_iter = synthetic_data
     trainer = XGBTrainer(
-      task="regression",
       num_boost_round=50,
       early_stopping_rounds=10,
     )
@@ -83,7 +82,6 @@ class TestBasicTraining:
     """fit_external works without a validation iterator."""
     train_iter, _ = synthetic_data
     trainer = XGBTrainer(
-      task="regression",
       num_boost_round=30,
       early_stopping_rounds=None,
     )
@@ -101,7 +99,6 @@ class TestTuning:
     """Tuning with a short budget completes and produces expected metadata."""
     train_iter, val_iter = synthetic_data
     trainer = XGBTrainer(
-      task="regression",
       num_boost_round=30,
       early_stopping_rounds=10,
     )
@@ -120,7 +117,6 @@ class TestTuning:
     """Best params from tuning are reflected in the final model metadata."""
     train_iter, val_iter = synthetic_data
     trainer = XGBTrainer(
-      task="regression",
       num_boost_round=30,
       early_stopping_rounds=10,
     )
@@ -137,7 +133,6 @@ class TestTuning:
     """sample_frac should no longer appear in trial params (fixed fraction)."""
     train_iter, val_iter = synthetic_data
     trainer = XGBTrainer(
-      task="regression",
       num_boost_round=30,
       early_stopping_rounds=10,
     )
@@ -152,7 +147,6 @@ class TestTuning:
     """With a very tight budget and many trials, tuning should stop well short."""
     train_iter, val_iter = synthetic_data
     trainer = XGBTrainer(
-      task="regression",
       num_boost_round=2000,  # expensive per trial (cheap_rounds=600)
       early_stopping_rounds=50,
     )
