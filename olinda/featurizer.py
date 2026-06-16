@@ -111,8 +111,12 @@ def smiles_to_fps(smiles, fp_size, which, radius, is_smarts, sanitize, njobs):
   out = np.empty((n, fp_size), dtype=np.float32)
   if njobs and njobs > 1:
     _fn = partial(
-      _smiles_to_fp, fp_size=fp_size, radius=radius,
-      is_smarts=is_smarts, which=which, sanitize=sanitize,
+      _smiles_to_fp,
+      fp_size=fp_size,
+      radius=radius,
+      is_smarts=is_smarts,
+      which=which,
+      sanitize=sanitize,
     )
     with Pool(processes=njobs) as pool:
       for i, fp in enumerate(pool.imap(_fn, xs, chunksize=max(1, n // (njobs * 4)))):

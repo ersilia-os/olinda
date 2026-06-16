@@ -85,8 +85,9 @@ def detect_training_device() -> tuple[str, str]:
 
 
 class _RichTrainCallback(TrainingCallback):
-  def __init__(self, progress: Progress, task_id, total_rounds: int, eval_metric: str,
-               higher_is_better: bool = False):
+  def __init__(
+    self, progress: Progress, task_id, total_rounds: int, eval_metric: str, higher_is_better: bool = False
+  ):
     self.progress = progress
     self.task_id = task_id
     self.total_rounds = total_rounds
@@ -366,8 +367,7 @@ class XGBTrainer:
     ) as prog:
       task_id = prog.add_task("boosting", total=self.num_boost_round, metric="", best="")
       higher = eval_metric in _MAXIMIZE_METRICS
-      cb = _RichTrainCallback(prog, task_id, self.num_boost_round, eval_metric,
-                              higher_is_better=higher)
+      cb = _RichTrainCallback(prog, task_id, self.num_boost_round, eval_metric, higher_is_better=higher)
 
       t0 = time.perf_counter()
       evals_result = {}
@@ -534,9 +534,7 @@ class XGBTrainer:
         if best_value is not None:
           best_value = float(best_value)
         logger.info(
-          "tune trial: "
-          f"id={trial.number} value={trial_value} best={best_value} "
-          f"params={trial.params}"
+          f"tune trial: id={trial.number} value={trial_value} best={best_value} params={trial.params}"
         )
         prog.update(task_id, advance=1, refresh=True)
         if time.time() - start > time_budget:
@@ -545,17 +543,19 @@ class XGBTrainer:
       study.optimize(objective, n_trials=n_trials, callbacks=[_optuna_cb], gc_after_trial=True)
     logger.info(f"tune phase 1 complete in {time.perf_counter() - t_phase1:.2f}s")
 
-    del dtrain_cheap, dval_cheap  # free phase 1 memory
+    dtrain_cheap = dval_cheap = None  # free phase 1 memory
 
     completed = [
-      t
-      for t in study.trials
-      if t.value is not None and t.state == optuna.trial.TrialState.COMPLETE
+      t for t in study.trials if t.value is not None and t.state == optuna.trial.TrialState.COMPLETE
     ]
 
     if not completed:
       logger.warning("tune phase 1: all trials failed — falling back to default parameters")
-      return {}, {"elapsed_seconds": round(time.time() - start, 2), "phase1": {"n_trials": len(study.trials), "all_failed": True}, "best_params": {}}
+      return {}, {
+        "elapsed_seconds": round(time.time() - start, 2),
+        "phase1": {"n_trials": len(study.trials), "all_failed": True},
+        "best_params": {},
+      }
 
     _worst = float("-inf") if higher else float("inf")
     completed.sort(
@@ -652,7 +652,7 @@ class XGBTrainer:
 
     logger.info(f"tune phase 3 complete in {time.perf_counter() - t_phase3:.2f}s")
 
-    del dtrain_full, dval_full  # free full DMatrix memory
+    dtrain_full = dval_full = None  # free full DMatrix memory
 
     phase3_results.sort(key=lambda r: r["mean"], reverse=higher)
     best = phase3_results[0] if phase3_results else None

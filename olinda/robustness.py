@@ -122,7 +122,7 @@ def _similarity_split(
       train_idx.append(int(i))
 
   if len(test_idx) < n_test:
-    remaining = [i for i in train_idx]
+    remaining = list(train_idx)
     scores = []
     for i in remaining:
       sims = DataStructs.BulkTanimotoSimilarity(fps[i], [fps[j] for j in train_idx if j != i])

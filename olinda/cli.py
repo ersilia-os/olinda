@@ -74,10 +74,17 @@ opt_hard_y = click.option("--hard-y-col", default="y", show_default=True)
 opt_hard_weight = click.option("--hard-weight", default=1.0, type=float, show_default=True)
 
 opt_time_budget = click.option(
-  "--time-budget", required=False, default=600, type=int, show_default=True, help="Optuna time budget (seconds)"
+  "--time-budget",
+  required=False,
+  default=600,
+  type=int,
+  show_default=True,
+  help="Optuna time budget (seconds)",
 )
 opt_trials = click.option("--trials", default=10, type=int, show_default=True)
 opt_no_onnx = click.option("--no-onnx", is_flag=True, default=False, help="Skip ONNX export")
+
+
 @cli.command("pack", help="PACK: convert teacher Parquet into sharded distill dataset.")
 @apply_opts(
   opt_teacher_parquet,
@@ -239,7 +246,8 @@ def _fit_impl(
     )
 
   trainer = XGBTrainer(
-    num_boost_round=num_boost_round, early_stopping_rounds=early_stopping,
+    num_boost_round=num_boost_round,
+    early_stopping_rounds=early_stopping,
   )
   booster, meta = trainer.fit_external(
     train_iter=train_iter, val_iter=val_iter, time_budget=time_budget, n_trials=trials
@@ -265,9 +273,7 @@ def _fit_impl(
     )
 
     if (
-      robustness
-      and input_path.is_file()
-      and input_path.suffix.lower() in (".csv", ".tsv", ".parquet", ".pq")
+      robustness and input_path.is_file() and input_path.suffix.lower() in (".csv", ".tsv", ".parquet", ".pq")
     ):
       try:
         robustness_eval_smiles(
@@ -318,8 +324,20 @@ def _fit_impl(
 @click.option("--enum-max", default=8, type=int, show_default=True)
 @click.option("--ensemble-size", default=5, type=int, show_default=True)
 @click.option("--no-calibrate", is_flag=True, default=False, help="Skip post-hoc isotonic calibration")
-@click.option("--reweight", type=click.Choice(["auto", "on", "off"]), default="auto", show_default=True, help="Regression imbalance reweighting: auto-detect, force on, or disable")
-@click.option("--reweight-bins", default=20, type=int, show_default=True, help="Number of equal-width bins for regression reweighting")
+@click.option(
+  "--reweight",
+  type=click.Choice(["auto", "on", "off"]),
+  default="auto",
+  show_default=True,
+  help="Regression imbalance reweighting: auto-detect, force on, or disable",
+)
+@click.option(
+  "--reweight-bins",
+  default=20,
+  type=int,
+  show_default=True,
+  help="Number of equal-width bins for regression reweighting",
+)
 @apply_opts(opt_time_budget, opt_trials, opt_no_onnx)
 @apply_opts(opt_hard, opt_hard_smiles, opt_hard_y, opt_hard_weight)
 def fit_cmd(
@@ -406,7 +424,9 @@ def fit_cmd(
 @click.option("--njobs", default=8, type=int, show_default=True)
 @click.option("--smarts", is_flag=True, default=False, help="Treat input as SMARTS")
 @click.option("--no-sanitize", is_flag=True, default=False, help="Disable RDKit sanitization")
-@click.option("--no-calibrate", is_flag=True, default=False, help="Skip isotonic calibration at prediction time")
+@click.option(
+  "--no-calibrate", is_flag=True, default=False, help="Skip isotonic calibration at prediction time"
+)
 def predict_cmd(
   model_dir,
   input_path,
@@ -503,8 +523,20 @@ def predict_cmd(
   opt_hard_y,
   opt_hard_weight,
 )
-@click.option("--reweight", type=click.Choice(["auto", "on", "off"]), default="auto", show_default=True, help="Regression imbalance reweighting: auto-detect, force on, or disable")
-@click.option("--reweight-bins", default=20, type=int, show_default=True, help="Number of equal-width bins for regression reweighting")
+@click.option(
+  "--reweight",
+  type=click.Choice(["auto", "on", "off"]),
+  default="auto",
+  show_default=True,
+  help="Regression imbalance reweighting: auto-detect, force on, or disable",
+)
+@click.option(
+  "--reweight-bins",
+  default=20,
+  type=int,
+  show_default=True,
+  help="Number of equal-width bins for regression reweighting",
+)
 def distill_cmd(
   teacher_parquet,
   out,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from pathlib import Path
 
@@ -228,16 +227,20 @@ def pack_distill_dataset(
       tr_sub = t.filter(tr_mask)
       if tr_sub.num_rows > 0:
         pq.write_table(
-          tr_sub, tr_dir / f"part-{uuid.uuid4().hex[:10]}.parquet",
-          compression=compression, use_dictionary=False,
+          tr_sub,
+          tr_dir / f"part-{uuid.uuid4().hex[:10]}.parquet",
+          compression=compression,
+          use_dictionary=False,
         )
         train_rows += tr_sub.num_rows
 
       va_sub = t.filter(va_mask)
       if va_sub.num_rows > 0:
         pq.write_table(
-          va_sub, va_dir / f"part-{uuid.uuid4().hex[:10]}.parquet",
-          compression=compression, use_dictionary=False,
+          va_sub,
+          va_dir / f"part-{uuid.uuid4().hex[:10]}.parquet",
+          compression=compression,
+          use_dictionary=False,
         )
         val_rows += va_sub.num_rows
 
@@ -322,7 +325,7 @@ def pack_distill_dataset(
     "format": "olinda.distill.parquet.v1",
     "x_col": x_col,
     "y_col": y_soft_col,
-    "w_col": w_col if w_col else None,
+    "w_col": w_col or None,
     "split_col": split_col,
     "x_dim": int(x_dim),
     "teacher_rows": int(total_rows),
@@ -398,8 +401,6 @@ def pack_feature_table(
   va_dir = out_dir / "val"
   _ensure_dir(tr_dir)
   _ensure_dir(va_dir)
-
-  rng = np.random.default_rng(seed)
 
   x_cols = None
   x_dim = None
@@ -560,8 +561,15 @@ def pack_feature_table(
 
     from olinda.featurizer import Fingerprint
 
-    hard_fz = featurizer if featurizer is not None else Fingerprint(
-      which=fp_kind, fp_size=int(x_dim or fp_size), radius=int(radius), njobs=int(njobs),
+    hard_fz = (
+      featurizer
+      if featurizer is not None
+      else Fingerprint(
+        which=fp_kind,
+        fp_size=int(x_dim or fp_size),
+        radius=int(radius),
+        njobs=int(njobs),
+      )
     )
     hard_dim = getattr(hard_fz, "fp_size", x_dim)
 
@@ -597,7 +605,8 @@ def pack_feature_table(
         pq.write_table(
           ht.take(pa.array(tr_idx)),
           tr_dir / f"part-hard-{uuid.uuid4().hex[:10]}.parquet",
-          compression=compression, use_dictionary=False,
+          compression=compression,
+          use_dictionary=False,
         )
         train_rows += int(len(tr_idx))
 
@@ -605,7 +614,8 @@ def pack_feature_table(
         pq.write_table(
           ht.take(pa.array(va_idx)),
           va_dir / f"part-hard-{uuid.uuid4().hex[:10]}.parquet",
-          compression=compression, use_dictionary=False,
+          compression=compression,
+          use_dictionary=False,
         )
         val_rows += int(len(va_idx))
 

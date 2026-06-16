@@ -3,13 +3,17 @@ from pathlib import Path
 
 
 class StudentModel:
-  def __init__(self, booster: xgb.Booster, featurizer=None, calibrator=None, metadata: dict | None = None) -> None:
+  def __init__(
+    self, booster: xgb.Booster, featurizer=None, calibrator=None, metadata: dict | None = None
+  ) -> None:
     self.booster = booster
     self.featurizer = featurizer
     self.calibrator = calibrator
     self.metadata = metadata or {}
 
-  def predict(self, X=None, smiles: list[str] | None = None, batch_size: int = 65536, calibrate: bool = True) -> np.ndarray:
+  def predict(
+    self, X=None, smiles: list[str] | None = None, batch_size: int = 65536, calibrate: bool = True
+  ) -> np.ndarray:
     if X is None:
       if self.featurizer is None or smiles is None:
         raise ValueError("provide X or (smiles + featurizer)")
@@ -65,6 +69,7 @@ class StudentModel:
     cal_path = out_dir / "calibrator.json"
     if cal_path.exists():
       from olinda.calibrate import IsotonicCalibrator
+
       cal = IsotonicCalibrator.load(cal_path)
 
     return cls(booster=booster, featurizer=fz, calibrator=cal, metadata=meta)
