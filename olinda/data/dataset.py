@@ -210,7 +210,10 @@ class ParquetDataIter(xgb.DataIter):
 
   def reset(self) -> None:
     cols = [self.x_col, self.y_col]
-    if self.w_col:
+    # Only scan the weight column if it is actually present: pack records
+    # w_col in meta.json even when no weights were written, and next() already
+    # tolerates a missing weight column — keep reset() consistent.
+    if self.w_col and self.w_col in self.dataset.schema.names:
       cols.append(self.w_col)
 
     if self.shuffle_row_groups:

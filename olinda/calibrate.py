@@ -4,6 +4,7 @@ Fits an isotonic regression from raw XGBoost predictions to teacher soft labels
 on the validation set. At inference, maps raw predictions through the learned
 monotonic function so outputs stay within the teacher's range.
 """
+
 from __future__ import annotations
 
 import json
@@ -12,6 +13,55 @@ from pathlib import Path
 import numpy as np
 
 from olinda.helpers import logger
+
+
+def _pava_increasing(y: np.ndarray, w: np.ndarray) -> np.ndarray:
+  """Weighted Pool Adjacent Violators Algorithm (non-decreasing fit).
+
+  Given target values ``y`` already sorted by their x coordinate (with weights
+  ``w``), return the least-squares non-decreasing fit. Uses the standard
+  O(n) block-stack formulation: append each point as a singleton block, then
+  merge it back into earlier blocks while it violates monotonicity, replacing
+  merged blocks with their weighted mean.
+
+  Parameters
+  ----------
+  y : np.ndarray
+      Target values sorted by ascending x.
+  w : np.ndarray
+      Per-point weights (same length as ``y``).
+
+  Returns
+  -------
+  np.ndarray
+      Non-decreasing fitted values, one per input position.
+  """
+  n = len(y)
+  # Block stacks: value (weighted mean), weight, and number of points.
+  bv = np.empty(n, dtype=np.float64)
+  bw = np.empty(n, dtype=np.float64)
+  bs = np.empty(n, dtype=np.int64)
+  top = -1
+  for i in range(n):
+    top += 1
+    bv[top] = y[i]
+    bw[top] = w[i]
+    bs[top] = 1
+    # Merge backwards while the previous block is higher than this one.
+    while top > 0 and bv[top - 1] > bv[top]:
+      merged_w = bw[top - 1] + bw[top]
+      bv[top - 1] = (bv[top - 1] * bw[top - 1] + bv[top] * bw[top]) / merged_w
+      bw[top - 1] = merged_w
+      bs[top - 1] += bs[top]
+      top -= 1
+
+  # Expand pooled block values back to per-position fitted values.
+  out = np.empty(n, dtype=np.float64)
+  pos = 0
+  for k in range(top + 1):
+    out[pos : pos + bs[k]] = bv[k]
+    pos += bs[k]
+  return out
 
 
 class IsotonicCalibrator:
@@ -39,71 +89,27 @@ class IsotonicCalibrator:
     target = np.asarray(target, dtype=np.float64).ravel()
     if len(raw) != len(target):
       raise ValueError("raw and target must have the same length")
+    if len(raw) == 0:
+      raise ValueError("cannot fit calibrator on empty input")
 
-    # Sort by raw prediction
-    order = np.argsort(raw)
-    x_sorted = raw[order]
-    y_sorted = target[order]
-
-    # Pool Adjacent Violators Algorithm (PAVA) — increasing
-    n = len(y_sorted)
-    y_iso = y_sorted.copy()
-    blocks = list(range(n))  # block[i] = start index of block containing i
-    weights = np.ones(n, dtype=np.float64)
-
-    i = 0
-    while i < n - 1:
-      if y_iso[i] > y_iso[i + 1]:
-        # Merge blocks: pool i and i+1
-        # Find the block starting at i
-        j = i + 1
-        # Weighted average
-        w_sum = weights[i] + weights[j]
-        y_iso[i] = (weights[i] * y_iso[i] + weights[j] * y_iso[j]) / w_sum
-        y_iso[j] = y_iso[i]
-        weights[i] = w_sum
-        weights[j] = 0
-
-        # Propagate merge: collapse j into i
-        # Now back up to check previous blocks
-        while i > 0 and y_iso[i - 1] > y_iso[i]:
-          i -= 1
-          w_sum = weights[i] + weights[i + 1]
-          y_iso[i] = (weights[i] * y_iso[i] + weights[i + 1] * y_iso[i + 1]) / w_sum
-          weights[i] = w_sum
-          weights[i + 1] = 0
-          # Fill forward
-          for k in range(i + 1, n):
-            if weights[k] == 0:
-              y_iso[k] = y_iso[i]
-            else:
-              break
-
-        # Fill forward from i
-        for k in range(i + 1, n):
-          if weights[k] == 0:
-            y_iso[k] = y_iso[i]
-          else:
-            break
-        i = k
-      else:
-        i += 1
-
-    # Deduplicate: keep unique x anchors with their isotonic y
-    # For duplicate x values, take the mean y
-    ux, inv = np.unique(x_sorted, return_inverse=True)
-    uy = np.zeros_like(ux)
+    # Collapse points that share a raw value: the calibration map is a function
+    # of the raw prediction, so tied x must map to a single value. Pool them by
+    # mean target with weight = count, then run weighted PAVA over unique x.
+    ux, inv = np.unique(raw, return_inverse=True)
+    sums = np.zeros_like(ux)
     counts = np.zeros_like(ux)
-    np.add.at(uy, inv, y_iso)
+    np.add.at(sums, inv, target)
     np.add.at(counts, inv, 1)
-    uy /= counts
+    grouped = sums / counts
+
+    # Least-squares non-decreasing fit via Pool Adjacent Violators.
+    uy = _pava_increasing(grouped, counts.astype(np.float64))
 
     self._x = ux
     self._y = uy
 
     logger.info(
-      f"Isotonic calibrator fitted: {len(ux)} anchors, "
-      f"output range [{uy.min():.6f}, {uy.max():.6f}]"
+      f"Isotonic calibrator fitted: {len(ux)} anchors, output range [{uy.min():.6f}, {uy.max():.6f}]"
     )
     return self
 
