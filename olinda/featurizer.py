@@ -10,6 +10,11 @@ from rdkit.Chem.rdmolops import FastFindRings
 
 RDLogger.DisableLog("rdApp.warning")
 
+# Below this many molecules, a process pool's fork/teardown cost dwarfs the featurization
+# work, so we go serial. This matters most when transform() is called repeatedly on tiny
+# inputs inside a hot loop (e.g. robustness perturbation), where a per-call pool is pathological.
+_MIN_PARALLEL = 512
+
 
 def _ebv_to_numpy(ebv):
   return np.frombuffer(ebv.ToBitString().encode("utf-8"), dtype=np.uint8) - ord("0")
@@ -109,7 +114,7 @@ def smiles_to_fps(smiles, fp_size, which, radius, is_smarts, sanitize, njobs):
   if n == 0:
     return np.empty((0, fp_size), dtype=np.float32)
   out = np.empty((n, fp_size), dtype=np.float32)
-  if njobs and njobs > 1:
+  if njobs and njobs > 1 and n >= _MIN_PARALLEL:
     _fn = partial(
       _smiles_to_fp,
       fp_size=fp_size,
