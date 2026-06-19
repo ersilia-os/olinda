@@ -76,6 +76,45 @@ def test_pack_fit_predict_end_to_end(tmp_path):
   assert len(lines) == 16  # header + 15 predictions
 
 
+def test_smiles_fit_persists_featurizer(tmp_path):
+  """Regression test: a Morgan/SMILES student must save its featurizer.
+
+  Without it, ``StudentModel.load(...).predict(smiles=...)`` raises and ``olinda predict``
+  silently depends on re-supplied --fp flags. fit recovers the featurizer from the packed
+  meta so the saved model is self-describing.
+  """
+  pytest.importorskip("rdkit")
+  from olinda.featurizer import Fingerprint
+  from olinda.models import StudentModel
+
+  pool = [
+    "CCO", "CCN", "c1ccccc1", "CC(=O)O", "CCCCC", "O=C(O)c1ccccc1", "CCOC(=O)C",
+    "Cn1cnc2c1c(=O)n(C)c(=O)n2C", "CC(C)Cc1ccc(C(C)C(=O)O)cc1", "OCC1OC(O)C(O)C(O)C1O",
+  ]
+  rng = np.random.default_rng(0)
+  smiles = [pool[i % len(pool)] for i in range(80)]
+  y = rng.uniform(0, 1, size=80).astype(np.float32)
+  csv = tmp_path / "teacher.csv"
+  csv.write_text("smiles,y\n" + "\n".join(f"{s},{v:.4f}" for s, v in zip(smiles, y)))
+
+  model = tmp_path / "model"
+  r = CliRunner().invoke(
+    cli,
+    ["fit", "--input", str(csv), "--out", str(model), "--smiles-col", "smiles",
+     "--fp", "morgan", "--fp-size", "256", "--time-budget", "0", "--no-onnx"],
+  )
+  assert r.exit_code == 0, r.output
+
+  meta = json.loads((model / "train_meta.json").read_text())
+  assert meta.get("featurizer_class") == "Fingerprint"
+
+  student = StudentModel.load(model, featurizer_factory=lambda c, cfg: Fingerprint.from_dict(cfg))
+  assert isinstance(student.featurizer, Fingerprint)
+  preds = student.predict(smiles=["CCO", "c1ccccc1", "O=C(O)c1ccccc1"], calibrate=False)
+  assert preds.shape == (3,)
+  assert np.isfinite(preds).all()
+
+
 def test_fit_without_weight_column_does_not_crash(tmp_path):
   """Regression test: packing without weights must not break fit/validation.
 

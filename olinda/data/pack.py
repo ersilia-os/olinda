@@ -385,6 +385,7 @@ def pack_feature_table(
   hard_smiles_col: str = "smiles",
   hard_y_col: str = "y",
   hard_weight: float = 1.0,
+  featurizer=None,
 ) -> Path:
   input_path = Path(input_path)
   out_dir = Path(out_dir)
@@ -407,7 +408,6 @@ def pack_feature_table(
   train_rows = 0
   val_rows = 0
   use_smiles = False
-  featurizer = None
   if fp_batch_rows > 1000:
     logger.warning(f"fp_batch_rows capped at 1000 (requested {fp_batch_rows})")
     fp_batch_rows = 1000
@@ -460,11 +460,19 @@ def pack_feature_table(
       if use_smiles_local:
         use_smiles = True
         x_cols = []
-        x_dim = int(fp_size)
-        from olinda.featurizer import Fingerprint
+        if featurizer is None:
+          from olinda.featurizer import Fingerprint
 
-        featurizer = Fingerprint(which=fp_kind, fp_size=int(fp_size), radius=int(radius), njobs=int(njobs))
-        logger.info("Using Clamp descriptors to calculate molecular fingerprints")
+          featurizer = Fingerprint(which=fp_kind, fp_size=int(fp_size), radius=int(radius), njobs=int(njobs))
+          logger.info(
+            f"Featurizing SMILES with fingerprint which={fp_kind} fp_size={fp_size} radius={radius}"
+          )
+        else:
+          logger.info(
+            "Featurizing SMILES with provided featurizer: "
+            f"{getattr(featurizer, 'name', type(featurizer).__name__)}"
+          )
+        # x_dim is derived from the featurizer output width after the first transform
       else:
         if not num_cols:
           raise ValueError("no numeric feature columns found")
@@ -483,6 +491,8 @@ def pack_feature_table(
       for i in range(0, len(smiles), fp_batch_rows):
         fps.append(fz.transform(smiles[i : i + fp_batch_rows]))
       X = np.vstack(fps).astype(np.float32)
+      if x_dim is None:
+        x_dim = int(X.shape[1])
     else:
       X = df[x_cols].to_numpy(dtype=np.float32, copy=False)
 
@@ -648,6 +658,7 @@ def pack_feature_table(
       "fp_size": int(fp_size),
       "radius": int(radius),
       "njobs": int(njobs),
+      "featurizer": getattr(featurizer, "name", None),
     }),
   }
 
