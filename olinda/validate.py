@@ -167,7 +167,9 @@ def _iter_val_batches(packed_dir: Path, x_col: str, y_col: str, w_col: str | Non
   val_dir = packed_dir / "val"
   dset = ds.dataset(str(val_dir), format="parquet")
   cols = [x_col, y_col]
-  if w_col:
+  # w_col may be recorded in meta.json without a matching column (no weights
+  # were packed); only scan it when actually present.
+  if w_col and w_col in dset.schema.names:
     cols.append(w_col)
   scanner = dset.scanner(columns=cols, batch_size=batch_rows)
   for b in scanner.to_batches():
@@ -246,8 +248,12 @@ def _plot_pred_vs_true(y, p, out_png: Path, max_scatter: int = 200_000):
   fig, am = create_figure(nrows=1, ncols=1)
   ax = am[0]
   sc = ax.scatter(
-    yy[order], pp[order],
-    c=density[order], cmap="viridis", s=6, edgecolors="none",
+    yy[order],
+    pp[order],
+    c=density[order],
+    cmap="viridis",
+    s=6,
+    edgecolors="none",
   )
   ax.plot([lo, hi], [lo, hi], color="grey", linewidth=1, linestyle="--")
   cbar = plt.colorbar(sc, ax=ax)
@@ -404,6 +410,48 @@ def _plot_before_after_calibration(y, p_raw, p_cal, out_png: Path):
   plt.close()
 
 
+def _json_safe(obj):
+  """Recursively replace non-finite floats (NaN/Inf) with None.
+
+  ``json.dump`` emits a bare ``NaN``/``Infinity`` token for these by default,
+  which is not valid JSON and breaks strict parsers and downstream tooling.
+  Metric helpers return ``float('nan')`` on degenerate inputs, so the report
+  can contain them.
+  """
+  if isinstance(obj, dict):
+    return {k: _json_safe(v) for k, v in obj.items()}
+  if isinstance(obj, (list, tuple)):
+    return [_json_safe(v) for v in obj]
+  if isinstance(obj, float) and not math.isfinite(obj):
+    return None
+  return obj
+
+
+def _oof_calibrated(p: np.ndarray, y: np.ndarray, k: int = 5, seed: int = 0) -> np.ndarray | None:
+  """Out-of-fold isotonic calibration of ``p`` against ``y``.
+
+  Fits the calibrator on K-1 folds and applies it to the held-out fold, so each
+  point is calibrated by a map that never saw it. This gives an honest estimate
+  of the calibration gain — transforming the same points the calibrator was fit
+  on is in-sample and overstates the improvement. Returns ``None`` when there
+  are too few points to cross-validate.
+  """
+  from olinda.calibrate import IsotonicCalibrator
+
+  n = len(p)
+  if n < 2 * k:
+    return None
+  rng = np.random.default_rng(seed)
+  folds = np.array_split(rng.permutation(n), k)
+  p_oof = np.empty(n, dtype=np.float32)
+  for f in range(k):
+    test_idx = folds[f]
+    train_idx = np.concatenate([folds[j] for j in range(k) if j != f])
+    cal = IsotonicCalibrator().fit(p[train_idx], y[train_idx])
+    p_oof[test_idx] = cal.transform(p[test_idx])
+  return p_oof
+
+
 def validate_regression(
   packed_dir: str | Path,
   model_dir: str | Path | None = None,
@@ -478,41 +526,57 @@ def validate_regression(
   if calibrate:
     from olinda.calibrate import IsotonicCalibrator
 
+    # The calibrator saved for inference is fit on ALL validation points.
     calibrator = IsotonicCalibrator().fit(raw=p, target=y)
-    p_cal = calibrator.transform(p)
+    calibrator.save(model_dir / "calibrator.json")
+
+    # Reported metrics use out-of-fold calibration: fitting and scoring on the
+    # same points overstates the gain. Fall back to in-sample only when there
+    # are too few points to cross-validate (clearly labelled in the report).
+    p_cal_oof = _oof_calibrated(p, y, k=5, seed=0)
+    cal_eval = "out_of_fold_5"
+    if p_cal_oof is None:
+      p_cal_oof = calibrator.transform(p)
+      cal_eval = "in_sample"
+      logger.warning(
+        "Too few validation points for out-of-fold calibration; "
+        "reported calibrated metrics are in-sample (optimistic)"
+      )
 
     cal_metrics = {
       "val_rows": int(len(y)),
-      "mae": _mae(y, p_cal),
-      "rmse": _rmse(y, p_cal),
-      "r2": _r2(y, p_cal),
-      "pearson": _pearsonr(y, p_cal),
-      "spearman": _spearmanr(y, p_cal),
-      "concordance": _concordance_index(y, p_cal),
-      "coverage_1std": _coverage(y, p_cal, std_scale=1.0),
-      "coverage_2std": _coverage(y, p_cal, std_scale=2.0),
+      "evaluation": cal_eval,
+      "mae": _mae(y, p_cal_oof),
+      "rmse": _rmse(y, p_cal_oof),
+      "r2": _r2(y, p_cal_oof),
+      "pearson": _pearsonr(y, p_cal_oof),
+      "spearman": _spearmanr(y, p_cal_oof),
+      "concordance": _concordance_index(y, p_cal_oof),
+      "coverage_1std": _coverage(y, p_cal_oof, std_scale=1.0),
+      "coverage_2std": _coverage(y, p_cal_oof, std_scale=2.0),
     }
 
     logger.info(
-      "Calibrated metrics: "
+      f"Calibrated metrics ({cal_eval}): "
       f"mae={cal_metrics['mae']:.6f} (was {metrics['mae']:.6f}) "
       f"rmse={cal_metrics['rmse']:.6f} (was {metrics['rmse']:.6f}) "
       f"r2={cal_metrics['r2']:.6f} (was {metrics['r2']:.6f}) "
       f"spearman={cal_metrics['spearman']:.6f} (was {metrics['spearman']:.6f})"
     )
 
+    # Plots visualize the saved (full-fit) calibrator that inference applies.
+    p_cal = calibrator.transform(p)
     _plot_pred_vs_true(y, p_cal, vdir / "pred_vs_true_calibrated.png")
     _plot_calibration_bins(y, p_cal, vdir / "calibration_bins_calibrated.png")
     _plot_before_after_calibration(y, p, p_cal, vdir / "calibration_comparison.png")
 
-    calibrator.save(model_dir / "calibrator.json")
     report["calibrated_metrics"] = cal_metrics
     report["calibrator_path"] = str(model_dir / "calibrator.json")
   else:
     logger.info("Calibration skipped (--no-calibrate)")
 
   with open(vdir / "validation_report.json", "w") as fp:
-    json.dump(report, fp, indent=2)
+    json.dump(_json_safe(report), fp, indent=2, allow_nan=False)
 
   logger.success(f"Validation written to {vdir}")
   return report

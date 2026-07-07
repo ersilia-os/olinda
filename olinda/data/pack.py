@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from pathlib import Path
 
@@ -228,16 +227,20 @@ def pack_distill_dataset(
       tr_sub = t.filter(tr_mask)
       if tr_sub.num_rows > 0:
         pq.write_table(
-          tr_sub, tr_dir / f"part-{uuid.uuid4().hex[:10]}.parquet",
-          compression=compression, use_dictionary=False,
+          tr_sub,
+          tr_dir / f"part-{uuid.uuid4().hex[:10]}.parquet",
+          compression=compression,
+          use_dictionary=False,
         )
         train_rows += tr_sub.num_rows
 
       va_sub = t.filter(va_mask)
       if va_sub.num_rows > 0:
         pq.write_table(
-          va_sub, va_dir / f"part-{uuid.uuid4().hex[:10]}.parquet",
-          compression=compression, use_dictionary=False,
+          va_sub,
+          va_dir / f"part-{uuid.uuid4().hex[:10]}.parquet",
+          compression=compression,
+          use_dictionary=False,
         )
         val_rows += va_sub.num_rows
 
@@ -322,7 +325,7 @@ def pack_distill_dataset(
     "format": "olinda.distill.parquet.v1",
     "x_col": x_col,
     "y_col": y_soft_col,
-    "w_col": w_col if w_col else None,
+    "w_col": w_col or None,
     "split_col": split_col,
     "x_dim": int(x_dim),
     "teacher_rows": int(total_rows),
@@ -382,6 +385,7 @@ def pack_feature_table(
   hard_smiles_col: str = "smiles",
   hard_y_col: str = "y",
   hard_weight: float = 1.0,
+  featurizer=None,
 ) -> Path:
   input_path = Path(input_path)
   out_dir = Path(out_dir)
@@ -399,14 +403,11 @@ def pack_feature_table(
   _ensure_dir(tr_dir)
   _ensure_dir(va_dir)
 
-  rng = np.random.default_rng(seed)
-
   x_cols = None
   x_dim = None
   train_rows = 0
   val_rows = 0
   use_smiles = False
-  featurizer = None
   if fp_batch_rows > 1000:
     logger.warning(f"fp_batch_rows capped at 1000 (requested {fp_batch_rows})")
     fp_batch_rows = 1000
@@ -459,11 +460,19 @@ def pack_feature_table(
       if use_smiles_local:
         use_smiles = True
         x_cols = []
-        x_dim = int(fp_size)
-        from olinda.featurizer import Fingerprint
+        if featurizer is None:
+          from olinda.featurizer import Fingerprint
 
-        featurizer = Fingerprint(which=fp_kind, fp_size=int(fp_size), radius=int(radius), njobs=int(njobs))
-        logger.info("Using Clamp descriptors to calculate molecular fingerprints")
+          featurizer = Fingerprint(which=fp_kind, fp_size=int(fp_size), radius=int(radius), njobs=int(njobs))
+          logger.info(
+            f"Featurizing SMILES with fingerprint which={fp_kind} fp_size={fp_size} radius={radius}"
+          )
+        else:
+          logger.info(
+            "Featurizing SMILES with provided featurizer: "
+            f"{getattr(featurizer, 'name', type(featurizer).__name__)}"
+          )
+        # x_dim is derived from the featurizer output width after the first transform
       else:
         if not num_cols:
           raise ValueError("no numeric feature columns found")
@@ -482,6 +491,8 @@ def pack_feature_table(
       for i in range(0, len(smiles), fp_batch_rows):
         fps.append(fz.transform(smiles[i : i + fp_batch_rows]))
       X = np.vstack(fps).astype(np.float32)
+      if x_dim is None:
+        x_dim = int(X.shape[1])
     else:
       X = df[x_cols].to_numpy(dtype=np.float32, copy=False)
 
@@ -560,8 +571,15 @@ def pack_feature_table(
 
     from olinda.featurizer import Fingerprint
 
-    hard_fz = featurizer if featurizer is not None else Fingerprint(
-      which=fp_kind, fp_size=int(x_dim or fp_size), radius=int(radius), njobs=int(njobs),
+    hard_fz = (
+      featurizer
+      if featurizer is not None
+      else Fingerprint(
+        which=fp_kind,
+        fp_size=int(x_dim or fp_size),
+        radius=int(radius),
+        njobs=int(njobs),
+      )
     )
     hard_dim = getattr(hard_fz, "fp_size", x_dim)
 
@@ -597,7 +615,8 @@ def pack_feature_table(
         pq.write_table(
           ht.take(pa.array(tr_idx)),
           tr_dir / f"part-hard-{uuid.uuid4().hex[:10]}.parquet",
-          compression=compression, use_dictionary=False,
+          compression=compression,
+          use_dictionary=False,
         )
         train_rows += int(len(tr_idx))
 
@@ -605,7 +624,8 @@ def pack_feature_table(
         pq.write_table(
           ht.take(pa.array(va_idx)),
           va_dir / f"part-hard-{uuid.uuid4().hex[:10]}.parquet",
-          compression=compression, use_dictionary=False,
+          compression=compression,
+          use_dictionary=False,
         )
         val_rows += int(len(va_idx))
 
@@ -638,6 +658,7 @@ def pack_feature_table(
       "fp_size": int(fp_size),
       "radius": int(radius),
       "njobs": int(njobs),
+      "featurizer": getattr(featurizer, "name", None),
     }),
   }
 

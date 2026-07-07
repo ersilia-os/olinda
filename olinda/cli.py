@@ -19,7 +19,7 @@ from olinda.data import (
 )
 from olinda.train import XGBTrainer
 from olinda.models import StudentModel, export_xgb_onnx
-from olinda.featurizer import Fingerprint, OnnxEncoder
+from olinda.featurizer import Fingerprint, OnnxEncoder, build_featurizer_from_hp
 from olinda.validate import validate_regression
 from olinda.robustness import robustness_eval_smiles
 
@@ -74,10 +74,17 @@ opt_hard_y = click.option("--hard-y-col", default="y", show_default=True)
 opt_hard_weight = click.option("--hard-weight", default=1.0, type=float, show_default=True)
 
 opt_time_budget = click.option(
-  "--time-budget", required=False, default=600, type=int, show_default=True, help="Optuna time budget (seconds)"
+  "--time-budget",
+  required=False,
+  default=600,
+  type=int,
+  show_default=True,
+  help="Optuna time budget (seconds)",
 )
 opt_trials = click.option("--trials", default=10, type=int, show_default=True)
 opt_no_onnx = click.option("--no-onnx", is_flag=True, default=False, help="Skip ONNX export")
+
+
 @cli.command("pack", help="PACK: convert teacher Parquet into sharded distill dataset.")
 @apply_opts(
   opt_teacher_parquet,
@@ -166,9 +173,15 @@ def _fit_impl(
   hard_weight=1.0,
   reweight="auto",
   reweight_bins=20,
+  encoder_ckpt=None,
 ):
   input_path = Path(input_path)
   out_dir = Path(out_dir)
+
+  featurizer = None
+  if encoder_ckpt:
+    featurizer = build_featurizer_from_hp(encoder_ckpt)
+    logger.info(f"Using ONNX compound encoder from {encoder_ckpt} (overrides --fp/--fp-size for SMILES)")
 
   if input_path.is_dir() and (input_path / "meta.json").exists():
     packed_dir = input_path
@@ -192,11 +205,20 @@ def _fit_impl(
       hard_smiles_col=hard_smiles_col,
       hard_y_col=hard_y_col,
       hard_weight=hard_weight,
+      featurizer=featurizer,
     )
 
   d = ParquetDistillDataset(packed_dir)
   ntr, nva = d.count()
   logger.info(f"Packed dataset rows: train={ntr} val={nva}")
+
+  # Make the saved student self-describing: if features came from SMILES, recover the
+  # featurizer from the packed meta so StudentModel.load(...).predict(smiles=...) works
+  # without re-supplying --fp. The encoder path already set `featurizer` above.
+  if featurizer is None:
+    featurizer = _featurizer_factory(d.meta.get("featurizer_class"), d.meta.get("featurizer") or {})
+    if featurizer is not None:
+      logger.info(f"Recovered {type(featurizer).__name__} featurizer from packed meta for SMILES inference")
 
   bin_edges, bin_weights = None, None
   do_reweight = reweight == "on"
@@ -239,13 +261,14 @@ def _fit_impl(
     )
 
   trainer = XGBTrainer(
-    num_boost_round=num_boost_round, early_stopping_rounds=early_stopping,
+    num_boost_round=num_boost_round,
+    early_stopping_rounds=early_stopping,
   )
   booster, meta = trainer.fit_external(
     train_iter=train_iter, val_iter=val_iter, time_budget=time_budget, n_trials=trials
   )
 
-  student = StudentModel(booster=booster, featurizer=None, metadata=meta)
+  student = StudentModel(booster=booster, featurizer=featurizer, metadata=meta)
   student.save(out_dir)
 
   if not no_onnx:
@@ -264,10 +287,10 @@ def _fit_impl(
       calibrate=not no_calibrate,
     )
 
-    if (
-      robustness
-      and input_path.is_file()
-      and input_path.suffix.lower() in (".csv", ".tsv", ".parquet", ".pq")
+    if robustness and isinstance(featurizer, OnnxEncoder):
+      logger.warning("Robustness evaluation skipped: not supported with an ONNX compound encoder featurizer")
+    elif (
+      robustness and input_path.is_file() and input_path.suffix.lower() in (".csv", ".tsv", ".parquet", ".pq")
     ):
       try:
         robustness_eval_smiles(
@@ -318,8 +341,25 @@ def _fit_impl(
 @click.option("--enum-max", default=8, type=int, show_default=True)
 @click.option("--ensemble-size", default=5, type=int, show_default=True)
 @click.option("--no-calibrate", is_flag=True, default=False, help="Skip post-hoc isotonic calibration")
-@click.option("--reweight", type=click.Choice(["auto", "on", "off"]), default="auto", show_default=True, help="Regression imbalance reweighting: auto-detect, force on, or disable")
-@click.option("--reweight-bins", default=20, type=int, show_default=True, help="Number of equal-width bins for regression reweighting")
+@click.option(
+  "--encoder-ckpt",
+  default=None,
+  help="Directory with hp.json + compound_encoder.onnx (e.g. CLAMP); featurizes SMILES into embeddings, overriding --fp",
+)
+@click.option(
+  "--reweight",
+  type=click.Choice(["auto", "on", "off"]),
+  default="auto",
+  show_default=True,
+  help="Regression imbalance reweighting: auto-detect, force on, or disable",
+)
+@click.option(
+  "--reweight-bins",
+  default=20,
+  type=int,
+  show_default=True,
+  help="Number of equal-width bins for regression reweighting",
+)
 @apply_opts(opt_time_budget, opt_trials, opt_no_onnx)
 @apply_opts(opt_hard, opt_hard_smiles, opt_hard_y, opt_hard_weight)
 def fit_cmd(
@@ -345,6 +385,7 @@ def fit_cmd(
   enum_max,
   ensemble_size,
   no_calibrate,
+  encoder_ckpt,
   reweight,
   reweight_bins,
   time_budget,
@@ -387,6 +428,7 @@ def fit_cmd(
     hard_weight=hard_weight,
     reweight=reweight,
     reweight_bins=reweight_bins,
+    encoder_ckpt=encoder_ckpt,
   )
 
 
@@ -406,7 +448,9 @@ def fit_cmd(
 @click.option("--njobs", default=8, type=int, show_default=True)
 @click.option("--smarts", is_flag=True, default=False, help="Treat input as SMARTS")
 @click.option("--no-sanitize", is_flag=True, default=False, help="Disable RDKit sanitization")
-@click.option("--no-calibrate", is_flag=True, default=False, help="Skip isotonic calibration at prediction time")
+@click.option(
+  "--no-calibrate", is_flag=True, default=False, help="Skip isotonic calibration at prediction time"
+)
 def predict_cmd(
   model_dir,
   input_path,
@@ -436,10 +480,10 @@ def predict_cmd(
   except Exception:
     expected_dim = None
 
+  # Only the plain Fingerprint exposes an output width as fp_size. An OnnxEncoder's output
+  # dim differs from its base fp_size, so skip the static check for encoders.
   if expected_dim is not None and expected_dim > 0 and student.featurizer is not None:
     fz_dim = getattr(student.featurizer, "fp_size", None)
-    if fz_dim is None and hasattr(student.featurizer, "base"):
-      fz_dim = getattr(student.featurizer.base, "fp_size", None)
     if fz_dim is not None and int(fz_dim) != expected_dim:
       logger.error(f"Featurizer dimension mismatch: model expects {expected_dim}, featurizer has {fz_dim}")
       raise click.ClickException("featurizer dimension mismatch")
@@ -503,8 +547,20 @@ def predict_cmd(
   opt_hard_y,
   opt_hard_weight,
 )
-@click.option("--reweight", type=click.Choice(["auto", "on", "off"]), default="auto", show_default=True, help="Regression imbalance reweighting: auto-detect, force on, or disable")
-@click.option("--reweight-bins", default=20, type=int, show_default=True, help="Number of equal-width bins for regression reweighting")
+@click.option(
+  "--reweight",
+  type=click.Choice(["auto", "on", "off"]),
+  default="auto",
+  show_default=True,
+  help="Regression imbalance reweighting: auto-detect, force on, or disable",
+)
+@click.option(
+  "--reweight-bins",
+  default=20,
+  type=int,
+  show_default=True,
+  help="Number of equal-width bins for regression reweighting",
+)
 def distill_cmd(
   teacher_parquet,
   out,

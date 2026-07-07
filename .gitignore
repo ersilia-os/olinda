@@ -10,3 +10,6 @@ wheels/
 .ruff_cache
 # Virtual environments
 .venv
+
+# ZairaChem distillation experiment (scratch: scripts, inputs, outputs, 174MB CLAMP encoder)
+zairachem_test/

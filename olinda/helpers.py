@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from loguru import logger as _loguru
@@ -99,10 +99,8 @@ class Logger:
   def add_file(self, path: str | Path, level: str = "DEBUG") -> None:
     """Add a file sink to loguru."""
     if self._file_id is not None:
-      try:
+      with suppress(Exception):
         self._loguru.remove(self._file_id)
-      except Exception:
-        pass
     self._file_id = self._loguru.add(
       str(path),
       level=level,
@@ -112,10 +110,8 @@ class Logger:
 
   def remove_file(self) -> None:
     if self._file_id is not None:
-      try:
+      with suppress(Exception):
         self._loguru.remove(self._file_id)
-      except Exception:
-        pass
       self._file_id = None
 
 

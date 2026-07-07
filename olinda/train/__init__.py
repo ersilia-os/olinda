@@ -1,1 +1,1 @@
-from .xgb import XGBTrainer
+from .xgb import XGBTrainer as XGBTrainer

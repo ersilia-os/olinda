@@ -122,7 +122,7 @@ def _similarity_split(
       train_idx.append(int(i))
 
   if len(test_idx) < n_test:
-    remaining = [i for i in train_idx]
+    remaining = list(train_idx)
     scores = []
     for i in remaining:
       sims = DataStructs.BulkTanimotoSimilarity(fps[i], [fps[j] for j in train_idx if j != i])
@@ -336,12 +336,19 @@ def robustness_eval_smiles(
   per_mol_std = []
 
   for n_enum in enum_steps:
+    # Featurize every molecule's enumerated variants in one pass. A per-molecule
+    # transform()/predict() loop spins up a process pool per call and does not scale to
+    # large test sets; batching keeps the result identical while collapsing it to one call.
+    variants_per_mol = [_randomize_smiles(smi, n=n_enum, seed=seed + i) for i, smi in enumerate(test_smiles)]
+    flat = [v for variants in variants_per_mol for v in variants]
+    Xv = featurizer.transform(flat).astype(np.float32)
+    flat_preds = booster.predict(xgb.DMatrix(Xv)).astype(np.float32)
     enum_preds = []
-    for i, smi in enumerate(test_smiles):
-      variants = _randomize_smiles(smi, n=n_enum, seed=seed + i)
-      Xv = featurizer.transform(variants).astype(np.float32)
-      pv = booster.predict(xgb.DMatrix(Xv)).astype(np.float32)
-      enum_preds.append(pv)
+    offset = 0
+    for variants in variants_per_mol:
+      k = len(variants)
+      enum_preds.append(flat_preds[offset : offset + k])
+      offset += k
     means = np.array([p.mean() for p in enum_preds], dtype=np.float32)
     stds = np.array([p.std() for p in enum_preds], dtype=np.float32)
     if n_enum == max(enum_steps):
