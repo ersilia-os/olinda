@@ -26,6 +26,7 @@ train = [
     "onnx>=1.17.0",
     "onnxmltools>=1.16.0",
     "optuna==4.9.0",
+    "psutil>=7.0.0",
     "pyarrow>=23.0.1",
     "rich-click>=1.9.7",
     "tqdm>=4.66.0",

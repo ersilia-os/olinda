@@ -645,18 +645,19 @@ def build_bundle(model_dir: str | Path) -> dict:
     )
 
   n_hard = sum(1 for e in plan if e["has_hard"])
-  size_mb = (model_dir / MODEL_NAME).stat().st_size / 1e6
+  size_b = (model_dir / MODEL_NAME).stat().st_size
+  size_txt = f"{size_b / 1e6:.1f} MB" if size_b >= 1e6 else f"{size_b / 1e3:.0f} KB"
   summary_panel(
     "olinda · export",
     [
       ("Columns", f"[bold]{len(plan)}[/] · {n_hard} with a hard head"),
       ("Outputs", " · ".join(outputs)),
       ("Parity (max)", f"[bold]{worst:.2e}[/] ≤ {_PARITY_TOL:.0e}"),
-      ("Size", f"[bold]{size_mb:.1f} MB[/]"),
+      ("Size", f"[bold]{size_txt}[/]"),
       ("Saved", f"[dim]{cpath(model_dir / MODEL_NAME)}[/]"),
     ],
     border_style="green",
     icon="✓",
   )
-  success(f"fused model.onnx built and parity-checked → [dim]{model_dir / MODEL_NAME}[/]")
+  success(f"fused model.onnx built and parity-checked → [dim]{cpath(model_dir / MODEL_NAME)}[/]")
   return {"model": str(model_dir / MODEL_NAME), "columns": outputs, "parity": parity}

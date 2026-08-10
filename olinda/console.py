@@ -66,20 +66,57 @@ def rule(title: str, *, style: str | None = None, right: str | None = None) -> N
   console.rule(label, align="left", style=style)
 
 
-def path(value, keep: int = 3) -> str:
-  """Render a filesystem path compactly: ``…/run/columns/c0`` rather than a wrapped absolute path.
+# One accent colour per command. Everything printed while a command runs is themed in its colour,
+# so the terminal shifts hue as the pipeline advances and a long run stays readable at a glance.
+STEP_COLORS = {
+  "setup": "cyan",
+  "prepare": "cyan",
+  "tune": "bright_yellow",
+  "learn-soft": "green",
+  "learn-hard": "magenta",
+  "export": "bright_cyan",
+  "predict": "blue",
+  "fit": "bright_green",
+}
 
-  Absolute paths in temp or scratch directories are long enough to wrap mid-word inside a panel,
-  which reads as broken output. Only the trailing components carry information for the reader, so
-  the head is elided when the whole path would not fit comfortably.
+
+def path(value, keep: int = 3) -> str:
+  """Render a filesystem path compactly: ``~/runs/my_model`` or ``…/run/columns/c0``.
+
+  Paths under ``$HOME`` collapse to ``~``, which is both shorter and more readable. Anything still
+  too long to fit a panel is elided from the head — absolute paths in temp or scratch directories
+  otherwise fold mid-component and read as broken output, and only the tail identifies the artifact.
   """
   from pathlib import Path as _Path
 
-  p = _Path(str(value))
-  parts = p.parts
-  if len(str(p)) <= 44 or len(parts) <= keep:
-    return str(p)
+  text = str(value)
+  home = str(_Path.home())
+  if text.startswith(home):
+    text = "~" + text[len(home) :]
+  if len(text) <= 44:
+    return text
+  parts = _Path(text).parts
+  if len(parts) <= keep:
+    return text
   return "…/" + "/".join(parts[-keep:])
+
+
+def resources() -> str | None:
+  """``CPU 62%  ·  RAM 18.4/32.0 GB (58%)`` — or ``None`` when psutil is unavailable.
+
+  Shown on step rules and completion lines so resource use stays visible across a long run, not just
+  during the stages that happen to print progress.
+  """
+  try:
+    import psutil
+  except ImportError:
+    return None
+  try:
+    cpu = psutil.cpu_percent(interval=None)
+    vm = psutil.virtual_memory()
+  except Exception:
+    return None
+  return f"CPU {cpu:.0f}%  ·  RAM {vm.used / 1e9:.1f}/{vm.total / 1e9:.1f} GB ({vm.percent:.0f}%)"
 
 
 def elapsed(seconds: float) -> str:
@@ -90,6 +127,45 @@ def elapsed(seconds: float) -> str:
   if seconds < 3600:
     return f"{seconds // 60}m {seconds % 60:02d}s"
   return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+
+
+@contextmanager
+def stage(title: str, *, color: str | None = None, right: str | None = None):
+  """A themed section that opens with a rule and closes with a timed completion line.
+
+  Sets the accent colour for everything printed inside, so nested helpers theme themselves without
+  being passed the colour. The closing glyph is drawn in that accent (red only on failure), matching
+  how a completed step reads as part of its section rather than as a generic success.
+
+      with stage("olinda · learn-soft", color="green") as st:
+          ...
+          st.summary = "3 columns · R² 0.86"
+  """
+  color = color or active_color()
+  previous = active_color()
+  set_active_color(color)
+  rule(title, style=color, right=right if right is not None else resources())
+
+  class _Stage:
+    summary: str | None = None
+
+  handle = _Stage()
+  started = time.time()
+  ok = True
+  try:
+    yield handle
+  except BaseException:
+    ok = False
+    raise
+  finally:
+    took = elapsed(time.time() - started)
+    tail = f"{handle.summary} · {took}" if handle.summary else took
+    res = resources()
+    if res:
+      tail += f" · {res}"
+    glyph, gcolor = ("✓", color) if ok else ("✕", "red")
+    console.print(f"  [{gcolor}]{glyph}[/] [dim]{tail}[/]")
+    set_active_color(previous)
 
 
 def detail(rows, *, indent: int = 3) -> None:

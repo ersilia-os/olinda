@@ -143,10 +143,22 @@ def fit_cmd(
   learned and fused in; with `--tune`, an Optuna pass precedes `learn-soft`. The result is a single
   self-describing `model.onnx` that `olinda predict` runs.
   """
-  from olinda.console import path as cpath, rule, summary_panel
+  import time
+
+  from olinda.console import (
+    STEP_COLORS,
+    elapsed,
+    path as cpath,
+    resources,
+    rule,
+    set_active_color,
+    summary_panel,
+  )
 
   md = Path(model_dir)
-  rule("olinda · fit", style="cyan", right=str(md))
+  started = time.time()
+  set_active_color(STEP_COLORS["fit"])
+  rule("olinda · fit", style=STEP_COLORS["fit"], right=resources())
 
   prepare_cmd.callback(
     soft_labels=soft_labels,
@@ -171,8 +183,9 @@ def fit_cmd(
       ("Pipeline", pipeline),
       ("Head", "soft + hard" if hard_labels else "soft only"),
       ("Model", f"[dim]{cpath(md / 'model.onnx')}[/]"),
+      ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
     ],
-    border_style="green",
+    border_style=STEP_COLORS["fit"],
     icon="✓",
   )
 
@@ -358,7 +371,19 @@ def learn_soft_cmd(model_dir, num_boost_round):
   `learn-hard` re-fuses it with the hard head).
   """
   from olinda import run as runlib
-  from olinda.console import echo, path as cpath, rule, engine_banner, summary_panel
+  import time
+
+  from olinda.console import (
+    STEP_COLORS,
+    echo,
+    elapsed,
+    engine_banner,
+    path as cpath,
+    resources,
+    rule,
+    set_active_color,
+    summary_panel,
+  )
   from olinda.data import OLINDA_HOME, MORGAN_FINGERPRINTS_FILENAME
   from olinda.data.matrix import ReferenceMatrix
   from olinda.train.backend import get_backend, select_backend
@@ -372,7 +397,13 @@ def learn_soft_cmd(model_dir, num_boost_round):
   columns = manifest["columns"]
   features = manifest["features"].get("features", "morgan")
   dim = manifest["reference_library"]["dim"]
-  rule("olinda · learn-soft", style="green", right=f"{len(columns)} column(s) · {features} · {dim}-dim")
+  started = time.time()
+  set_active_color(STEP_COLORS["learn-soft"])
+  rule(
+    "olinda · learn-soft",
+    style=STEP_COLORS["learn-soft"],
+    right=f"{len(columns)} column(s) · {features} · {dim}-dim",
+  )
 
   # Engine auto-selected by device (GPU→XGBoost, CPU→LightGBM); OLINDA_BACKEND overrides.
   backend_name, device, backend_reason = select_backend()
@@ -388,7 +419,11 @@ def learn_soft_cmd(model_dir, num_boost_round):
 
   results = []
   for i, col in enumerate(columns, start=1):
-    rule(f"olinda · learn-soft · {col['name']}", style="green", right=f"column {i}/{len(columns)}")
+    rule(
+      f"STEP {i}/{len(columns)} · {col['name']}",
+      style=STEP_COLORS["learn-soft"],
+      right=resources(),
+    )
     results.append(_train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_boost_round))
     col["status"]["soft_trained"] = True
     runlib.write_manifest(model_dir, manifest)
@@ -411,8 +446,9 @@ def learn_soft_cmd(model_dir, num_boost_round):
         for r in results
       ],
       ("Model", f"[dim]{cpath(model_dir / 'model.onnx')}[/]"),
+      ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
     ],
-    border_style="green",
+    border_style=STEP_COLORS["learn-soft"],
     icon="✓",
   )
 
