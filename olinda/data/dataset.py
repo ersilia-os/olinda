@@ -1,93 +1,24 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
+from contextlib import suppress
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.dataset as ds
-import pyarrow.parquet as pq
 import xgboost as xgb
 
 from olinda.helpers import logger
 
 
-class ParquetDistillDataset:
-  """Loader for a packed distillation dataset (meta.json + train/ + val/)."""
-
-  def __init__(self, root: str | Path) -> None:
-    self.root = Path(root)
-    meta_path = self.root / "meta.json"
-    if not meta_path.exists():
-      raise ValueError(f"missing meta.json in {self.root}")
-    with open(meta_path, "r") as fp:
-      self.meta = json.load(fp)
-
-    self.x_col: str = self.meta["x_col"]
-    self.y_col: str = self.meta["y_col"]
-    self.w_col: str | None = self.meta.get("w_col") or "w"
-    self.x_dim: int = int(self.meta["x_dim"])
-
-    self.train_dir = self.root / "train"
-    self.val_dir = self.root / "val"
-
-    self.train = ds.dataset(str(self.train_dir), format="parquet")
-    self.val = ds.dataset(str(self.val_dir), format="parquet")
-
-  def count(self) -> tuple[int, int]:
-    return int(self.train.count_rows()), int(self.val.count_rows())
-
-
-def _as_array(col: pa.Array | pa.ChunkedArray) -> pa.Array:
-  if isinstance(col, pa.ChunkedArray):
-    return col.combine_chunks()
-  return col
-
-
-def _x_to_2d(x_col: pa.Array | pa.ChunkedArray, x_dim: int) -> np.ndarray:
-  arr = _as_array(x_col)
-  t = arr.type
-
-  if pa.types.is_fixed_size_list(t):
-    if t.list_size != x_dim:
-      raise ValueError(f"x_dim mismatch: parquet={t.list_size} expected={x_dim}")
-    values = arr.values
-    v = np.asarray(values.to_numpy(zero_copy_only=False), dtype=np.float32)
-    return v.reshape(len(arr), x_dim)
-
-  if pa.types.is_list(t) or pa.types.is_large_list(t):
-    py = arr.to_pylist()
-    X = np.asarray(py, dtype=np.float32)
-    if X.ndim != 2 or X.shape[1] != x_dim:
-      raise ValueError(f"x shape mismatch from list: got {X.shape}, expected (*,{x_dim})")
-    return X
-
-  raise ValueError(f"unsupported x column type: {t}")
-
-
-def _scan_y(dataset: ds.Dataset, y_col: str) -> np.ndarray:
-  """Read all y values from the dataset into a 1-D float64 array."""
-  chunks = []
-  for batch in dataset.scanner(columns=[y_col], batch_size=100_000).to_batches():
-    chunks.append(batch.column(y_col).to_numpy(zero_copy_only=False))
-  return np.concatenate(chunks).astype(np.float64)
-
-
-def detect_regression_imbalance(
-  dataset: ds.Dataset,
-  y_col: str,
+def detect_imbalance_from_y(
+  y_all: np.ndarray,
   n_bins: int = 20,
   cv_threshold: float = 0.5,
 ) -> tuple[bool, float, dict]:
-  """Detect whether the regression target is imbalanced.
+  """Detect whether a regression target is imbalanced (operates on a y vector).
 
-  Uses equal-width bins over the [1st, 99th] percentile range and measures
-  the coefficient of variation (CV) of bin counts.  A high CV means some
-  value ranges are heavily underrepresented.
-
-  Returns (is_imbalanced, cv_score, details_dict).
+  Uses equal-width bins over the [1st, 99th] percentile range and measures the coefficient of
+  variation (CV) of bin counts. Returns ``(is_imbalanced, cv_score, details_dict)``.
   """
-  y_all = _scan_y(dataset, y_col)
+  y_all = np.asarray(y_all, dtype=np.float64)
   n = len(y_all)
 
   lo, hi = np.percentile(y_all, [1, 99])
@@ -127,21 +58,18 @@ def detect_regression_imbalance(
   return is_imbalanced, cv, details
 
 
-def compute_regression_weights(
-  dataset: ds.Dataset,
-  y_col: str,
+def regression_weights_from_y(
+  y_all: np.ndarray,
   n_bins: int = 20,
   max_weight: float = 10.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-  """Compute inverse-frequency sample weights using equal-width bins.
+  """Inverse-density sample weights over equal-width bins (operates on a y vector).
 
-  Bins are equal-width over the [1st, 99th] percentile range so that
-  sparse value regions genuinely receive higher weight.  Weights are
-  capped at *max_weight* to avoid over-boosting extreme outliers.
-
-  Returns (bin_edges, bin_weights).
+  Inverse-density sample weights over equal-width bins on the [1st, 99th] percentile range: an
+  average-density bin gets weight ~1, sparse bins are boosted (capped at *max_weight*), dense bins
+  are floored at 1. Returns (bin_edges, bin_weights).
   """
-  y_all = _scan_y(dataset, y_col)
+  y_all = np.asarray(y_all, dtype=np.float64)
 
   lo, hi = np.percentile(y_all, [1, 99])
   if hi - lo < 1e-12:
@@ -160,7 +88,7 @@ def compute_regression_weights(
     bin_weights = np.where(bin_counts > 0, total / (n_bins * bin_counts), 1.0)
   bin_weights = np.clip(bin_weights, 1.0, max_weight)
 
-  logger.info(
+  logger.debug(
     f"Regression reweighting: {n_bins} equal-width bins, "
     f"weight range [{bin_weights.min():.4f}, {bin_weights.max():.4f}], "
     f"max_weight cap={max_weight}"
@@ -173,94 +101,214 @@ def apply_bin_weights(
   bin_edges: np.ndarray,
   bin_weights: np.ndarray,
 ) -> np.ndarray:
-  """Map each y value to its bin weight."""
+  """Map each y value to its bin weight (works for both the coarse bin table and the fine KDE grid)."""
   bin_indices = np.digitize(y, bin_edges[1:-1])
   return bin_weights[np.clip(bin_indices, 0, len(bin_weights) - 1)]
 
 
-class ParquetDataIter(xgb.DataIter):
-  """Streams Parquet shards into XGBoost QuantileDMatrix without full RAM load."""
+def density_weights_from_y(
+  y_all: np.ndarray,
+  alpha: float = 1.0,
+  max_weight: float = 10.0,
+  n_grid: int = 512,
+  bandwidth: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+  """Smooth kernel-density inverse-weights (DenseWeight-style, bins-free), tail-robust.
+
+  Unlike :func:`regression_weights_from_y`'s coarse equal-width bins, this evaluates a Gaussian-smoothed
+  density of ``y`` *pointwise* over the full ``[min, max]`` range, so rare values in the extreme tails
+  (which a coarse bin would lump in with the dense flank of a nearby mode) get their own low density →
+  high weight. Handles skewed / bimodal / multimodal shapes uniformly. Reference: Steininger et al.,
+  "Density-based weighting for imbalanced regression", *Machine Learning* 2021.
+
+  Implemented on a fine grid (histogram → Gaussian convolution → per-cell weight) so it is numpy-only and
+  O(n) for large ``y``. Returns ``(edges, weights)`` in the SAME layout as :func:`regression_weights_from_y`
+  (``edges`` length ``n_grid + 1`` with ``±inf`` ends, ``weights`` length ``n_grid``), so it flows through
+  :func:`apply_bin_weights` / :class:`H5DataIter` unchanged.
+
+  Parameters
+  ----------
+  alpha : float
+      Weighting intensity. 0 → all weights 1 (off); 1 → full inverse-density. Values in between soften it.
+  max_weight : float
+      Cap on the up-weight for the sparsest regions (floor is always 1).
+  n_grid : int
+      Density-grid resolution (fine, unlike the coarse ``n_bins`` of the binned scheme).
+  bandwidth : float, optional
+      Gaussian kernel bandwidth in y-units. Defaults to a robust Silverman estimate.
+  """
+  y_all = np.asarray(y_all, dtype=np.float64)
+  lo, hi = float(y_all.min()), float(y_all.max())
+  if hi - lo < 1e-12:
+    return np.array([-np.inf, np.inf]), np.array([1.0], dtype=np.float32)
+
+  # Robust Silverman bandwidth: min(std, IQR/1.349) guards against heavy tails / outliers inflating std.
+  std = float(y_all.std())
+  q75, q25 = np.percentile(y_all, [75, 25])
+  iqr = float(q75 - q25)
+  scale = min(std, iqr / 1.349) if iqr > 0 else std
+  if bandwidth is None:
+    bandwidth = max(0.9 * scale * len(y_all) ** (-1 / 5), (hi - lo) / n_grid)
+
+  edges = np.linspace(lo, hi, n_grid + 1)
+  counts, _ = np.histogram(y_all, bins=edges)
+
+  dx = (hi - lo) / n_grid
+  half = max(int(3 * bandwidth / dx), 1)
+  kx = np.arange(-half, half + 1) * dx
+  kernel = np.exp(-0.5 * (kx / bandwidth) ** 2)
+  kernel /= kernel.sum()
+  density = np.convolve(counts.astype(np.float64), kernel, mode="same")
+  density = np.maximum(density, density.max() * 1e-6)  # guard empty grid cells
+
+  dens_at_y = density[np.clip(np.digitize(y_all, edges[1:-1]), 0, n_grid - 1)]
+  typical = float(dens_at_y.mean())  # density a typical sample sees → this density gets weight 1
+  with np.errstate(divide="ignore", invalid="ignore"):
+    weights = np.clip((typical / density) ** float(alpha), 1.0, max_weight)
+
+  edges[0] = -np.inf
+  edges[-1] = np.inf
+  logger.debug(
+    f"KDE reweighting: {n_grid} grid cells, bandwidth={bandwidth:.4g}, alpha={alpha}, "
+    f"weight range [{weights.min():.4f}, {weights.max():.4f}], max_weight cap={max_weight}"
+  )
+  return edges, weights.astype(np.float32)
+
+
+def choose_weighting_strategy(
+  y_all: np.ndarray,
+  n_bins: int = 20,
+  cv_threshold: float = 0.5,
+  min_n_for_kde: int = 1000,
+  min_unique_for_kde: int = 20,
+) -> tuple[str, dict]:
+  """Pick the reweighting strategy from the target's shape: ``"none"`` | ``"bins"`` | ``"kde"``.
+
+  - Balanced target (uniform / evenly-covered) → ``"none"`` (no weighting; also avoids KDE boundary
+    up-weighting on uniform data).
+  - Imbalanced but discrete / small sample (few unique values or tiny ``n``) → ``"bins"`` (KDE smoothing is
+    meaningless on a spiky/discrete target; coarse bins are stable).
+  - Imbalanced continuous (skewed / bimodal / multimodal / heavy-tailed) → ``"kde"`` (tail-robust).
+  """
+  y_all = np.asarray(y_all, dtype=np.float64)
+  n = len(y_all)
+  n_unique = int(np.unique(y_all).size)
+  is_imbalanced, cv, details = detect_imbalance_from_y(y_all, n_bins=n_bins, cv_threshold=cv_threshold)
+
+  info = {"cv": round(float(cv), 4), "n": n, "n_unique": n_unique}
+  if not is_imbalanced:
+    return "none", {"reason": f"balanced target (cv={cv:.2f} ≤ {cv_threshold})", **info}
+  if n < min_n_for_kde or n_unique < min_unique_for_kde:
+    return "bins", {"reason": f"imbalanced but discrete/small (n={n}, unique={n_unique})", **info}
+  return "kde", {"reason": f"imbalanced continuous (cv={cv:.2f}, unique={n_unique})", **info}
+
+
+def resolve_regression_weights(
+  y_all: np.ndarray,
+  mode: str = "auto",
+  *,
+  alpha: float = 1.0,
+  n_bins: int = 20,
+  max_weight: float = 10.0,
+  n_grid: int = 512,
+) -> tuple[np.ndarray | None, np.ndarray | None, dict]:
+  """Resolve target reweighting to ``(edges, weights, info)``.
+
+  ``mode`` is ``auto`` | ``on`` | ``off`` | ``kde`` | ``bins`` | ``none``:
+
+  - ``auto`` (default): weight only when the target is imbalanced (via :func:`choose_weighting_strategy`) —
+    ``none`` for balanced targets, ``kde``/``bins`` otherwise.
+  - ``on``: force weighting even on a balanced target (picks ``kde`` for continuous, ``bins`` for discrete).
+  - ``off`` / ``none``: never weight.
+  - ``kde`` / ``bins``: force that specific strategy.
+
+  Returns ``(None, None, info)`` when no weighting applies. ``edges``/``weights`` (when present) plug
+  straight into :func:`apply_bin_weights`.
+  """
+  if mode in ("off", "none"):
+    strategy, info = "none", {"reason": f"reweighting disabled (mode={mode})"}
+  elif mode == "auto":
+    strategy, info = choose_weighting_strategy(y_all, n_bins=n_bins)
+  elif mode == "on":
+    strategy, info = choose_weighting_strategy(y_all, n_bins=n_bins)
+    if strategy == "none":  # forced on: balanced target, but pick a strategy by continuity anyway
+      n_rows, n_uniq = info.get("n", len(y_all)), info.get("n_unique", 0)
+      strategy = "kde" if (n_rows >= 1000 and n_uniq >= 20) else "bins"
+      info = {**info, "reason": f"forced on despite balanced target (cv={info.get('cv')})"}
+  elif mode in ("kde", "bins"):
+    strategy, info = mode, {"reason": f"forced by mode={mode}"}
+  else:
+    raise ValueError(f"unknown weighting mode: {mode!r}")
+
+  if strategy == "none":
+    return None, None, {"strategy": "none", **info}
+  if strategy == "bins":
+    edges, weights = regression_weights_from_y(y_all, n_bins=n_bins, max_weight=max_weight)
+  else:
+    edges, weights = density_weights_from_y(y_all, alpha=alpha, max_weight=max_weight, n_grid=n_grid)
+  info = {
+    "strategy": strategy,
+    "max_weight": max_weight,
+    "weight_range": [float(weights.min()), float(weights.max())],
+    **({"alpha": alpha, "n_grid": n_grid} if strategy == "kde" else {"n_bins": n_bins}),
+    **info,
+  }
+  return edges, weights, info
+
+
+class H5DataIter(xgb.DataIter):
+  """Streams an HDF5 split (`x` float32 (m, dim), `y` float32 (m,)) into XGBoost sequentially.
+
+  The rows are already shuffled on disk (see ``split_reference_to_h5``), so a plain sequential scan
+  feeds XGBoost well-mixed data with fast contiguous reads — no reshuffle needed. Used to build a
+  ``QuantileDMatrix`` without loading the whole matrix into RAM.
+  """
 
   def __init__(
     self,
-    dataset: ds.Dataset,
-    x_col: str,
-    y_col: str,
-    w_col: str | None,
-    x_dim: int,
+    h5_path: str,
     batch_rows: int = 65536,
-    shuffle_row_groups: bool = True,
-    seed: int = 42,
     bin_edges: np.ndarray | None = None,
     bin_weights: np.ndarray | None = None,
   ) -> None:
     super().__init__()
-    self.dataset = dataset
-    self.x_col = x_col
-    self.y_col = y_col
-    self.w_col = w_col
-    self.x_dim = int(x_dim)
+    import h5py
+
+    self.h5_path = str(h5_path)
     self.batch_rows = int(batch_rows)
-    self.shuffle_row_groups = bool(shuffle_row_groups)
-    self.seed = int(seed)
     self.bin_edges = bin_edges
     self.bin_weights = bin_weights
+    self._f = h5py.File(self.h5_path, "r")
+    self._x = self._f["x"]
+    self._y = self._f["y"]
+    self._n = int(self._x.shape[0])
+    self._dim = int(self._x.shape[1])
+    self._pos = 0
 
-    self._iter = None
+  @property
+  def n_rows(self) -> int:
+    return self._n
+
+  @property
+  def n_cols(self) -> int:
+    return self._dim
 
   def reset(self) -> None:
-    cols = [self.x_col, self.y_col]
-    # Only scan the weight column if it is actually present: pack records
-    # w_col in meta.json even when no weights were written, and next() already
-    # tolerates a missing weight column — keep reset() consistent.
-    if self.w_col and self.w_col in self.dataset.schema.names:
-      cols.append(self.w_col)
-
-    if self.shuffle_row_groups:
-      # Shuffle at file (fragment) level — only metadata in memory
-      fragments = list(self.dataset.get_fragments())
-      if len(fragments) > 1:
-        rng = np.random.default_rng(self.seed)
-        rng.shuffle(fragments)
-
-      def _lazy():
-        for frag in fragments:
-          pf = pq.ParquetFile(frag.path)
-          for batch in pf.iter_batches(batch_size=self.batch_rows, columns=cols):
-            yield batch
-
-      self._iter = _lazy()
-    else:
-      scanner = self.dataset.scanner(columns=cols, batch_size=self.batch_rows)
-      self._iter = scanner.to_batches()
+    self._pos = 0
 
   def next(self, input_data) -> bool:  # type: ignore[override]
-    if self._iter is None:
+    if self._pos >= self._n:
       return False
-    try:
-      b = next(self._iter)
-    except StopIteration:
-      return False
-
-    t = pa.Table.from_batches([b])
-
-    X = _x_to_2d(t.column(self.x_col), self.x_dim)
-    y = np.asarray(
-      _as_array(t.column(self.y_col)).to_numpy(zero_copy_only=False),
-      dtype=np.float32,
-    ).reshape(-1)
-
-    if self.w_col and self.w_col in t.column_names:
-      w = np.asarray(
-        _as_array(t.column(self.w_col)).to_numpy(zero_copy_only=False),
-        dtype=np.float32,
-      ).reshape(-1)
-    else:
-      w = None
-
+    j = min(self._pos + self.batch_rows, self._n)
+    x = np.asarray(self._x[self._pos : j], dtype=np.float32)  # contiguous sequential read
+    y = np.asarray(self._y[self._pos : j], dtype=np.float32).reshape(-1)
+    kwargs = {"data": x, "label": y}
     if self.bin_edges is not None and self.bin_weights is not None:
-      bw = apply_bin_weights(y, self.bin_edges, self.bin_weights)
-      w = bw if w is None else w * bw
-
-    input_data(data=X, label=y, weight=w)
+      kwargs["weight"] = apply_bin_weights(y, self.bin_edges, self.bin_weights)
+    input_data(**kwargs)
+    self._pos = j
     return True
+
+  def close(self) -> None:
+    with suppress(Exception):
+      self._f.close()

@@ -22,7 +22,9 @@ _rich_handler = RichHandler(
   log_time_format="%H:%M:%S",
   show_path=False,
 )
-_console_id = _loguru.add(_rich_handler, format="{message}", colorize=True)
+# WARNING+ only on the console: user-facing status goes through olinda.console; loguru is for genuine
+# warnings/errors and (silent) DEBUG diagnostics. A file sink (add_file) can still capture everything.
+_console_id = _loguru.add(_rich_handler, format="{message}", colorize=True, level="WARNING")
 
 
 class Logger:

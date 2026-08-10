@@ -2,32 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-
 import rich_click as click
 import rich_click.rich_click as rc
 
-from olinda.helpers import logger
-from olinda.data import (
-  pack_distill_dataset,
-  pack_feature_table,
-  ParquetDistillDataset,
-  ParquetDataIter,
-  detect_regression_imbalance,
-  compute_regression_weights,
-)
-from olinda.train import XGBTrainer
-from olinda.models import StudentModel, export_xgb_onnx
-from olinda.featurizer import Fingerprint, OnnxEncoder, build_featurizer_from_hp
-from olinda.validate import validate_regression
-from olinda.robustness import robustness_eval_smiles
+# NOTE: heavy dependencies (numpy, pandas, xgboost, rdkit, matplotlib, ...) are imported
+# lazily inside the command bodies below, not at module scope. This keeps CLI startup fast
+# (e.g. `olinda --help`, `olinda setup`) — importing them all eagerly cost ~12 s per call.
 
 
-click.rich_click.USE_RICH_MARKUP = True
+click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
 
-rc.USE_RICH_MARKUP = True
+rc.TEXT_MARKUP = "rich"
 rc.SHOW_ARGUMENTS = True
 rc.COLOR_SYSTEM = "truecolor"
 rc.STYLE_OPTION = "bold magenta"
@@ -38,13 +24,47 @@ rc.STYLE_USAGE = "bold blue"
 rc.STYLE_OPTION_DEFAULT = "dim italic"
 
 
-def apply_opts(*opts):
-  def _wrap(f):
-    for opt in reversed(opts):
-      f = opt(f)
-    return f
+def _align_command_columns(name_width: int = 11) -> None:
+  """Pin the command-name column to a fixed width across every help panel.
 
-  return _wrap
+  rich-click sizes each group's name column to *that group's* longest command, so the help text in the
+  "Main commands" and "Fit pipeline commands" panels doesn't line up; its only knob is a *proportional*
+  ratio, which either leaves a big gap or truncates names. A fixed width (just past the longest command,
+  "learn-soft"/"learn-hard") keeps the help text tight to the names AND aligned across panels. rich-click exposes no
+  config for this, so we defensively wrap the internal command-table builder — on any API drift it silently
+  falls back to the default rendering rather than breaking the CLI.
+  """
+  try:
+    from rich_click.rich_panel import RichCommandPanel
+  except Exception:
+    return
+
+  _orig_get_table = RichCommandPanel.get_table
+
+  def _get_table(self, *args, **kwargs):
+    table = _orig_get_table(self, *args, **kwargs)
+    try:
+      # Fix the name column and make the help column absorb ALL slack, so the name column stays exactly
+      # `name_width` even on a wide terminal (otherwise `expand` inflates both columns, per panel).
+      name_col, help_col = table.columns[0], table.columns[1]
+      name_col.width, name_col.ratio, name_col.no_wrap = name_width, None, True
+      help_col.ratio, help_col.width = 1, None
+    except Exception:
+      pass
+    return table
+
+  RichCommandPanel.get_table = _get_table
+
+
+_align_command_columns()
+
+# Two-level help grouping (à la zairachem): top-level user commands, then the lower-level pipeline steps.
+rc.COMMAND_GROUPS = {
+  "olinda": [
+    {"name": "Main commands", "commands": ["setup", "fit", "predict"]},
+    {"name": "Fit pipeline commands", "commands": ["prepare", "tune", "learn-soft", "learn-hard", "export"]},
+  ]
+}
 
 
 @click.group()
@@ -52,697 +72,561 @@ def cli():
   pass
 
 
-opt_teacher_parquet = click.option(
-  "--teacher-parquet", "-i", required=True, help="Parquet with x(768), y(soft), optional w/split"
-)
-opt_out = click.option("--out", "-o", required=True, help="Output directory")
-opt_x_col = click.option("--x-col", default="x", show_default=True)
-opt_y_col = click.option("--y-col", default="y", show_default=True)
-opt_w_col = click.option("--w-col", default="w", show_default=True)
-opt_split_col = click.option("--split-col", default="split", show_default=True)
-opt_x_dim = click.option("--x-dim", default=768, type=int, show_default=True)
-opt_val_frac = click.option("--val-frac", default=0.1, type=float, show_default=True)
-opt_seed = click.option("--seed", default=42, type=int, show_default=True)
-opt_shard_rows = click.option("--shard-rows", default=200000, type=int, show_default=True)
-opt_compression = click.option("--compression", default="zstd", show_default=True)
-
-opt_hard = click.option(
-  "--hard-labels", required=False, default=None, help="CSV/Parquet with smiles,y (hard labels)"
-)
-opt_hard_smiles = click.option("--hard-smiles-col", default="smiles", show_default=True)
-opt_hard_y = click.option("--hard-y-col", default="y", show_default=True)
-opt_hard_weight = click.option("--hard-weight", default=1.0, type=float, show_default=True)
-
-opt_time_budget = click.option(
-  "--time-budget",
-  required=False,
-  default=600,
-  type=int,
-  show_default=True,
-  help="Optuna time budget (seconds)",
-)
-opt_trials = click.option("--trials", default=10, type=int, show_default=True)
-opt_no_onnx = click.option("--no-onnx", is_flag=True, default=False, help="Skip ONNX export")
-
-
-@cli.command("pack", help="PACK: convert teacher Parquet into sharded distill dataset.")
-@apply_opts(
-  opt_teacher_parquet,
-  opt_out,
-  opt_x_col,
-  opt_y_col,
-  opt_w_col,
-  opt_split_col,
-  opt_x_dim,
-  opt_val_frac,
-  opt_seed,
-  opt_shard_rows,
-  opt_compression,
-  opt_hard,
-  opt_hard_smiles,
-  opt_hard_y,
-  opt_hard_weight,
-)
-def pack_cmd(
-  teacher_parquet,
-  out,
-  x_col,
-  y_col,
-  w_col,
-  split_col,
-  x_dim,
-  val_frac,
-  seed,
-  shard_rows,
-  compression,
-  hard_labels,
-  hard_smiles_col,
-  hard_y_col,
-  hard_weight,
-):
-  out_dir = Path(out)
-  pack_distill_dataset(
-    teacher_parquet=teacher_parquet,
-    out_dir=out_dir,
-    x_col=x_col,
-    y_soft_col=y_col,
-    w_col=w_col,
-    split_col=split_col,
-    x_dim=x_dim,
-    val_frac=val_frac,
-    seed=seed,
-    shard_rows=shard_rows,
-    compression=compression,
-    hard_labels=hard_labels,
-    hard_smiles_col=hard_smiles_col,
-    hard_y_col=hard_y_col,
-    hard_weight=hard_weight,
-    featurizer=None if hard_labels is None else _load_default_featurizer(),
-  )
-
-
-def _fit_impl(
-  input_path,
-  out_dir,
-  y_col,
-  split_col,
-  w_col,
-  split_frac,
-  smiles_col,
-  robust_split,
-  similarity_threshold,
-  fp,
-  fp_size,
-  radius,
-  njobs,
-  fp_batch_rows,
-  robustness,
-  seed,
-  num_boost_round,
-  early_stopping,
-  val_frac,
-  enum_max,
-  ensemble_size,
-  time_budget,
-  trials,
-  no_onnx,
-  no_calibrate=False,
-  hard_labels=None,
-  hard_smiles_col="smiles",
-  hard_y_col="y",
-  hard_weight=1.0,
-  reweight="auto",
-  reweight_bins=20,
-  encoder_ckpt=None,
-):
-  input_path = Path(input_path)
-  out_dir = Path(out_dir)
-
-  featurizer = None
-  if encoder_ckpt:
-    featurizer = build_featurizer_from_hp(encoder_ckpt)
-    logger.info(f"Using ONNX compound encoder from {encoder_ckpt} (overrides --fp/--fp-size for SMILES)")
-
-  if input_path.is_dir() and (input_path / "meta.json").exists():
-    packed_dir = input_path
-  else:
-    packed_dir = out_dir / "packed"
-    pack_feature_table(
-      input_path=input_path,
-      out_dir=packed_dir,
-      y_col=y_col,
-      split_col=split_col,
-      w_col=w_col,
-      smiles_col=smiles_col,
-      fp_kind=fp,
-      fp_size=fp_size,
-      radius=radius,
-      njobs=njobs,
-      fp_batch_rows=fp_batch_rows,
-      val_frac=split_frac,
-      seed=seed,
-      hard_labels=hard_labels,
-      hard_smiles_col=hard_smiles_col,
-      hard_y_col=hard_y_col,
-      hard_weight=hard_weight,
-      featurizer=featurizer,
-    )
-
-  d = ParquetDistillDataset(packed_dir)
-  ntr, nva = d.count()
-  logger.info(f"Packed dataset rows: train={ntr} val={nva}")
-
-  # Make the saved student self-describing: if features came from SMILES, recover the
-  # featurizer from the packed meta so StudentModel.load(...).predict(smiles=...) works
-  # without re-supplying --fp. The encoder path already set `featurizer` above.
-  if featurizer is None:
-    featurizer = _featurizer_factory(d.meta.get("featurizer_class"), d.meta.get("featurizer") or {})
-    if featurizer is not None:
-      logger.info(f"Recovered {type(featurizer).__name__} featurizer from packed meta for SMILES inference")
-
-  bin_edges, bin_weights = None, None
-  do_reweight = reweight == "on"
-  if reweight == "auto":
-    is_imbalanced, cv, details = detect_regression_imbalance(d.train, d.y_col, n_bins=int(reweight_bins))
-    logger.info(
-      f"Imbalance detection: cv={details['cv']} empty_frac={details['empty_frac']} "
-      f"ratio={details['imbalance_ratio']} → {'REWEIGHT' if is_imbalanced else 'SKIP'}"
-    )
-    do_reweight = is_imbalanced
-
-  if do_reweight:
-    logger.info(f"Computing regression imbalance weights ({reweight_bins} equal-width bins)...")
-    bin_edges, bin_weights = compute_regression_weights(d.train, d.y_col, n_bins=int(reweight_bins))
-
-  train_iter = ParquetDataIter(
-    d.train,
-    d.x_col,
-    d.y_col,
-    d.w_col,
-    x_dim=d.x_dim,
-    batch_rows=65536,
-    shuffle_row_groups=True,
-    seed=seed,
-    bin_edges=bin_edges,
-    bin_weights=bin_weights,
-  )
-
-  val_iter = None
-  if nva > 0:
-    val_iter = ParquetDataIter(
-      d.val,
-      d.x_col,
-      d.y_col,
-      d.w_col,
-      x_dim=d.x_dim,
-      batch_rows=65536,
-      shuffle_row_groups=False,
-      seed=seed,
-    )
-
-  trainer = XGBTrainer(
-    num_boost_round=num_boost_round,
-    early_stopping_rounds=early_stopping,
-  )
-  booster, meta = trainer.fit_external(
-    train_iter=train_iter, val_iter=val_iter, time_budget=time_budget, n_trials=trials
-  )
-
-  student = StudentModel(booster=booster, featurizer=featurizer, metadata=meta)
-  student.save(out_dir)
-
-  if not no_onnx:
-    export_xgb_onnx(student.booster, out_dir / "student.onnx", input_dim=int(d.x_dim))
-
-  _plot_training_loss(meta, out_dir)
-
-  if nva > 0:
-    validate_regression(
-      packed_dir=packed_dir,
-      model_dir=out_dir,
-      out_dir=out_dir,
-      batch_rows=65536,
-      max_points=None,
-      n_boot=200,
-      calibrate=not no_calibrate,
-    )
-
-    if robustness and isinstance(featurizer, OnnxEncoder):
-      logger.warning("Robustness evaluation skipped: not supported with an ONNX compound encoder featurizer")
-    elif (
-      robustness and input_path.is_file() and input_path.suffix.lower() in (".csv", ".tsv", ".parquet", ".pq")
-    ):
-      try:
-        robustness_eval_smiles(
-          data_path=input_path,
-          out_dir=out_dir,
-          smiles_col=smiles_col,
-          y_col=y_col,
-          split=robust_split,
-          test_frac=0.2,
-          similarity_threshold=similarity_threshold,
-          fp=fp,
-          fp_size=fp_size,
-          radius=radius,
-          njobs=njobs,
-          seed=seed,
-          num_boost_round=num_boost_round,
-          early_stopping_rounds=early_stopping,
-          val_frac=val_frac,
-          enum_max=enum_max,
-          ensemble_size=ensemble_size,
-        )
-      except Exception as exc:
-        logger.warning(f"Robustness evaluation skipped: {exc}")
-
-
-@cli.command("fit", help="FIT: train XGBoost; run validation/robustness when val split exists.")
-@click.option("--input", "input_path", required=True, help="Packed dir or CSV/Parquet file")
-@click.option("--out", "out_dir", required=True, help="Output directory")
-@click.option("--y-col", default="y", show_default=True)
-@click.option("--split-col", default="split", show_default=True)
-@click.option("--w-col", default=None)
+@cli.command("setup")
 @click.option(
-  "--split", "split_frac", default=None, type=float, help="Validation fraction if no split column"
-)
-@click.option("--smiles-col", default="smiles", show_default=True)
-@click.option("--robust-split", type=click.Choice(["scaffold", "similarity"]), default="scaffold")
-@click.option("--similarity-threshold", default=0.4, type=float, show_default=True)
-@click.option("--fp", default="morgan", show_default=True)
-@click.option("--fp-size", default=2048, type=int, show_default=True)
-@click.option("--radius", default=2, type=int, show_default=True)
-@click.option("--njobs", default=8, type=int, show_default=True)
-@click.option("--fp-batch-rows", default=512, type=int, show_default=True)
-@click.option("--robustness", is_flag=True, default=False, help="Run robustness evaluation")
-@click.option("--seed", default=42, type=int, show_default=True)
-@click.option("--num-boost-round", default=1000, type=int, show_default=True)
-@click.option("--early-stopping", default=50, type=int, show_default=True)
-@click.option("--val-frac", default=0.1, type=float, show_default=True)
-@click.option("--enum-max", default=8, type=int, show_default=True)
-@click.option("--ensemble-size", default=5, type=int, show_default=True)
-@click.option("--no-calibrate", is_flag=True, default=False, help="Skip post-hoc isotonic calibration")
-@click.option(
-  "--encoder-ckpt",
+  "--target-dir",
   default=None,
-  help="Directory with hp.json + compound_encoder.onnx (e.g. CLAMP); featurizes SMILES into embeddings, overriding --fp",
+  help="Directory to download data into (default: ~/.olinda/).",
+)
+def setup_cmd(target_dir):
+  """Download olinda data from public S3 — the reference-library Morgan fingerprints (``erl0_morgan.h5``).
+
+  Anything already present is skipped, so re-running only fetches what is missing. The download is
+  best-effort (a warning, not an error, if it isn't on S3 yet); you can generate it locally with
+  ``scripts/compute_morgan_fingerprints.py``.
+  """
+  from olinda.console import rule
+  from olinda.data.fetch import download_morgan_fingerprints
+
+  rule("olinda · setup", style="cyan")
+  download_morgan_fingerprints(target_dir)
+
+
+@cli.command("fit")
+@click.option(
+  "--soft-labels",
+  "-s",
+  required=True,
+  help="Teacher (soft) values over the reference library (col 0 = SMILES, col 1 = value, library order).",
 )
 @click.option(
-  "--reweight",
-  type=click.Choice(["auto", "on", "off"]),
+  "--hard-labels",
+  "-h",
+  default=None,
+  help="Optional CSV/TSV/Parquet of your own compounds (SMILES + one label column) → adds a hard head.",
+)
+@click.option(
+  "--model-dir", "-m", required=True, help="Run directory — all prepared data and the model.onnx live here."
+)
+@click.option(
+  "--task",
+  type=click.Choice(["auto", "binary", "regression"]),
   default="auto",
   show_default=True,
-  help="Regression imbalance reweighting: auto-detect, force on, or disable",
+  help="Hard-label type (auto-detected by default); only used with --hard-labels.",
 )
 @click.option(
-  "--reweight-bins",
-  default=20,
+  "--max-samples", default=None, type=int, help="Use only the first N reference compounds (dev subsampling)."
+)
+@click.option("--val-frac", default=0.1, type=float, show_default=True)
+@click.option(
+  "--num-boost-round",
+  default=10000,
   type=int,
   show_default=True,
-  help="Number of equal-width bins for regression reweighting",
+  help="learn-soft upper cap; early stopping decides.",
 )
-@apply_opts(opt_time_budget, opt_trials, opt_no_onnx)
-@apply_opts(opt_hard, opt_hard_smiles, opt_hard_y, opt_hard_weight)
+@click.option(
+  "--tune/--no-tune",
+  "do_tune",
+  default=False,
+  show_default=True,
+  help="Run an Optuna tuning pass before learn-soft.",
+)
+@click.option("--trials", default=100, type=int, show_default=True, help="Optuna trials (only with --tune).")
 def fit_cmd(
-  input_path,
-  out_dir,
-  y_col,
-  split_col,
-  w_col,
-  split_frac,
-  smiles_col,
-  robust_split,
-  similarity_threshold,
-  fp,
-  fp_size,
-  radius,
-  njobs,
-  fp_batch_rows,
-  robustness,
-  seed,
-  num_boost_round,
-  early_stopping,
-  val_frac,
-  enum_max,
-  ensemble_size,
-  no_calibrate,
-  encoder_ckpt,
-  reweight,
-  reweight_bins,
-  time_budget,
-  trials,
-  no_onnx,
-  hard_labels,
-  hard_smiles_col,
-  hard_y_col,
-  hard_weight,
+  soft_labels, hard_labels, model_dir, task, max_samples, val_frac, num_boost_round, do_tune, trials
 ):
-  _fit_impl(
-    input_path=input_path,
-    out_dir=out_dir,
-    y_col=y_col,
-    split_col=split_col,
-    w_col=w_col,
-    split_frac=split_frac,
-    smiles_col=smiles_col,
-    robust_split=robust_split,
-    similarity_threshold=similarity_threshold,
-    fp=fp,
-    fp_size=fp_size,
-    radius=radius,
-    njobs=njobs,
-    fp_batch_rows=fp_batch_rows,
-    robustness=robustness,
-    seed=seed,
+  """Distill a teacher into a student end-to-end: prepare → (tune) → learn-soft → (learn-hard) → one model.onnx.
+
+  Runs the fit-pipeline sub-commands in order, sharing one `--model-dir`. With `--hard-labels`, a hard head is
+  learned and fused in; with `--tune`, an Optuna pass precedes `learn-soft`. The result is a single
+  self-describing `model.onnx` that `olinda predict` runs.
+  """
+  from olinda.console import rule, summary_panel
+
+  md = Path(model_dir)
+  rule("olinda · fit", style="cyan", right=str(md))
+
+  prepare_cmd.callback(
+    soft_labels=soft_labels,
+    hard_labels=hard_labels,
+    model_dir=model_dir,
+    task=task,
+    max_samples=max_samples,
+    val_frac=val_frac,
+  )
+  if do_tune:
+    tune_cmd.callback(model_dir=model_dir, trials=trials, max_rows=100_000)
+  learn_soft_cmd.callback(model_dir=model_dir, num_boost_round=num_boost_round)
+  if hard_labels is not None:
+    learn_hard_cmd.callback(model_dir=model_dir)
+
+  pipeline = (
+    "prepare → " + ("tune → " if do_tune else "") + "learn-soft" + (" → learn-hard" if hard_labels else "")
+  )
+  summary_panel(
+    "olinda · fit",
+    [
+      ("Pipeline", pipeline),
+      ("Head", "soft + hard" if hard_labels else "soft only"),
+      ("Model", f"[dim]{md / 'model.onnx'}[/]"),
+    ],
+    border_style="green",
+    icon="✓",
+  )
+
+
+@cli.command("prepare")
+@click.option(
+  "--soft-labels",
+  "-s",
+  required=True,
+  help="Teacher (soft) values over the reference library (col 0 = SMILES, col 1 = value, same order as the library).",
+)
+@click.option(
+  "--hard-labels",
+  "-h",
+  default=None,
+  help="Optional CSV/TSV/Parquet of your own compounds (SMILES + one label column) for `learn-hard`.",
+)
+@click.option(
+  "--model-dir", "-m", required=True, help="Run directory — all prepared data + models live here."
+)
+@click.option(
+  "--task",
+  type=click.Choice(["auto", "binary", "regression"]),
+  default="auto",
+  show_default=True,
+  help="Hard-label type (auto-detected by default); only used with --hard-labels.",
+)
+@click.option(
+  "--max-samples",
+  default=None,
+  type=int,
+  help="Use only the first N reference compounds (development subsampling).",
+)
+@click.option("--val-frac", default=0.1, type=float, show_default=True)
+def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac):
+  """Prepare the reference (soft) split and, optionally, the hard-label set into one run directory.
+
+  Writes the value-stratified, shuffled train/val split (train.h5 / val.h5) from --soft-labels, and —
+  if --hard-labels is given — featurizes those compounds into hard.h5 for a later `learn-hard`.
+  """
+  import h5py
+  import numpy as np
+
+  from olinda.console import echo, rule, step, summary_panel
+  from olinda.data import (
+    OLINDA_HOME,
+    MORGAN_FINGERPRINTS_FILENAME,
+    load_reference_calcs,
+    split_reference_to_h5,
+  )
+
+  rule("olinda · prepare", style="cyan", right=str(model_dir))
+  n_steps = 3 if hard_labels is not None else 2
+
+  descriptors = OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME
+  if not descriptors.exists():
+    echo(f"reference library missing · [dim]{descriptors}[/]", "error")
+    raise click.ClickException(
+      f"Morgan descriptors missing at {descriptors} — run `olinda setup` "
+      "(or scripts/compute_morgan_fingerprints.py to generate them locally)."
+    )
+
+  # Stamp the split with its feature identity so `learn-soft` attaches the matching featurizer.
+  feature_attrs = {"features": "morgan"}
+  with h5py.File(descriptors, "r") as f:
+    for k in ("radius", "nbits"):
+      if k in f.attrs:
+        feature_attrs[k] = int(f.attrs[k])
+
+  step(1, n_steps, "splitting the reference library (train / val)")
+  y = load_reference_calcs(soft_labels, descriptors)
+  split_reference_to_h5(
+    descriptors, y, out_dir=model_dir, val_frac=val_frac, limit=max_samples, feature_attrs=feature_attrs
+  )
+
+  # Persist the reference-aligned soft-label vector (row-for-row with erl0_morgan.h5) so `learn-hard` can
+  # calibrate the hard model against the soft labels across the full reference library.
+  step(2, n_steps, "saving reference-aligned soft labels")
+  md = Path(model_dir)
+  md.mkdir(parents=True, exist_ok=True)
+  with h5py.File(md / "soft.h5", "w") as f:
+    f.create_dataset("y", data=np.asarray(y, dtype=np.float32))
+  echo(f"soft.h5 · [bold]{len(y):,}[/] rows", "run")
+
+  hard_info = None
+  if hard_labels is not None:
+    from olinda.ground_truth import prepare_hard_labels
+
+    step(3, n_steps, "featurizing hard labels")
+    hard_info = prepare_hard_labels(hard_labels, model_dir, task=task)
+    echo(f"hard.h5 · [bold]{hard_info['n']:,}[/] rows · task=[bold]{hard_info['task']}[/]", "run")
+
+  rows = [
+    ("Soft split", f"train.h5 / val.h5 · val_frac {val_frac}"),
+    ("Soft labels", f"[bold]{len(y):,}[/] reference rows → soft.h5"),
+  ]
+  if hard_info is not None:
+    rows.append(("Hard labels", f"[bold]{hard_info['n']:,}[/] rows · task [bold]{hard_info['task']}[/]"))
+  rows.append(("Saved", f"[dim]{md}[/]"))
+  summary_panel("olinda · prepare", rows, border_style="green", icon="✓")
+
+
+@cli.command("learn-soft")
+@click.option(
+  "--model-dir", "-m", required=True, help="Run directory with train.h5 / val.h5 (from `prepare`)."
+)
+@click.option(
+  "--num-boost-round", default=10000, type=int, show_default=True, help="Upper cap; early stopping decides."
+)
+def learn_soft_cmd(model_dir, num_boost_round):
+  """Learn the surrogate: fast gradient-boosting regression on the prepared split (train.h5 / val.h5).
+
+  The engine is auto-selected by device — XGBoost on a CUDA GPU, LightGBM on CPU (``OLINDA_BACKEND``
+  overrides). The loss is squared error (well-conditioned, ONNX-safe); skew/imbalance is handled by
+  reweighting, not the loss. If a prior ``olinda tune -m <model-dir>`` wrote ``best_params.json`` there,
+  those hyperparameters are used; otherwise built-in defaults.
+
+  Sample reweighting is **automatic**: olinda weights the target only when it is imbalanced (auto-picking
+  KDE / bins), leaving balanced targets unweighted. When active it applies to train AND val together so
+  early stopping matches the objective. Global and tail metrics (top-decile RMSE, Spearman) are always
+  reported, and a single self-describing `model.onnx` bundle is fused at the end (soft-only here;
+  `learn-hard` re-fuses it with the hard head).
+  """
+  import json
+
+  import h5py
+  import numpy as np
+
+  from olinda.console import echo, rule, engine_banner, strategy_banner, summary_panel
+  from olinda.data import resolve_regression_weights
+  from olinda.models import StudentModel
+  from olinda.train.backend import CANONICAL_DEFAULTS, get_backend, select_backend
+  from olinda.train.plots import save_true_vs_pred
+
+  model_dir = Path(model_dir)
+  # Early-stopping patience scales with the round budget (1%, floored at 50) — not a user knob.
+  early_stopping = max(50, num_boost_round // 100)
+  train_h5 = model_dir / "train.h5"
+  val_h5 = model_dir / "val.h5"
+  for p in (train_h5, val_h5):
+    if not p.exists():
+      echo(f"missing {p.name} · [dim]{p}[/]", "error")
+      raise click.ClickException(f"missing {p.name} in {model_dir} — run `olinda prepare` first")
+
+  with h5py.File(train_h5, "r") as f:
+    x_dim = int(f["x"].shape[1])
+    features = str(f.attrs.get("features", "morgan"))
+    feat_radius = int(f.attrs["radius"]) if "radius" in f.attrs else 3
+    ytr = np.asarray(f["y"][:], dtype=np.float64)
+  rule("olinda · train", style="green", right=f"{features} · {x_dim}-dim features")
+
+  # Engine auto-selected by device (GPU→XGBoost, CPU→LightGBM); OLINDA_BACKEND overrides.
+  backend_name, device, backend_reason = select_backend()
+  be = get_backend(backend_name, device)
+  engine_banner(backend_name, device, backend_reason)
+
+  # Single objective: squared error (well-conditioned, ONNX-safe). Backend maps to its native loss.
+  obj_native = be.objective_params()
+
+  # Automatic target reweighting: 'auto' weights only when imbalanced (olinda picks none/KDE/bins from the
+  # target's shape); 'on'/'off' force/disable. When active, weights apply to train AND val together.
+  bin_edges, bin_weights, reweight_info = resolve_regression_weights(ytr, mode="auto")
+  weighted = bin_weights is not None
+  reweight_info["used_in"] = {"training": weighted, "evaluation": weighted, "early_stopping": weighted}
+  strategy_banner(
+    reweight_info["strategy"],
+    reweight_info["reason"],
+    weight_range=reweight_info.get("weight_range") if weighted else None,
+  )
+
+  # Use tuned (canonical) hyperparameters if a prior `olinda tune -m <model-dir>` left best_params.json here.
+  tuned_params: dict = {}
+  tuned_path = model_dir / "best_params.json"
+  if tuned_path.exists():
+    with open(tuned_path) as fp:
+      tuned_params = json.load(fp)
+    tag = tuned_params.pop("backend", None)  # a tag, not a hyperparameter
+    if tag and tag != backend_name:
+      echo(
+        f"best_params.json was tuned on {tag}; its canonical params still apply to {backend_name}", "warning"
+      )
+    unknown = [k for k in tuned_params if k not in CANONICAL_DEFAULTS]
+    if unknown:
+      echo(
+        f"ignoring unrecognized best_params.json keys {unknown} (stale format?) — re-run `olinda tune`",
+        "warning",
+      )
+      for k in unknown:
+        tuned_params.pop(k)
+    shown = " · ".join(
+      f"{k}={v}"
+      for k, v in tuned_params.items()
+      if k in ("learning_rate", "max_depth", "min_split_gain", "min_child_weight")
+    )
+    echo(f"Tuned hyperparameters from {tuned_path.name} — {shown}", "run")
+  else:
+    echo("No best_params.json in model-dir — using built-in defaults (run `olinda tune -m` to tune)", "info")
+
+  canonical = {**CANONICAL_DEFAULTS, **tuned_params}
+  native_params = {**be.translate(canonical), **obj_native}
+  # Load val once — used for live R²/ρ during training AND the final metrics/plot below.
+  with h5py.File(val_h5, "r") as f:
+    xval = np.asarray(f["x"][:], dtype=np.float32)
+    yval = np.asarray(f["y"][:], dtype=np.float32)
+  dtrain, dval = be.build_train_val(train_h5, val_h5, canonical["max_bin"], bin_edges, bin_weights)
+  res = be.train(
+    dtrain,
+    dval,
+    native_params,
     num_boost_round=num_boost_round,
     early_stopping=early_stopping,
-    val_frac=val_frac,
-    enum_max=enum_max,
-    ensemble_size=ensemble_size,
-    time_budget=time_budget,
-    trials=trials,
-    no_onnx=no_onnx,
-    no_calibrate=no_calibrate,
-    hard_labels=hard_labels,
-    hard_smiles_col=hard_smiles_col,
-    hard_y_col=hard_y_col,
-    hard_weight=hard_weight,
-    reweight=reweight,
-    reweight_bins=reweight_bins,
-    encoder_ckpt=encoder_ckpt,
+    train_weighted=weighted,
+    val_eval=(xval, yval),
   )
 
+  # Attach the Morgan featurizer so the saved model can predict directly from SMILES.
+  from olinda.featurizer import MorganCountFeaturizer
 
-@cli.command("predict", help="PREDICT: run a trained student on an input matrix.")
-@click.option("--model-dir", required=True, help="Directory with xgb.json (train_meta.json optional)")
-@click.option("--input", "input_path", required=True, help="CSV/Parquet/NPY with features")
-@click.option("--out", "out_path", default=None, help="Output CSV for predictions")
-@click.option("--smiles-col", default="smiles", show_default=True, help="SMILES column name")
+  featurizer = MorganCountFeaturizer(radius=feat_radius, fp_size=x_dim)
+
+  student = StudentModel(
+    model=res.model,
+    backend=backend_name,
+    featurizer=featurizer,
+    metadata={
+      "task": "regression",
+      "x_dim": x_dim,
+      "features": features,
+      "backend": backend_name,
+      "objective": "squarederror",
+      "reweight": reweight_info,
+      "hyperparams": {"source": "tuned" if tuned_params else "defaults", "tuned": tuned_params or None},
+    },
+  )
+  student.save(model_dir)
+
+  # Validation metrics (val already loaded above for live progress).
+  from olinda.metrics import regression_metrics
+
+  pval = be.predict(res.model, xval)
+  metrics = regression_metrics(yval, pval)
+  with open(model_dir / "val_metrics.json", "w") as fp:
+    json.dump(metrics, fp, indent=2)
+
+  # True-vs-pred scatter saved alongside the model (skipped with a warning if stylia is absent).
+  plot_path = save_true_vs_pred(
+    yval, pval, model_dir / "val_true_pred.png", title=f"Validation  (R²={metrics['r2']:.3f})"
+  )
+
+  rows = [
+    (
+      "Trees",
+      f"[bold]{res.n_trees}[/]  [dim]· {backend_name} · {obj_native['objective']} · reweight: "
+      f"{reweight_info['strategy']}{' (train+val)' if weighted else ''}[/]",
+    ),
+    ("Val rows", f"{metrics['n']:,}  [dim]· metrics below are unweighted / global[/]"),
+    ("RMSE", f"[bold]{metrics['rmse']:.5f}[/]  [dim]· MAE {metrics['mae']:.5f}[/]"),
+    (
+      "R²",
+      f"[bold]{metrics['r2']:.4f}[/]  ·  Pearson [bold]{metrics['pearson']:.4f}[/]  ·  Spearman [bold]{metrics['spearman']:.4f}[/]",
+    ),
+    ("Top-decile RMSE", f"[bold]{metrics['top_decile_rmse']:.5f}[/]  [dim](sparse high-value tail)[/]"),
+  ]
+  if plot_path is not None:
+    rows.append(("Plot", f"[dim]{plot_path}[/]"))
+  rows.append(("Model", f"[dim]{model_dir}[/]"))
+  summary_panel("olinda · train", rows, border_style="green", icon="✓")
+
+  # Fuse the served bundle: a single self-describing model.onnx (soft-only here; learn-hard re-fuses).
+  from olinda.export import build_bundle
+
+  build_bundle(model_dir)
+
+
+@cli.command("tune")
 @click.option(
-  "--columns",
-  default=None,
-  help="Comma-separated column list for CSV/Parquet (default: all numeric columns)",
+  "--model-dir",
+  "-m",
+  required=True,
+  help="Run directory with train.h5 / val.h5; best_params.json is written here.",
 )
-@click.option("--fp", default="morgan", show_default=True, help="Fingerprint type")
-@click.option("--fp-size", default=2048, type=int, show_default=True)
-@click.option("--radius", default=2, type=int, show_default=True)
-@click.option("--njobs", default=8, type=int, show_default=True)
-@click.option("--smarts", is_flag=True, default=False, help="Treat input as SMARTS")
-@click.option("--no-sanitize", is_flag=True, default=False, help="Disable RDKit sanitization")
+@click.option("--trials", default=100, type=int, show_default=True, help="How many Optuna trials to run.")
 @click.option(
-  "--no-calibrate", is_flag=True, default=False, help="Skip isotonic calibration at prediction time"
-)
-def predict_cmd(
-  model_dir,
-  input_path,
-  out_path,
-  smiles_col,
-  columns,
-  fp,
-  fp_size,
-  radius,
-  njobs,
-  smarts,
-  no_sanitize,
-  no_calibrate,
-):
-  model_dir = Path(model_dir)
-  input_path = Path(input_path)
-  if not input_path.exists():
-    logger.error(f"Input not found: {input_path}")
-    raise click.ClickException("input file does not exist")
-
-  student = StudentModel.load(model_dir, featurizer_factory=_featurizer_factory)
-  logger.info(f"Loaded student model from {model_dir}")
-
-  expected_dim = None
-  try:
-    expected_dim = int(student.booster.num_features())
-  except Exception:
-    expected_dim = None
-
-  # Only the plain Fingerprint exposes an output width as fp_size. An OnnxEncoder's output
-  # dim differs from its base fp_size, so skip the static check for encoders.
-  if expected_dim is not None and expected_dim > 0 and student.featurizer is not None:
-    fz_dim = getattr(student.featurizer, "fp_size", None)
-    if fz_dim is not None and int(fz_dim) != expected_dim:
-      logger.error(f"Featurizer dimension mismatch: model expects {expected_dim}, featurizer has {fz_dim}")
-      raise click.ClickException("featurizer dimension mismatch")
-
-  data = _load_predict_input(input_path, columns, smiles_col)
-  if data["mode"] == "smiles":
-    smiles = data["smiles"]
-    if student.featurizer is None:
-      if expected_dim is not None and expected_dim > 0 and int(fp_size) != expected_dim:
-        logger.warning(f"Overriding fp_size {fp_size} -> {expected_dim} to match model feature size")
-        fp_size = expected_dim
-      student.featurizer = Fingerprint(
-        which=fp,
-        fp_size=int(fp_size),
-        radius=int(radius),
-        is_smarts=bool(smarts),
-        sanitize=not bool(no_sanitize),
-        njobs=int(njobs),
-      )
-      logger.info(
-        "Using Fingerprint featurizer: "
-        f"which={fp} fp_size={fp_size} radius={radius} sanitize={not no_sanitize} njobs={njobs}"
-      )
-    logger.info(f"Predicting smiles rows={len(smiles)}")
-    y = student.predict(smiles=smiles, calibrate=not no_calibrate)
-  else:
-    X = data["X"]
-    if expected_dim is not None and expected_dim > 0 and int(X.shape[1]) != expected_dim:
-      logger.error(f"Feature dimension mismatch: model expects {expected_dim}, got {X.shape[1]}")
-      raise click.ClickException("feature dimension mismatch")
-    logger.info(f"Predicting rows={X.shape[0]} cols={X.shape[1]}")
-    y = student.predict(X=X, calibrate=not no_calibrate)
-
-  if out_path is None:
-    out_path = input_path.with_suffix(".pred.csv")
-  out_path = Path(out_path)
-
-  df = pd.DataFrame({"prediction": y})
-  df.to_csv(out_path, index=False)
-  logger.success(f"Predictions written to {out_path}")
-
-
-@cli.command("distill", help="Distill a teacher QSAR model into an XGBoost student (optionally export ONNX).")
-@apply_opts(
-  opt_teacher_parquet,
-  opt_out,
-  opt_time_budget,
-  opt_trials,
-  opt_no_onnx,
-  opt_x_col,
-  opt_y_col,
-  opt_w_col,
-  opt_split_col,
-  opt_x_dim,
-  opt_val_frac,
-  opt_seed,
-  opt_shard_rows,
-  opt_compression,
-  opt_hard,
-  opt_hard_smiles,
-  opt_hard_y,
-  opt_hard_weight,
-)
-@click.option(
-  "--reweight",
-  type=click.Choice(["auto", "on", "off"]),
-  default="auto",
-  show_default=True,
-  help="Regression imbalance reweighting: auto-detect, force on, or disable",
-)
-@click.option(
-  "--reweight-bins",
-  default=20,
+  "--max-rows",
+  default=100000,
   type=int,
   show_default=True,
-  help="Number of equal-width bins for regression reweighting",
+  help="Cap on the rows used for tuning (train+val together, subsampled in the split's proportion). "
+  "Higher = more faithful to the full data, slower.",
 )
-def distill_cmd(
-  teacher_parquet,
-  out,
-  time_budget,
-  trials,
-  no_onnx,
-  x_col,
-  y_col,
-  w_col,
-  split_col,
-  x_dim,
-  val_frac,
-  seed,
-  shard_rows,
-  compression,
-  hard_labels,
-  hard_smiles_col,
-  hard_y_col,
-  hard_weight,
-  reweight,
-  reweight_bins,
-):
-  out_dir = Path(out)
-  pack_distill_dataset(
-    teacher_parquet=teacher_parquet,
-    out_dir=out_dir,
-    x_col=x_col,
-    y_soft_col=y_col,
-    w_col=w_col,
-    split_col=split_col,
-    x_dim=x_dim,
-    val_frac=val_frac,
-    seed=seed,
-    shard_rows=shard_rows,
-    compression=compression,
-    hard_labels=hard_labels,
-    hard_smiles_col=hard_smiles_col,
-    hard_y_col=hard_y_col,
-    hard_weight=hard_weight,
-    featurizer=None if hard_labels is None else _load_default_featurizer(),
-  )
-  _fit_impl(
-    input_path=str(out_dir),
-    out_dir=str(out_dir),
-    y_col=y_col,
-    split_col=split_col,
-    w_col=w_col,
-    split_frac=None,
-    smiles_col=hard_smiles_col,
-    robust_split="scaffold",
-    similarity_threshold=0.4,
-    fp="morgan",
-    fp_size=2048,
-    radius=2,
-    njobs=8,
-    fp_batch_rows=512,
-    robustness=False,
-    seed=seed,
-    num_boost_round=1000,
-    early_stopping=50,
-    val_frac=0.1,
-    enum_max=8,
-    ensemble_size=5,
-    time_budget=time_budget,
+def tune_cmd(model_dir, trials, max_rows):
+  """Short, pruned Optuna study to discover good hyperparameters (esp. learning rate) for `learn-soft`.
+
+  Reads the prepared split from ``--model-dir`` / ``-m`` and writes ``best_params.json`` back into it, on
+  the **same auto-selected engine** `learn-soft` uses, then a subsequent `learn-soft -m <dir>` auto-reads
+  it. It tunes on a random subsample of ``--max-rows`` rows (train+val kept in the prepared proportion) —
+  the console prints exactly how many are used. This is a fast way to find a good hyperparameter *region*:
+  the learning rate transfers reasonably (full training re-fits the round count with its own early
+  stopping), so `tune` is optional — the built-in defaults are already good. Everything else (per-trial
+  rounds, early-stopping, study patience, reweighting = auto like `learn-soft`, seed, a safety time cap)
+  uses good internal defaults — see ``olinda.train.tune.run_tuning`` / ``scripts/tune_xgb.py`` to override.
+  Requires the ``[train]`` extra (Optuna).
+  """
+  from olinda.train.tune import run_tuning
+
+  run_tuning(
+    model_dir,
     trials=trials,
-    no_onnx=no_onnx,
-    reweight=reweight,
-    reweight_bins=reweight_bins,
+    max_rows=max_rows,
+    out=Path(model_dir) / "best_params.json",
   )
 
 
-def _load_default_featurizer():
-  from olinda.featurizer import Fingerprint
+@cli.command("learn-hard")
+@click.option(
+  "--model-dir",
+  "-m",
+  required=True,
+  help="Run directory holding hard.h5 (from `prepare --hard-labels`); artifacts go under <dir>/_ground_truth/.",
+)
+def learn_hard_cmd(model_dir):
+  """Learn from hard (binary) labels and calibrate them onto the soft-label scale — four clear steps.
 
-  logger.info(
-    "Loading default featurizer for hard labels (Fingerprint morgan fp_size=768 is NOT valid; configure yours)"
-  )
-  return Fingerprint(which="morgan", fp_size=768, radius=2, njobs=1)
+  Reads `hard.h5` (from `prepare --hard-labels`) and: (1) trains the hard-label classifier `G`; (2) scores
+  `G` across the full reference library (`erl0_morgan.h5`, required); (3) calibrates `G`'s output onto the
+  teacher's soft-label scale using the reference-aligned soft labels (`prepare` saved `soft.h5`), with a
+  monotonic map whose direction is learned from the data; (4) learns an applicability gate — two Bernoulli
+  Naive-Bayes classifiers bucketing queries as NOT SIMILAR / LOW / HIGH by proximity to the labeled set.
+  Artifacts land under `<model-dir>/_ground_truth/`; `predict` then emits a blended `prediction` plus the
+  surrogate / ground_truth_soft / ground_truth / applicability channels (the gate needs no similarity search
+  and the blend favours the surrogate away from the labeled set).
+  """
+  from olinda.ground_truth import HARD_H5_NAME, train_ground_truth
+
+  md = Path(model_dir)
+  if not (md / HARD_H5_NAME).exists():
+    raise click.ClickException(
+      f"no {HARD_H5_NAME} in {model_dir!r} — run `olinda prepare --hard-labels <file> -m {model_dir}` first"
+    )
+  train_ground_truth(md)
+
+  # Re-fuse the served bundle to include the hard head (blended model.onnx).
+  from olinda.export import build_bundle
+
+  build_bundle(md)
 
 
-def _plot_training_loss(meta: dict, out_dir: Path) -> None:
-  evals = meta.get("evals_result")
-  if not evals:
-    return
-  train = evals.get("train") or {}
-  val = evals.get("val") or {}
-  if not train and not val:
-    return
-  metric = None
-  if val:
-    metric = next(iter(val.keys()), None)
-  if metric is None and train:
-    metric = next(iter(train.keys()), None)
-  if metric is None:
-    return
-  train_vals = train.get(metric, []) if train else []
-  val_vals = val.get(metric, []) if val else []
-  if not train_vals and not val_vals:
-    return
+@cli.command("export")
+@click.option(
+  "--model-dir",
+  "-m",
+  required=True,
+  help="A trained model dir (from `learn-soft`/`learn-hard`); (re)builds <dir>/model.onnx.",
+)
+def export_cmd(model_dir):
+  """(Re)build the single self-describing `model.onnx` for a trained model dir.
+
+  Fuses every pipeline stage into ONE ONNX graph — soft-only (`fp → prediction`) or, when a hard head is
+  present, the full blend (`fp → prediction` + `surrogate`/`ground_truth`/`ground_truth_soft`/`applicability`).
+  The Morgan featurizer config + provenance (RDKit version, reference library, hard-head summary) are embedded
+  in the file's metadata, so it is self-describing. Gated on a numeric parity check. Featurization (RDKit)
+  stays in Python — the graph consumes a 2048-count Morgan fingerprint.
+  """
+  from olinda.export import build_bundle
+
+  md = Path(model_dir)
+  if not (md / "train_meta.json").exists() and not (md / "xgb.json").exists():
+    raise click.ClickException(
+      f"{model_dir!r} is not a trained model dir — run `olinda learn-soft -m {model_dir}` first"
+    )
+  build_bundle(md)
+
+
+@cli.command("predict", help="Run a model on SMILES via its model.onnx — emits prediction + channels.")
+@click.option(
+  "--model-dir", "-m", required=True, help="Model dir containing model.onnx (from learn-soft / learn-hard)."
+)
+@click.option("--input", "-i", "input_path", required=True, help="CSV/TSV/Parquet with a `smiles` column.")
+@click.option("--output", "-o", "out_path", required=True, help="Output CSV for the predictions.")
+def predict_cmd(model_dir, input_path, out_path):
+  """Run the fused `model.onnx`: verify RDKit, featurize the `smiles` column (RDKit Morgan), run the graph.
+
+  Emits a `prediction` column plus the model's channels — `surrogate`, and for hard-label models also
+  `ground_truth_soft` / `ground_truth` / `applicability`. The featurizer + RDKit version are read from the
+  model's embedded metadata (the file is self-describing).
+  """
+  from olinda.console import echo, rule
+  from olinda.onnx_pipeline import OnnxPipeline
+
+  model_dir = Path(model_dir)
+  input_path = Path(input_path)
+  rule("olinda · predict", style="cyan", right=str(model_dir))
+  if not input_path.exists():
+    echo(f"input not found · [dim]{input_path}[/]", "error")
+    raise click.ClickException("input file does not exist")
+  if not OnnxPipeline.is_bundle(model_dir):
+    echo("no model.onnx in the model dir", "error")
+    raise click.ClickException(
+      f"{model_dir} has no model.onnx — run `olinda learn-soft` / `learn-hard` (or `olinda export`) first"
+    )
+  _predict_onnx(model_dir, input_path, out_path)
+
+
+def _predict_onnx(model_dir, input_path, out_path):
+  """Predict via the fused ``model.onnx`` (featurizer embedded in metadata); write the channel columns.
+
+  Loads the graph first — which verifies the installed RDKit matches the build recorded in the metadata
+  (fingerprints are only reproducible on the exact build) — then featurizes the SMILES and runs the graph.
+  """
+  import pandas as pd
+  import rdkit
+
+  from olinda.console import echo, success
+  from olinda.onnx_pipeline import OnnxPipeline, RDKitVersionMismatch
 
   try:
-    import matplotlib.pyplot as plt
-  except Exception as exc:
-    logger.warning(f"Skipping training loss plot: {exc}")
-    return
+    pipe = OnnxPipeline.load(model_dir)  # verifies RDKit version against the model's metadata
+  except RDKitVersionMismatch as exc:
+    echo(str(exc), "error")
+    raise click.ClickException(str(exc))
+  want = (pipe.meta.get("featurizer") or {}).get("rdkit_version", "?")
+  echo(f"rdkit [bold]{rdkit.__version__}[/] · matches model ({want})", "info")
 
-  try:
-    fig, ax = plt.subplots(figsize=(7, 4), dpi=120)
-    if train_vals:
-      ax.plot(range(1, len(train_vals) + 1), train_vals, label="train")
-    if val_vals:
-      ax.plot(range(1, len(val_vals) + 1), val_vals, label="val")
-    ax.set_xlabel("Iteration")
-    ax.set_ylabel(metric)
-    ax.set_title("Training loss")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    out_path = out_dir / "train_loss.png"
-    fig.tight_layout()
-    fig.savefig(out_path)
-    plt.close(fig)
-    logger.info(f"Training loss plot saved to {out_path}")
-  except Exception as exc:
-    logger.warning(f"Failed to write training loss plot: {exc}")
+  smiles = _read_smiles(input_path)
+  head = "blend" if pipe.meta.get("has_hard") else "soft"
+  echo(f"model.onnx · [bold]{head}[/] · {len(smiles):,} SMILES", "run")
+  ch = pipe.predict_channels(smiles)
+
+  order = [
+    k for k in ("prediction", "surrogate", "ground_truth_soft", "ground_truth", "applicability") if k in ch
+  ]
+  out_path = Path(out_path)
+  pd.DataFrame({"smiles": smiles, **{k: ch[k] for k in order}}).to_csv(out_path, index=False)
+  success(f"predictions ({' · '.join(order)}) → [dim]{out_path}[/]")
 
 
-def _load_predict_input(input_path: Path, columns: str | None, smiles_col: str) -> dict:
+def _read_smiles(input_path: Path, smiles_col: str = "smiles") -> list[str]:
+  """Read the ``smiles`` column from a CSV/TSV/Parquet input for prediction."""
+  import pandas as pd
+
+  from olinda.console import echo
+
   suffix = input_path.suffix.lower()
-  if suffix == ".npy":
-    X = np.load(str(input_path))
-    if X.ndim != 2:
-      logger.error("NPY input must be a 2D array")
-      raise click.ClickException("npy input must be a 2D array")
-    return {"mode": "matrix", "X": X.astype(np.float32), "columns": []}
-
   if suffix in (".parquet", ".pq"):
     df = pd.read_parquet(str(input_path))
   elif suffix in (".csv", ".tsv"):
-    sep = "\t" if suffix == ".tsv" else ","
-    df = pd.read_csv(str(input_path), sep=sep)
+    df = pd.read_csv(str(input_path), sep="\t" if suffix == ".tsv" else ",")
   else:
-    logger.error(f"Unsupported input format: {suffix}")
+    echo(f"unsupported input format · {suffix} (use .csv / .tsv / .parquet)", "error")
     raise click.ClickException("unsupported input format")
-
-  if columns:
-    cols = [c.strip() for c in columns.split(",") if c.strip()]
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-      logger.error(f"Missing columns: {missing}")
-      raise click.ClickException("missing columns in input")
-    feat_df = df[cols]
-    X = feat_df.to_numpy().astype(np.float32)
-    logger.debug(f"Using feature columns: {cols}")
-    return {"mode": "matrix", "X": X, "columns": cols}
-
-  if smiles_col in df.columns:
-    smiles = df[smiles_col].astype(str).tolist()
-    return {"mode": "smiles", "smiles": smiles, "columns": [smiles_col]}
-
-  feat_df = df.select_dtypes(include=[np.number])
-  cols = list(feat_df.columns)
-  if not cols:
-    logger.error("No numeric columns found; use --columns or provide a smiles column")
-    raise click.ClickException("no numeric columns found")
-  X = feat_df.to_numpy().astype(np.float32)
-  logger.debug(f"Using feature columns: {cols}")
-  return {"mode": "matrix", "X": X, "columns": cols}
-
-
-def _featurizer_factory(class_name: str | None, cfg: dict):
-  if not class_name:
-    return None
-  if class_name == "Fingerprint":
-    return Fingerprint.from_dict(cfg)
-  if class_name == "OnnxEncoder":
-
-    def _base_factory(d):
-      return Fingerprint.from_dict(d)
-
-    return OnnxEncoder.from_dict(cfg, _base_factory)
-  logger.warning(f"Unknown featurizer class: {class_name}")
-  return None
+  if smiles_col not in df.columns:
+    echo(f"no '{smiles_col}' column in [dim]{input_path.name}[/]", "error")
+    raise click.ClickException(f"input needs a '{smiles_col}' column with SMILES")
+  return df[smiles_col].astype(str).tolist()
 
 
 if __name__ == "__main__":

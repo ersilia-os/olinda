@@ -1,4 +1,5 @@
 """Tests for the isotonic calibrator (olinda.calibrate)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -8,9 +9,7 @@ from olinda.calibrate import IsotonicCalibrator
 
 
 def _fit(raw, target):
-  return IsotonicCalibrator().fit(
-    np.asarray(raw, dtype=np.float32), np.asarray(target, dtype=np.float32)
-  )
+  return IsotonicCalibrator().fit(np.asarray(raw, dtype=np.float32), np.asarray(target, dtype=np.float32))
 
 
 # ── Mathematical invariants ──────────────────────────────────────────────────
@@ -130,3 +129,33 @@ def test_matches_sklearn_when_available(seed):
 
   grid = np.r_[raw, np.linspace(raw.min() - 1, raw.max() + 1, 100)].astype(np.float32)
   assert np.max(np.abs(cal.transform(grid) - ref.predict(grid))) < 1e-4
+
+
+# ── Auto-direction (used by learn-hard's G→soft calibration) ──────────────────
+
+
+def test_auto_direction_handles_inverse_relationship():
+  """increasing="auto" detects a decreasing raw→target relationship and fits it."""
+  rng = np.random.default_rng(0)
+  raw = rng.random(2000)
+  target = (1.0 - raw) * 3 + rng.standard_normal(2000) * 0.05  # low raw → high target
+  cal = IsotonicCalibrator().fit(raw, target, increasing="auto")
+  assert cal._sign == -1
+  # the fitted map, applied to raw, tracks the (inverse) target
+  assert np.corrcoef(cal.transform(raw), target)[0, 1] > 0.95
+  # and it is non-increasing in raw
+  grid = np.linspace(0, 1, 400)
+  assert np.all(np.diff(cal.transform(grid)) <= 1e-6)
+
+
+def test_auto_direction_roundtrips_through_save_load(tmp_path):
+  """The learned direction survives save/load."""
+  rng = np.random.default_rng(1)
+  raw = rng.random(500)
+  target = 1.0 - raw
+  cal = IsotonicCalibrator().fit(raw, target, increasing="auto")
+  p = tmp_path / "cal.json"
+  cal.save(p)
+  reloaded = IsotonicCalibrator.load(p)
+  assert reloaded._sign == cal._sign == -1
+  assert np.allclose(reloaded.transform(raw), cal.transform(raw))

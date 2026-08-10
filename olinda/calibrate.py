@@ -76,21 +76,38 @@ class IsotonicCalibrator:
   """
 
   def __init__(self) -> None:
-    self._x: np.ndarray | None = None  # sorted anchor x values
+    self._x: np.ndarray | None = None  # sorted anchor x values (in oriented space, i.e. sign*raw)
     self._y: np.ndarray | None = None  # corresponding isotonic y values
+    self._sign: int = 1  # +1 increasing, -1 decreasing (fit on -raw)
 
   @property
   def is_fitted(self) -> bool:
     return self._x is not None
 
-  def fit(self, raw: np.ndarray, target: np.ndarray) -> "IsotonicCalibrator":
-    """Fit isotonic regression: raw predictions → teacher soft labels."""
+  def fit(self, raw: np.ndarray, target: np.ndarray, increasing: bool | str = True) -> "IsotonicCalibrator":
+    """Fit an isotonic map raw → target.
+
+    Parameters
+    ----------
+    increasing : bool or "auto"
+        ``True`` (default) fits a non-decreasing map (back-compat). ``False`` fits non-increasing. ``"auto"``
+        picks the direction from the sign of the rank (Spearman) correlation between ``raw`` and ``target`` —
+        so a low raw value mapping to a high target (inverse relationship) is handled correctly.
+    """
     raw = np.asarray(raw, dtype=np.float64).ravel()
     target = np.asarray(target, dtype=np.float64).ravel()
     if len(raw) != len(target):
       raise ValueError("raw and target must have the same length")
     if len(raw) == 0:
       raise ValueError("cannot fit calibrator on empty input")
+
+    # Orientation: a decreasing map is a non-decreasing PAVA fit on -raw. "auto" detects it from the sign of
+    # the Spearman correlation (rank-based, robust to the eventual monotone nonlinearity).
+    if increasing == "auto":
+      self._sign = -1 if _spearman_sign(raw, target) < 0 else 1
+    else:
+      self._sign = 1 if increasing else -1
+    raw = self._sign * raw
 
     # Collapse points that share a raw value: the calibration map is a function
     # of the raw prediction, so tied x must map to a single value. Pool them by
@@ -108,7 +125,7 @@ class IsotonicCalibrator:
     self._x = ux
     self._y = uy
 
-    logger.info(
+    logger.debug(
       f"Isotonic calibrator fitted: {len(ux)} anchors, output range [{uy.min():.6f}, {uy.max():.6f}]"
     )
     return self
@@ -118,7 +135,7 @@ class IsotonicCalibrator:
     if not self.is_fitted:
       raise RuntimeError("calibrator not fitted")
     raw = np.asarray(raw, dtype=np.float64).ravel()
-    return np.interp(raw, self._x, self._y).astype(np.float32)
+    return np.interp(self._sign * raw, self._x, self._y).astype(np.float32)
 
   def save(self, path: str | Path) -> None:
     """Save calibrator anchors to JSON."""
@@ -127,12 +144,13 @@ class IsotonicCalibrator:
     path = Path(path)
     data = {
       "type": "isotonic",
+      "sign": int(self._sign),
       "x": self._x.tolist(),
       "y": self._y.tolist(),
     }
     with open(path, "w") as fp:
       json.dump(data, fp)
-    logger.info(f"Calibrator saved to {path}")
+    logger.debug(f"Calibrator saved to {path}")
 
   @classmethod
   def load(cls, path: str | Path) -> "IsotonicCalibrator":
@@ -143,4 +161,17 @@ class IsotonicCalibrator:
     cal = cls()
     cal._x = np.asarray(data["x"], dtype=np.float64)
     cal._y = np.asarray(data["y"], dtype=np.float64)
+    cal._sign = int(data.get("sign", 1))  # older files were increasing-only
     return cal
+
+
+def _spearman_sign(a: np.ndarray, b: np.ndarray) -> float:
+  """Sign of the rank (Spearman) correlation between ``a`` and ``b`` (0 if degenerate)."""
+  ra = np.argsort(np.argsort(a)).astype(np.float64)
+  rb = np.argsort(np.argsort(b)).astype(np.float64)
+  ra -= ra.mean()
+  rb -= rb.mean()
+  denom = float(np.sqrt((ra**2).sum()) * np.sqrt((rb**2).sum()))
+  if denom == 0.0:
+    return 0.0
+  return float((ra * rb).sum() / denom)

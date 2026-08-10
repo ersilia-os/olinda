@@ -1,11 +1,10 @@
-import json, os, numpy as np, onnxruntime as ort
+import numpy as np
 from dataclasses import dataclass
 from multiprocessing import Pool
-from pathlib import Path
 
 from rdkit import Chem
 from rdkit import RDLogger
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdFingerprintGenerator
 from rdkit.Chem.rdmolops import FastFindRings
 
 RDLogger.DisableLog("rdApp.warning")
@@ -14,6 +13,36 @@ RDLogger.DisableLog("rdApp.warning")
 # work, so we go serial. This matters most when transform() is called repeatedly on tiny
 # inputs inside a hot loop (e.g. robustness perturbation), where a per-call pool is pathological.
 _MIN_PARALLEL = 512
+
+
+def featurizer_from_meta(class_name: str | None, cfg: dict):
+  """Rebuild a featurizer from the class name and config recorded in a model's metadata.
+
+  Used when loading a saved model or an ONNX bundle, where the featurizer must be reconstructed
+  exactly as it was at training time.
+
+  Parameters
+  ----------
+  class_name : str or None
+      Recorded featurizer class; ``None`` means the model carries no featurizer.
+  cfg : dict
+      The featurizer's ``to_dict()`` payload.
+
+  Returns
+  -------
+  Fingerprint or MorganCountFeaturizer or None
+      ``None`` when ``class_name`` is falsy or unrecognised.
+  """
+  from olinda.helpers import logger
+
+  if not class_name:
+    return None
+  if class_name == "Fingerprint":
+    return Fingerprint.from_dict(cfg)
+  if class_name == "MorganCountFeaturizer":
+    return MorganCountFeaturizer.from_dict(cfg)
+  logger.warning(f"unknown featurizer class: {class_name} (CLAMP models are no longer supported)")
+  return None
 
 
 def _ebv_to_numpy(ebv):
@@ -177,59 +206,44 @@ class Fingerprint:
     )
 
 
-class OnnxEncoder:
-  def __init__(self, onnx_path: str | os.PathLike, base, providers=None, name: str = "onnx_encoder") -> None:
-    self.onnx_path = str(onnx_path)
-    self.base = base
-    self.providers = providers or ["CPUExecutionProvider"]
-    self.name = name
+@dataclass(frozen=True)
+class MorganCountFeaturizer:
+  """Folded Morgan **count** fingerprint via RDKit's ``MorganGenerator`` (counts clipped).
 
-    self._sess = ort.InferenceSession(self.onnx_path, providers=self.providers)
-    self._in = self._sess.get_inputs()[0].name
-    self._out = self._sess.get_outputs()[0].name
+  Reproduces the Ersilia model ``eos5axz`` and ``scripts/compute_morgan_fingerprints.py`` exactly
+  (defaults: ``radius=3``, ``fp_size=2048``, counts clipped at 255), so a model trained on
+  ``erl0_morgan.h5`` can predict from raw SMILES consistently.
+  """
+
+  radius: int = 3
+  fp_size: int = 2048
+  count_clip: int = 255
+  name: str = "morgan_count"
 
   def transform(self, smiles: list[str]) -> np.ndarray:
-    x = self.base.transform(smiles).astype(np.float32)
-    y = self._sess.run([self._out], {self._in: x})[0]
-    return np.asarray(y)
+    gen = rdFingerprintGenerator.GetMorganGenerator(radius=self.radius, fpSize=self.fp_size)
+    out = np.zeros((len(smiles), self.fp_size), dtype=np.float32)
+    for row, smi in enumerate(smiles):
+      mol = Chem.MolFromSmiles(str(smi))
+      if mol is None:
+        continue
+      for i, c in gen.GetCountFingerprint(mol).GetNonzeroElements().items():
+        out[row, i] = float(self.count_clip) if c > self.count_clip else float(c)
+    return out
 
   def to_dict(self) -> dict:
-    base = self.base.to_dict() if hasattr(self.base, "to_dict") else {"name": type(self.base).__name__}
     return {
-      "onnx_path": self.onnx_path,
-      "providers": list(self.providers),
+      "radius": int(self.radius),
+      "fp_size": int(self.fp_size),
+      "count_clip": int(self.count_clip),
       "name": self.name,
-      "base": base,
     }
 
   @classmethod
-  def from_dict(cls, d: dict, base_factory):
-    base = base_factory(d.get("base", {}))
+  def from_dict(cls, d: dict):
     return cls(
-      onnx_path=d["onnx_path"],
-      base=base,
-      providers=d.get("providers") or ["CPUExecutionProvider"],
-      name=d.get("name", "onnx_encoder"),
+      radius=int(d.get("radius", 3)),
+      fp_size=int(d.get("fp_size", 2048)),
+      count_clip=int(d.get("count_clip", 255)),
+      name=d.get("name", "morgan_count"),
     )
-
-
-def build_featurizer_from_hp(ckpt_dir: str | Path):
-  ckpt_dir = Path(ckpt_dir)
-  hp_path = ckpt_dir / "hp.json"
-  onnx_path = ckpt_dir / "compound_encoder.onnx"
-
-  with open(hp_path, "r") as f:
-    hp = json.load(f)
-
-  compound_mode = hp.get("compound_mode", "morgan")
-
-  sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-  shape = sess.get_inputs()[0].shape
-  fp_size = (
-    shape[1] if isinstance(shape, (list, tuple)) and len(shape) == 2 and isinstance(shape[1], int) else 8192
-  )
-
-  base = Fingerprint(which=compound_mode, fp_size=int(fp_size), radius=2, njobs=8, name=f"fp:{compound_mode}")
-  return OnnxEncoder(
-    onnx_path=str(onnx_path), base=base, providers=["CPUExecutionProvider"], name="compound_encoder"
-  )

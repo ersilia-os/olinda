@@ -15,7 +15,7 @@ from rdkit.Chem.Scaffolds import MurckoScaffold
 from olinda.train.xgb import detect_training_device
 from olinda.helpers import logger
 from olinda.featurizer import Fingerprint
-from olinda.validate import _mae, _rmse, _spearmanr
+from olinda.metrics import _mae, _rmse, _spearmanr
 
 
 @dataclass(frozen=True)
