@@ -66,6 +66,32 @@ def rule(title: str, *, style: str | None = None, right: str | None = None) -> N
   console.rule(label, align="left", style=style)
 
 
+def path(value, keep: int = 3) -> str:
+  """Render a filesystem path compactly: ``…/run/columns/c0`` rather than a wrapped absolute path.
+
+  Absolute paths in temp or scratch directories are long enough to wrap mid-word inside a panel,
+  which reads as broken output. Only the trailing components carry information for the reader, so
+  the head is elided when the whole path would not fit comfortably.
+  """
+  from pathlib import Path as _Path
+
+  p = _Path(str(value))
+  parts = p.parts
+  if len(str(p)) <= 44 or len(parts) <= keep:
+    return str(p)
+  return "…/" + "/".join(parts[-keep:])
+
+
+def elapsed(seconds: float) -> str:
+  """Human-readable duration: ``42s``, ``3m 07s``, ``1h 12m``."""
+  seconds = max(0, int(seconds))
+  if seconds < 60:
+    return f"{seconds}s"
+  if seconds < 3600:
+    return f"{seconds // 60}m {seconds % 60:02d}s"
+  return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+
+
 def detail(rows, *, indent: int = 3) -> None:
   """Borderless right-dim-label / left-value key-value block."""
   table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2))

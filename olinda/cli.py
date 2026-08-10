@@ -143,7 +143,7 @@ def fit_cmd(
   learned and fused in; with `--tune`, an Optuna pass precedes `learn-soft`. The result is a single
   self-describing `model.onnx` that `olinda predict` runs.
   """
-  from olinda.console import rule, summary_panel
+  from olinda.console import path as cpath, rule, summary_panel
 
   md = Path(model_dir)
   rule("olinda · fit", style="cyan", right=str(md))
@@ -170,7 +170,7 @@ def fit_cmd(
     [
       ("Pipeline", pipeline),
       ("Head", "soft + hard" if hard_labels else "soft only"),
-      ("Model", f"[dim]{md / 'model.onnx'}[/]"),
+      ("Model", f"[dim]{cpath(md / 'model.onnx')}[/]"),
     ],
     border_style="green",
     icon="✓",
@@ -218,7 +218,7 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
   import h5py
 
   from olinda import run as runlib
-  from olinda.console import echo, rule, step, summary_panel
+  from olinda.console import echo, path as cpath, rule, step, summary_panel
   from olinda.data import (
     OLINDA_HOME,
     MORGAN_FINGERPRINTS_FILENAME,
@@ -328,8 +328,8 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
     [
       ("Columns", f"[bold]{len(manifest['columns'])}[/] · {n_hard} with hard labels"),
       ("Split", f"value-stratified per column · val_frac {val_frac}"),
-      ("Targets", f"[dim]{md / runlib.TARGETS_NAME}[/]"),
-      ("Saved", f"[dim]{md}[/]"),
+      ("Targets", f"[dim]{cpath(md / runlib.TARGETS_NAME)}[/]"),
+      ("Saved", f"[dim]{cpath(md)}[/]"),
     ],
     border_style="green",
     icon="✓",
@@ -358,7 +358,7 @@ def learn_soft_cmd(model_dir, num_boost_round):
   `learn-hard` re-fuses it with the hard head).
   """
   from olinda import run as runlib
-  from olinda.console import echo, rule, engine_banner, summary_panel
+  from olinda.console import echo, path as cpath, rule, engine_banner, summary_panel
   from olinda.data import OLINDA_HOME, MORGAN_FINGERPRINTS_FILENAME
   from olinda.data.matrix import ReferenceMatrix
   from olinda.train.backend import get_backend, select_backend
@@ -410,7 +410,7 @@ def learn_soft_cmd(model_dir, num_boost_round):
         )
         for r in results
       ],
-      ("Model", f"[dim]{model_dir / 'model.onnx'}[/]"),
+      ("Model", f"[dim]{cpath(model_dir / 'model.onnx')}[/]"),
     ],
     border_style="green",
     icon="✓",
@@ -612,7 +612,7 @@ def learn_hard_cmd(model_dir):
   and the blend favours the surrogate away from the labeled set).
   """
   from olinda import run as runlib
-  from olinda.console import rule, summary_panel
+  from olinda.console import path as cpath, rule, summary_panel
   from olinda.ground_truth import HARD_H5_NAME, train_ground_truth
 
   md = Path(model_dir)
@@ -643,7 +643,7 @@ def learn_hard_cmd(model_dir):
     [
       ("Columns", f"[bold]{len(with_hard)}[/] of {len(manifest['columns'])} have a hard head"),
       *[(c["name"], f"[dim]{(c.get('hard') or {}).get('n', '?')} labelled compounds[/]") for c in with_hard],
-      ("Model", f"[dim]{md / 'model.onnx'}[/]"),
+      ("Model", f"[dim]{cpath(md / 'model.onnx')}[/]"),
     ],
     border_style="green",
     icon="✓",

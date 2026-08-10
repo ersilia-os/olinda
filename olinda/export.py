@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from olinda.console import echo, rule, success, summary_panel
+from olinda.console import echo, path as cpath, rule, success, summary_panel
 from olinda.metrics import json_safe
 from olinda.ground_truth import (
   APPLICABILITY_NAME,
@@ -653,7 +653,7 @@ def build_bundle(model_dir: str | Path) -> dict:
       ("Outputs", " · ".join(outputs)),
       ("Parity (max)", f"[bold]{worst:.2e}[/] ≤ {_PARITY_TOL:.0e}"),
       ("Size", f"[bold]{size_mb:.1f} MB[/]"),
-      ("Saved", f"[dim]{model_dir / MODEL_NAME}[/]"),
+      ("Saved", f"[dim]{cpath(model_dir / MODEL_NAME)}[/]"),
     ],
     border_style="green",
     icon="✓",
