@@ -6,8 +6,13 @@ This package refuses to import under any other RDKit version.
 """
 
 import logging
+from typing import TYPE_CHECKING
 
 import rdkit
+
+if TYPE_CHECKING:  # import-time cost avoided at runtime; see __getattr__ below
+  from olinda.artifact import OnnxArtifact as OnnxArtifact
+  from olinda.artifact import RDKitVersionMismatch as RDKitVersionMismatch
 
 # Silence matplotlib's "Matplotlib is building the font cache; this may take a moment." notice (emitted
 # by the font_manager logger on first import / stale cache). Set here — before matplotlib is ever lazily
@@ -22,3 +27,15 @@ if rdkit.__version__ != REQUIRED_RDKIT_VERSION:
     "Fingerprint reproducibility for the ONNX compound encoders depends on this exact version. "
     "Install it with: pip install rdkit==2025.9.4"
   )
+
+
+def __getattr__(name):
+  """Expose the inference API lazily, so `import olinda` stays cheap for CLI startup."""
+  if name in ("OnnxArtifact", "RDKitVersionMismatch"):
+    from olinda import artifact
+
+    return getattr(artifact, name)
+  raise AttributeError(f"module 'olinda' has no attribute {name!r}")
+
+
+__all__ = ["OnnxArtifact", "RDKitVersionMismatch", "REQUIRED_RDKIT_VERSION"]

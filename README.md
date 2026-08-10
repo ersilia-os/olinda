@@ -41,19 +41,59 @@ carries its featurizer, so it predicts directly from SMILES.
 
 ## Installation
 
+**To run a distilled model**, the base install is all you need &mdash; four dependencies, no gradient-boosting stack:
+
 ```bash
-pip install -e .
+pip install olinda          # numpy · pandas · rdkit · onnxruntime
 ```
 
-Optional extras:
+**To distil a model**, add the training extra:
 
-| Extra | Purpose | Install |
-|-------|---------|---------|
-| `train` | Hyperparameter tuning (Optuna) | `pip install -e ".[train]"` |
-| `viz` | Validation plots (Matplotlib, stylia, scipy) | `pip install -e ".[viz]"` |
-| `dev` | Linting and testing (Ruff, pytest) | `pip install -e ".[dev]"` |
+```bash
+pip install "olinda[train]"     # + XGBoost, LightGBM, lazy-qsar, HDF5, Optuna, the CLI
+```
 
-GPU boosting activates automatically when a CUDA-enabled XGBoost build and a compatible GPU are detected; otherwise training runs on LightGBM (CPU).
+| Extra | Purpose |
+|-------|---------|
+| `train` | Everything needed to distil a model, and the `olinda` CLI |
+| `viz` | Validation plots (Matplotlib, stylia, scipy) |
+| `dev` | Linting and testing (Ruff, pytest) |
+
+The `olinda` command belongs to `[train]`; on a base install it exits with a message pointing at the extra rather than a traceback. GPU boosting activates automatically when a CUDA-enabled XGBoost build and a compatible GPU are detected; otherwise training runs on LightGBM (CPU).
+
+---
+
+## Running a distilled model
+
+A trained olinda model is **one self-describing `model.onnx`**. The featurizer configuration, the RDKit build it was fused against, the task names and the provenance all travel inside the file, so the `.onnx` is the only input you need &mdash; no run directory, no config, no reference library:
+
+```python
+from olinda import OnnxArtifact
+
+model = OnnxArtifact("model.onnx")
+df = model.run(["CCO", "c1ccccc1", "CC(=O)Oc1ccccc1C(=O)O"])
+```
+
+`run()` returns a DataFrame with a `smiles` column plus the model's values. A multi-task model gives one column per task, named after the task; a single-task model gives its `prediction` alongside the channels behind it.
+
+The artifact describes itself:
+
+```python
+model.columns  # task names, in output order
+model.trained_at  # '2026-08-11T09:14:00+00:00'
+model.olinda_version  # the version that produced it
+model.rdkit_version  # the RDKit build the featurizer requires
+model.has_ground_truth  # True if predictions blend in measured data
+model.describe()  # all of the above, as a dict
+```
+
+The installed RDKit is checked against the recorded build on load and **refused on mismatch** &mdash; Morgan fingerprints only reproduce bit-for-bit on the exact version, so a silent mismatch would corrupt every prediction.
+
+Predictions already fold in the applicability weighting; `prediction` is the final number. To inspect the pieces behind it &mdash; the raw surrogate, the calibrated ground truth, and the applicability weight &mdash; use `model.run_channels(smiles)`.
+
+Large inputs are batched internally; pass `batch_size=` to change the default.
+
+The file also sets the standard ONNX provenance fields (`producer_name`, `producer_version`, `doc_string`), so tools like Netron identify it as an olinda artifact without knowing anything about olinda.
 
 ---
 

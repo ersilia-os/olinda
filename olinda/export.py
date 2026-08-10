@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,8 @@ from olinda.ground_truth import (
 )
 
 MODEL_NAME = "model.onnx"
+BUNDLE_SCHEMA = "olinda.bundle.v1"
+PRODUCER_NAME = "olinda"
 _IR_VERSION = 10  # onnxruntime in this env caps the model IR version at 10
 _OPSET = 16
 _ISOTONIC_TOL = 1e-5  # knot-thinning target — kept below _PARITY_TOL so ONNX float error has headroom
@@ -44,10 +47,48 @@ _PARITY_TOL = 1e-4  # build_bundle raises if the fused graph drifts from the Pyt
 _SAMPLE_SMILES = ["CCO", "c1ccccc1", "CC(=O)O", "CCN", "OCc1ccccc1"]
 
 
+_PROTOBUF_LIMIT = 2 * 1024**3  # a single serialized ModelProto cannot exceed this
+
+
+def _strip_dead_attributes(model) -> int:
+  """Drop tree attributes that carry no information; returns the bytes saved.
+
+  ``nodes_hitrates`` is emitted as one float per node and, for boosters converted from LightGBM or
+  XGBoost, is uniformly ``1.0`` — on a real model that is 1.5M copies of the same constant, about an
+  eighth of the file, which onnxruntime ignores. It is optional in the ai.onnx.ml schema, so removing
+  it leaves predictions bit-identical.
+
+  ``nodes_missing_value_tracks_true`` looks similar but genuinely carries both values, so it stays.
+  """
+  import numpy as np
+
+  saved = 0
+  for node in model.graph.node:
+    if not node.op_type.startswith("TreeEnsemble"):
+      continue
+    keep = []
+    for attr in node.attribute:
+      if attr.name == "nodes_hitrates" and len(attr.floats) and np.all(np.asarray(attr.floats) == 1.0):
+        saved += attr.ByteSize()
+        continue
+      keep.append(attr)
+    if len(keep) != len(node.attribute):
+      del node.attribute[:]
+      node.attribute.extend(keep)
+  return saved
+
+
 def _save(model, path: Path) -> None:
   import onnx
 
   model.ir_version = _IR_VERSION
+  _strip_dead_attributes(model)
+  size = model.ByteSize()
+  if size >= _PROTOBUF_LIMIT:
+    raise ValueError(
+      f"fused model is {size / 1e9:.2f} GB, over ONNX's {_PROTOBUF_LIMIT / 1e9:.2f} GB protobuf limit. "
+      "Reduce the number of columns or --num-boost-round."
+    )
   onnx.checker.check_model(model)
   onnx.save(model, str(path))
 
@@ -311,13 +352,23 @@ def _bundle_metadata(
   except Exception:
     olinda_version = "unknown"
   md = {
+    "schema": BUNDLE_SCHEMA,
+    "producer": "olinda",
     "olinda_version": olinda_version,
+    "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     "featurizer": {**featurizer, "rdkit_version": rdkit.__version__},
     "featurizer_class": featurizer_class,
     "reference_library": {"name": MORGAN_FINGERPRINTS_FILENAME, "url": MORGAN_FINGERPRINTS_URL},
     "has_hard": bool(has_hard),
     "outputs": list(outputs),
   }
+  meta_path = model_dir / "train_meta.json"
+  if meta_path.exists():
+    with open(meta_path) as fp:
+      tm = json.load(fp)
+    md["backend"] = tm.get("backend")
+    md["task"] = tm.get("task")
+    md["hyperparams"] = tm.get("hyperparams")
   if has_hard:
     with open(model_dir / GT_DIRNAME / GT_META_NAME) as fp:
       gtm = json.load(fp)
@@ -452,6 +503,17 @@ def _fuse(model_dir: Path):
   )
   model = helper.make_model(graph, opset_imports=[helper.make_opsetid(d, v) for d, v in opset.items()])
   md = _bundle_metadata(model_dir, featurizer, featurizer_class, has_hard, outputs)
+
+  # Standard ONNX provenance, so the file identifies itself to any tool (Netron, hub tooling, the
+  # onnx CLI) without them having to know about the custom metadata key below.
+  model.producer_name = PRODUCER_NAME
+  model.producer_version = str(md.get("olinda_version", ""))
+  model.domain = "io.ersilia.olinda"
+  model.doc_string = (
+    f"Distilled model produced by olinda {md.get('olinda_version')} on {md.get('trained_at')}. "
+    f"Input: {int(n_features)}-d Morgan count fingerprint "
+    f"(RDKit {md['featurizer'].get('rdkit_version')}). Outputs: {', '.join(outputs)}."
+  )
   entry = model.metadata_props.add()
   entry.key, entry.value = "olinda", json.dumps(md)
   return model, has_hard, outputs

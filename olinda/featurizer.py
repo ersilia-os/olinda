@@ -33,7 +33,7 @@ def featurizer_from_meta(class_name: str | None, cfg: dict):
   Fingerprint or MorganCountFeaturizer or None
       ``None`` when ``class_name`` is falsy or unrecognised.
   """
-  from olinda.helpers import logger
+  import warnings
 
   if not class_name:
     return None
@@ -41,7 +41,13 @@ def featurizer_from_meta(class_name: str | None, cfg: dict):
     return Fingerprint.from_dict(cfg)
   if class_name == "MorganCountFeaturizer":
     return MorganCountFeaturizer.from_dict(cfg)
-  logger.warning(f"unknown featurizer class: {class_name} (CLAMP models are no longer supported)")
+  # stdlib warnings, not the loguru logger: this is on the inference path, which must stay
+  # importable with only numpy / pandas / rdkit / onnxruntime installed.
+  warnings.warn(
+    f"unknown featurizer class: {class_name} (CLAMP models are no longer supported)",
+    RuntimeWarning,
+    stacklevel=2,
+  )
   return None
 
 
