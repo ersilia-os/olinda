@@ -4,9 +4,9 @@ An olinda artifact is a single self-describing file. Everything needed to run it
 featurizer configuration, the RDKit build it was fused against, the task names and their outputs —
 travels inside the file's ``metadata_props``, so the ``.onnx`` is the only input required:
 
-    from olinda import OnnxArtifact
+    from olinda import OlindaArtifact
 
-    model = OnnxArtifact("model.onnx")
+    model = OlindaArtifact("model.onnx")
     model.columns          # ['abaumannii_inhibition_probability', ...]
     model.trained_at       # '2026-08-11T09:14:00+00:00'
     df = model.run(["CCO", "c1ccccc1"])   # DataFrame: smiles + one column per task
@@ -15,6 +15,7 @@ travels inside the file's ``metadata_props``, so the ``.onnx`` is the only input
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +26,47 @@ from olinda.onnx_pipeline import _check_rdkit_version
 _BATCH = 4096
 
 
-class OnnxArtifact:
+class _Progress:
+  """A minimal stderr progress bar.
+
+  Hand-rolled rather than reaching for rich or tqdm: the inference install is deliberately limited to
+  numpy, pandas, rdkit and onnxruntime, and a progress bar is not worth widening that. Silent unless
+  stderr is a terminal, so redirected output and notebooks stay clean.
+  """
+
+  WIDTH = 28
+
+  def __init__(self, total: int, label: str = "olinda", enabled: bool | None = None) -> None:
+    self.total = max(1, int(total))
+    self.label = label
+    if enabled is None:
+      enabled = sys.stderr.isatty() and total > _BATCH
+    self.enabled = bool(enabled)
+    self._done = 0
+
+  def advance(self, n: int) -> None:
+    if not self.enabled:
+      return
+    self._done = min(self.total, self._done + n)
+    frac = self._done / self.total
+    filled = int(round(frac * self.WIDTH))
+    bar = "█" * filled + "░" * (self.WIDTH - filled)
+    sys.stderr.write(f"\r  {self.label} ▕{bar}▏ {frac:>4.0%} · {self._done:,}/{self.total:,}")
+    sys.stderr.flush()
+
+  def close(self) -> None:
+    if self.enabled:
+      sys.stderr.write("\r" + " " * (self.WIDTH + 40) + "\r")
+      sys.stderr.flush()
+
+  def __enter__(self) -> _Progress:
+    return self
+
+  def __exit__(self, *exc) -> None:
+    self.close()
+
+
+class OlindaArtifact:
   """A distilled olinda model, loaded from its ``model.onnx``.
 
   Parameters
@@ -124,6 +165,14 @@ class OnnxArtifact:
   def n_features(self) -> int:
     return int((self.metadata.get("featurizer") or {}).get("fp_size", 2048))
 
+  def to_json(self, indent: int = 2) -> str:
+    """Everything the file records about itself, as a JSON string.
+
+    This is the raw metadata block, not the curated view :meth:`describe` returns — useful for
+    inspecting or logging exactly what was embedded at fuse time.
+    """
+    return json.dumps(self.metadata, indent=indent, sort_keys=False, default=str)
+
   def describe(self) -> dict:
     """A compact summary of the artifact, suitable for logging or display."""
     return {
@@ -143,23 +192,28 @@ class OnnxArtifact:
     """Morgan count fingerprints for *smiles*, exactly as the model was trained on."""
     return self._featurizer.transform([str(s) for s in smiles]).astype(np.float32)
 
-  def run_channels(self, smiles, batch_size: int = _BATCH) -> dict:
+  def run_channels(self, smiles, batch_size: int = _BATCH, progress: bool | None = None) -> dict:
     """Every named output of the graph, as a dict of 1-D arrays keyed by output name.
 
     Useful for inspecting the pieces behind a blended prediction (the surrogate, the calibrated
     ground truth, and the applicability weight). Most callers want :meth:`run`.
+
+    ``progress`` shows a bar on stderr; the default shows one only for inputs larger than a single
+    batch, and only when stderr is a terminal.
     """
     smiles = [str(s) for s in smiles]
     chunks: list[dict] = []
-    for start in range(0, len(smiles), batch_size):
-      fp = self.featurize(smiles[start : start + batch_size])
-      outs = self._session.run(None, {self._input_name: fp})
-      chunks.append({n: np.asarray(v).ravel() for n, v in zip(self._output_names, outs)})
+    with _Progress(len(smiles), enabled=progress) as bar:
+      for start in range(0, len(smiles), batch_size):
+        batch = smiles[start : start + batch_size]
+        outs = self._session.run(None, {self._input_name: self.featurize(batch)})
+        chunks.append({n: np.asarray(v).ravel() for n, v in zip(self._output_names, outs)})
+        bar.advance(len(batch))
     if not chunks:
       return {n: np.array([], dtype=np.float64) for n in self._output_names}
     return {n: np.concatenate([c[n] for c in chunks]) for n in self._output_names}
 
-  def run(self, smiles, batch_size: int = _BATCH):
+  def run(self, smiles, batch_size: int = _BATCH, progress: bool | None = None):
     """Predict for a list of SMILES.
 
     Parameters
@@ -168,6 +222,8 @@ class OnnxArtifact:
         The molecules to score.
     batch_size : int, optional
         Rows per forward pass. Bounds memory on large inputs; does not change results.
+    progress : bool, optional
+        Show a progress bar on stderr. Defaults to showing one for multi-batch inputs on a terminal.
 
     Returns
     -------
@@ -179,7 +235,7 @@ class OnnxArtifact:
     import pandas as pd
 
     smiles = [str(s) for s in smiles]
-    channels = self.run_channels(smiles, batch_size=batch_size)
+    channels = self.run_channels(smiles, batch_size=batch_size, progress=progress)
     values = {c["name"]: channels[c["output"]] for c in self._columns}
     return pd.DataFrame({"smiles": smiles, **values})
 
@@ -187,4 +243,4 @@ class OnnxArtifact:
     return self.n_columns
 
   def __repr__(self) -> str:
-    return f"OnnxArtifact({self.path.name!r}, columns={self.columns}, trained_at={self.trained_at!r})"
+    return f"OlindaArtifact({self.path.name!r}, columns={self.columns}, trained_at={self.trained_at!r})"

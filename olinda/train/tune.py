@@ -18,7 +18,6 @@ import time
 import warnings
 from pathlib import Path
 
-import h5py
 import numpy as np
 
 from olinda.console import console, echo, engine_banner, live_status, rule, spinner, summary_panel
@@ -67,17 +66,44 @@ def _suggest(trial) -> dict:
   }
 
 
-def _h5_rows(path) -> int:
-  with h5py.File(path, "r") as f:
-    return int(f["x"].shape[0])
+def _load_subset(run_dir: Path, max_rows: int | None, seed: int):
+  """Load a random train/val subsample for the run's single column; also returns the full split size.
 
+  The full split is far larger than a study needs, so rows are drawn at random (rather than sliced)
+  while preserving the split's train:val proportion.
+  """
+  from olinda import run as runlib
+  from olinda.data.matrix import ReferenceMatrix
+  from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
 
-def _load(path, n_rows):
-  with h5py.File(path, "r") as f:
-    n = f["x"].shape[0] if n_rows is None else min(int(n_rows), f["x"].shape[0])
-    x = np.asarray(f["x"][:n], dtype=np.float32)
-    y = np.asarray(f["y"][:n], dtype=np.float32)
-  return x, y
+  manifest = runlib.read_manifest(run_dir)
+  columns = manifest["columns"]
+  if len(columns) != 1:
+    raise RuntimeError(
+      f"this run has {len(columns)} columns; `olinda tune` supports single-column runs only. "
+      "Train the multi-column run with the built-in defaults, or prepare one column at a time."
+    )
+  col = columns[0]
+  y = runlib.read_target(run_dir, col["id"])
+  train_idx, val_idx = runlib.read_split(run_dir, col["id"])
+
+  total = len(train_idx) + len(val_idx)
+  frac = 1.0 if not max_rows or max_rows >= total else max_rows / total
+  rng = np.random.default_rng(seed)
+
+  def pick(idx):
+    n = max(1, round(len(idx) * frac))
+    return np.sort(rng.choice(idx, size=n, replace=False)) if n < len(idx) else idx
+
+  sub_train, sub_val = pick(train_idx), pick(val_idx)
+  matrix = ReferenceMatrix.load(OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME)
+  return (
+    matrix.gather(sub_train),
+    np.asarray(y[sub_train], dtype=np.float32),
+    matrix.gather(sub_val),
+    np.asarray(y[sub_val], dtype=np.float32),
+    total,
+  )
 
 
 def run_tuning(
@@ -110,13 +136,9 @@ def run_tuning(
   be = get_backend(backend_name, device)
   engine_banner(backend_name, device, backend_reason)
 
-  # Subsample train+val to ~max_rows total, preserving the split's train:val proportion (so the tuning
-  # val fraction matches what `prepare` produced). Rows are pre-shuffled on disk, so head slices are random.
-  train_n, val_n = _h5_rows(in_dir / "train.h5"), _h5_rows(in_dir / "val.h5")
-  total = train_n + val_n
-  frac = 1.0 if not max_rows or max_rows >= total else max_rows / total
-  xtr, ytr = _load(in_dir / "train.h5", max(1, round(train_n * frac)))
-  xva, yva = _load(in_dir / "val.h5", max(1, round(val_n * frac)))
+  # Subsample train+val to ~max_rows total, preserving the split's train:val proportion so the tuning
+  # val fraction matches what `prepare` produced.
+  xtr, ytr, xva, yva, total = _load_subset(in_dir, max_rows, seed)
 
   # Single squared-error objective (like `olinda learn-soft`); reweighting resolved the same way.
   obj_native = be.objective_params()

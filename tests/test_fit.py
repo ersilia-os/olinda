@@ -12,7 +12,16 @@ import pandas as pd  # noqa: E402
 from click.testing import CliRunner  # noqa: E402
 
 _SM = [
-  "CCO", "CCN", "CCC", "c1ccccc1", "CC(=O)O", "CCOC(=O)C", "Clc1ccccc1", "COc1ccccc1", "CCOCC", "OCc1ccccc1",
+  "CCO",
+  "CCN",
+  "CCC",
+  "c1ccccc1",
+  "CC(=O)O",
+  "CCOC(=O)C",
+  "Clc1ccccc1",
+  "COc1ccccc1",
+  "CCOCC",
+  "OCc1ccccc1",
 ]
 
 
@@ -60,7 +69,7 @@ def test_fit_soft_only_then_predict(tmp_path, monkeypatch):
   r2 = _run(["predict", "-m", str(md), "-i", str(q), "-o", str(out)])
   assert r2.exit_code == 0, r2.output
   df = pd.read_csv(out)
-  assert list(df.columns) == ["smiles", "prediction", "surrogate"]
+  assert list(df.columns) == ["smiles", "y"]  # one column per task, named after it
   assert len(df) == 5
 
 
@@ -73,15 +82,29 @@ def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
 
   xu = MorganCountFeaturizer().transform(_SM)
   lab = (xu[:, :100].sum(1) > np.median(xu[:, :100].sum(1))).astype(int)
-  pd.DataFrame({"smiles": _SM, "label": lab}).to_csv(gt, index=False)
+  pd.DataFrame({"smiles": _SM, "y": lab}).to_csv(gt, index=False)  # matches the soft column
   md = tmp_path / "model"
 
-  r = _run(["fit", "-s", str(soft), "-h", str(gt), "-m", str(md), "--val-frac", "0.2", "--num-boost-round", "80"])
+  r = _run([
+    "fit",
+    "-s",
+    str(soft),
+    "-h",
+    str(gt),
+    "-m",
+    str(md),
+    "--val-frac",
+    "0.2",
+    "--num-boost-round",
+    "80",
+  ])
   assert r.exit_code == 0, r.output
 
-  from olinda.onnx_pipeline import OnnxPipeline
+  from olinda import OlindaArtifact
 
-  pipe = OnnxPipeline.load(md)
-  assert pipe.meta["has_hard"] is True
-  ch = pipe.predict_channels(_SM[:4])
-  assert set(ch) == {"prediction", "surrogate", "ground_truth", "ground_truth_soft", "applicability"}
+  model = OlindaArtifact(md)
+  assert model.has_ground_truth is True
+  assert model.columns == ["y"]
+  # the graph exposes exactly one output per task; the blend happens inside it
+  assert set(model.run_channels(_SM[:4])) == {"y"}
+  assert model.metadata["columns"][0]["has_hard"] is True

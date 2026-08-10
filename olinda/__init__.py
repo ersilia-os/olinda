@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import rdkit
 
 if TYPE_CHECKING:  # import-time cost avoided at runtime; see __getattr__ below
-  from olinda.artifact import OnnxArtifact as OnnxArtifact
+  from olinda.artifact import OlindaArtifact as OlindaArtifact
   from olinda.artifact import RDKitVersionMismatch as RDKitVersionMismatch
 
 # Silence matplotlib's "Matplotlib is building the font cache; this may take a moment." notice (emitted
@@ -31,11 +31,11 @@ if rdkit.__version__ != REQUIRED_RDKIT_VERSION:
 
 def __getattr__(name):
   """Expose the inference API lazily, so `import olinda` stays cheap for CLI startup."""
-  if name in ("OnnxArtifact", "RDKitVersionMismatch"):
+  if name in ("OlindaArtifact", "RDKitVersionMismatch"):
     from olinda import artifact
 
     return getattr(artifact, name)
   raise AttributeError(f"module 'olinda' has no attribute {name!r}")
 
 
-__all__ = ["OnnxArtifact", "RDKitVersionMismatch", "REQUIRED_RDKIT_VERSION"]
+__all__ = ["OlindaArtifact", "RDKitVersionMismatch", "REQUIRED_RDKIT_VERSION"]

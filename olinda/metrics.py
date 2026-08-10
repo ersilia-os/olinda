@@ -54,6 +54,25 @@ def _rmse(y, p) -> float:
   return float(np.sqrt(np.mean((y - p) ** 2)))
 
 
+def json_safe(obj):
+  """Replace non-finite floats with ``None`` so the result is valid JSON for any consumer.
+
+  ``NaN`` and ``Infinity`` are Python-specific extensions that strict JSON parsers reject, and these
+  metrics get embedded in ``model.onnx`` — where they may be read by tooling in any language.
+  """
+  if isinstance(obj, dict):
+    return {k: json_safe(v) for k, v in obj.items()}
+  if isinstance(obj, (list, tuple)):
+    return [json_safe(v) for v in obj]
+  if isinstance(obj, float) and not np.isfinite(obj):
+    return None
+  if isinstance(obj, np.floating):
+    return None if not np.isfinite(obj) else float(obj)
+  if isinstance(obj, np.integer):
+    return int(obj)
+  return obj
+
+
 def regression_metrics(y_true, y_pred) -> dict:
   """Score a regression prediction: MAE / RMSE / R² / Pearson / Spearman / top-decile-true RMSE.
 

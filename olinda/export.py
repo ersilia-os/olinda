@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from olinda.console import echo, rule, success, summary_panel
+from olinda.metrics import json_safe
 from olinda.ground_truth import (
   APPLICABILITY_NAME,
   CALIBRATOR_NAME,
@@ -337,10 +338,12 @@ def _fit_soft_calibration(sm, model_dir: Path):
   return IsotonicCalibrator().fit(raw=raw, target=vy)  # increasing (S already predicts the soft target)
 
 
-def _bundle_metadata(
-  model_dir: Path, featurizer: dict, featurizer_class: str, has_hard: bool, outputs
-) -> dict:
-  """Provenance embedded in ``model.onnx`` metadata: featurizer (+ RDKit), reference lib, hard-head summary."""
+def _bundle_metadata(manifest: dict, plan: list, featurizer: dict, featurizer_class: str, outputs) -> dict:
+  """Everything a consumer needs, embedded in ``model.onnx`` so the file is the only input required.
+
+  Carries the featurizer (and the RDKit build it must run under), when the model was trained, the
+  reference library it was distilled from, and one entry per column describing that task.
+  """
   import importlib.metadata
 
   import rdkit
@@ -351,7 +354,29 @@ def _bundle_metadata(
     olinda_version = importlib.metadata.version("olinda")
   except Exception:
     olinda_version = "unknown"
-  md = {
+
+  columns = []
+  for entry in plan:
+    col = {
+      "name": entry["name"],
+      "id": entry["id"],
+      "output": entry["output"],
+      "has_hard": bool(entry["has_hard"]),
+      "metrics": entry.get("metrics"),
+    }
+    if entry["has_hard"]:
+      gtm_path = entry["dir"] / GT_DIRNAME / GT_META_NAME
+      gtm = json.loads(gtm_path.read_text()) if gtm_path.exists() else {}
+      task = gtm.get("task", "binary")
+      col["hard"] = {
+        "source_column": (entry.get("hard_meta") or {}).get("source_column"),
+        "n_train": gtm.get("n"),
+        "task": "regression" if task == "regression" else "classification",
+        "lazyqsar_version": gtm.get("lazyqsar_version"),
+      }
+    columns.append(col)
+
+  return {
     "schema": BUNDLE_SCHEMA,
     "producer": "olinda",
     "olinda_version": olinda_version,
@@ -359,51 +384,92 @@ def _bundle_metadata(
     "featurizer": {**featurizer, "rdkit_version": rdkit.__version__},
     "featurizer_class": featurizer_class,
     "reference_library": {"name": MORGAN_FINGERPRINTS_FILENAME, "url": MORGAN_FINGERPRINTS_URL},
-    "has_hard": bool(has_hard),
+    "n_columns": len(columns),
+    "columns": columns,
     "outputs": list(outputs),
+    "has_hard": any(c["has_hard"] for c in columns),
+    "backend": manifest.get("backend"),
+    "split": manifest.get("split"),
   }
-  meta_path = model_dir / "train_meta.json"
-  if meta_path.exists():
-    with open(meta_path) as fp:
-      tm = json.load(fp)
-    md["backend"] = tm.get("backend")
-    md["task"] = tm.get("task")
-    md["hyperparams"] = tm.get("hyperparams")
-  if has_hard:
-    with open(model_dir / GT_DIRNAME / GT_META_NAME) as fp:
-      gtm = json.load(fp)
-    task = gtm.get("task", "binary")
-    md["hard"] = {
-      "n_train": gtm.get("n"),
-      "task": "regression" if task == "regression" else "classification",
-      "lazyqsar_version": gtm.get("lazyqsar_version"),
-    }
-  return md
 
 
 def _toposort(nodes: list, available: set) -> list:
-  """Order nodes so every input is produced earlier (ONNX requires topological order after our bridging)."""
-  ordered: list = []
-  avail = set(available)
-  pending = list(nodes)
-  while pending:
-    rest = []
-    progressed = False
-    for nd in pending:
-      if all(i == "" or i in avail for i in nd.input):
-        ordered.append(nd)
-        avail.update(nd.output)
-        progressed = True
-      else:
-        rest.append(nd)
-    if not progressed:
-      raise RuntimeError(f"cannot topologically order nodes (unresolved: {[n.name for n in rest][:5]})")
-    pending = rest
-  return ordered
+  """Order *nodes* so every input is produced before it is consumed.
+
+  ``add_prefix`` leaves each sub-model's nodes contiguous, and the Identity bridges that wire columns
+  together are appended afterwards, so the raw list is not in dependency order. Kahn's algorithm over
+  a producer map keeps this linear — a repeated-scan sort would be quadratic in the node count, which
+  grows with the number of columns.
+  """
+  producer: dict = {}
+  for i, nd in enumerate(nodes):
+    for out in nd.output:
+      producer[out] = i
+
+  indegree = [0] * len(nodes)
+  dependents: dict = {i: [] for i in range(len(nodes))}
+  for i, nd in enumerate(nodes):
+    for inp in nd.input:
+      if inp in available or inp not in producer:
+        continue
+      j = producer[inp]
+      if j != i:
+        dependents[j].append(i)
+        indegree[i] += 1
+
+  queue = [i for i, d in enumerate(indegree) if d == 0]
+  order: list = []
+  while queue:
+    i = queue.pop()
+    order.append(nodes[i])
+    for k in dependents[i]:
+      indegree[k] -= 1
+      if indegree[k] == 0:
+        queue.append(k)
+
+  if len(order) != len(nodes):
+    unresolved = [nodes[i].name for i, d in enumerate(indegree) if d > 0][:5]
+    raise ValueError(f"fused graph has a dependency cycle or a missing producer near: {unresolved}")
+  return order
+
+
+def _column_plan(model_dir: Path) -> tuple[dict, list]:
+  """The run manifest plus, per column, where its artifacts live and what its graph output is called.
+
+  Built once and shared by the fuse and the parity check, so both describe exactly the same sources.
+  """
+  from olinda import run as runlib
+
+  manifest = runlib.read_manifest(model_dir)
+  plan = []
+  seen: set[str] = set()
+  for col in manifest["columns"]:
+    col_dir = runlib.column_dir(model_dir, col["id"])
+    output = col["name"]
+    if output in seen:
+      raise ValueError(f"two columns would produce the output name {output!r}")
+    seen.add(output)
+    plan.append({
+      "id": col["id"],
+      "name": col["name"],
+      "output": output,
+      "dir": col_dir,
+      "has_hard": has_hard_head(col_dir),
+      "hard_meta": col.get("hard"),
+      "metrics": col.get("metrics"),
+    })
+  if not plan:
+    raise ValueError(f"{model_dir} has no columns — run `olinda prepare` first")
+  return manifest, plan
 
 
 def _fuse(model_dir: Path):
-  """Assemble the single fused ``model.onnx`` ModelProto for *model_dir* (soft-only or hard)."""
+  """Assemble the fused ``model.onnx`` ModelProto: every column, sharing one input tensor.
+
+  Each column contributes an independent sub-pipeline under its own ``c{i}_`` prefix, so a run with
+  one column is simply the one-column case of a run with many. The graph exposes exactly one output
+  per column — its blended prediction, named after the column.
+  """
   import onnx
   from onnx import TensorProto, helper
   from onnx.compose import add_prefix
@@ -413,12 +479,7 @@ def _fuse(model_dir: Path):
   from olinda.featurizer import featurizer_from_meta
   from olinda.models.bundle import StudentModel
 
-  sm = StudentModel.load(model_dir, featurizer_factory=featurizer_from_meta)
-  featurizer = sm.metadata.get("featurizer") or {}
-  featurizer_class = sm.metadata.get("featurizer_class", "MorganCountFeaturizer")
-  n_features = int(featurizer.get("fp_size", sm.metadata.get("x_dim", 2048)))
-  x_dim = int(sm.metadata.get("x_dim") or n_features)
-  has_hard = has_hard_head(model_dir)
+  manifest, plan = _column_plan(model_dir)
 
   nodes: list = []
   inits: list = []
@@ -433,76 +494,84 @@ def _fuse(model_dir: Path):
 
   ident = lambda src, dst: helper.make_node("Identity", [src], [dst], name=f"br_{dst}")  # noqa: E731
   cast_d = lambda src, dst: helper.make_node("Cast", [src], [dst], to=TensorProto.DOUBLE, name=f"br_{dst}")  # noqa: E731
-  # XGBoost ONNX outputs are (N,1); flatten to (N,) so they line up with the (N,) calibration/gate stages.
+  # Tree ONNX outputs are (N,1); flatten to (N,) so they line up with the (N,) calibration/gate stages.
+  # Added once for the whole graph — a per-column copy would collide on name and fail the checker.
   inits.append(helper.make_tensor("flat_shape", TensorProto.INT64, [1], [-1]))
   flat = lambda src, dst: helper.make_node("Reshape", [src, "flat_shape"], [dst], name=f"fl_{dst}")  # noqa: E731
 
-  # soft branch: input → soft_model → [soft_correction] → "surrogate" (double)
-  collect(_soft_model_proto(sm, x_dim), "sm")
-  nodes.append(ident("input", "sm__input"))
-  nodes.append(flat("sm__variable", "soft_raw"))
-  soft_raw = "soft_raw"  # float32 (N,)
-  cal_soft = _fit_soft_calibration(sm, model_dir)
-  if cal_soft is not None:
-    collect(_isotonic_model(cal_soft, "in", "out"), "sc")
-    nodes.append(ident(soft_raw, "sc__in"))
-    surrogate_src = "sc__out"  # double
-  else:
-    surrogate_src = soft_raw  # float32
-  nodes.append(cast_d(surrogate_src, "surrogate"))  # canonical double surrogate
+  featurizer: dict = {}
+  featurizer_class = "MorganCountFeaturizer"
+  n_features = 2048
+  outputs: list[str] = []
 
-  outputs = ["prediction", "surrogate"]
-  out_vi = {}
+  for entry in plan:
+    p = entry["id"] + "_"  # every node and tensor of this column is namespaced by it
+    sm = StudentModel.load(entry["dir"], featurizer_factory=featurizer_from_meta)
+    featurizer = sm.metadata.get("featurizer") or featurizer
+    featurizer_class = sm.metadata.get("featurizer_class", featurizer_class)
+    n_features = int(featurizer.get("fp_size", sm.metadata.get("x_dim", n_features)))
+    x_dim = int(sm.metadata.get("x_dim") or n_features)
 
-  if has_hard:
-    gt_root = model_dir / GT_DIRNAME
-    with open(gt_root / GT_META_NAME) as fp:
-      hard_task = json.load(fp).get("task", "binary")
+    # soft branch: input → soft_model → [soft correction] → surrogate (double)
+    collect(_soft_model_proto(sm, x_dim), f"{p}sm")
+    nodes.append(ident("input", f"{p}sm__input"))
+    nodes.append(flat(f"{p}sm__variable", f"{p}soft_raw"))
+    soft_raw = f"{p}soft_raw"
+    if sm.calibrator is not None:  # fitted during learn-soft and loaded from calibrator.json
+      collect(_isotonic_model(sm.calibrator, "in", "out"), f"{p}sc")
+      nodes.append(ident(soft_raw, f"{p}sc__in"))
+      surrogate_src = f"{p}sc__out"
+    else:
+      surrogate_src = soft_raw
+    nodes.append(cast_d(surrogate_src, f"{p}surrogate"))
 
-    collect(onnx.load(str(gt_root / GT_MODEL_SUBDIR / "xgboost.onnx")), "hm")
-    nodes.append(ident("input", "hm__float_input"))
-    if hard_task == "regression":  # seam: G regressor exposes a single "variable" output, no slice
-      nodes.append(flat("hm__variable", "g_reg"))
-      g_src = "g_reg"
-    else:  # classifier: take probabilities[:, 1]
-      collect(_prob1_model("p", "g"), "pr")
-      nodes.append(ident("hm__probabilities", "pr__p"))
-      g_src = "pr__g"
-    nodes.append(cast_d(g_src, "ground_truth"))
+    if entry["has_hard"]:
+      gt_root = entry["dir"] / GT_DIRNAME
+      with open(gt_root / GT_META_NAME) as fp:
+        hard_task = json.load(fp).get("task", "binary")
 
-    gcal = IsotonicCalibrator.load(gt_root / CALIBRATOR_NAME)
-    collect(_isotonic_model(gcal, "in", "out"), "hc")
-    nodes.append(ident(g_src, "hc__in"))
-    nodes.append(ident("hc__out", "ground_truth_soft"))
+      collect(onnx.load(str(gt_root / GT_MODEL_SUBDIR / "xgboost.onnx")), f"{p}hm")
+      nodes.append(ident("input", f"{p}hm__float_input"))
+      if hard_task == "regression":  # seam: a G regressor exposes a single "variable" output
+        nodes.append(flat(f"{p}hm__variable", f"{p}g_reg"))
+        g_src = f"{p}g_reg"
+      else:  # classifier: take probabilities[:, 1]
+        collect(_prob1_model("p", "g"), f"{p}pr")
+        nodes.append(ident(f"{p}hm__probabilities", f"{p}pr__p"))
+        g_src = f"{p}pr__g"
+      nodes.append(cast_d(g_src, f"{p}ground_truth"))
 
-    clf = ApplicabilityClassifier.load(gt_root / APPLICABILITY_NAME)
-    collect(_applicability_model(clf, n_features, "input", "applicability"), "ap")
-    nodes.append(ident("input", "ap__input"))
-    nodes.append(ident("ap__applicability", "applicability"))
+      gcal = IsotonicCalibrator.load(gt_root / CALIBRATOR_NAME)
+      collect(_isotonic_model(gcal, "in", "out"), f"{p}hc")
+      nodes.append(ident(g_src, f"{p}hc__in"))
+      nodes.append(ident(f"{p}hc__out", f"{p}ground_truth_soft"))
 
-    collect(_blender_model(), "bl")
-    nodes.append(ident("surrogate", "bl__soft"))
-    nodes.append(ident("ground_truth_soft", "bl__hard"))
-    nodes.append(ident("applicability", "bl__a"))
-    nodes.append(ident("bl__prediction", "prediction"))
+      clf = ApplicabilityClassifier.load(gt_root / APPLICABILITY_NAME)
+      collect(_applicability_model(clf, n_features, "input", "applicability"), f"{p}ap")
+      nodes.append(ident("input", f"{p}ap__input"))
+      nodes.append(ident(f"{p}ap__applicability", f"{p}applicability"))
 
-    outputs = ["prediction", "surrogate", "ground_truth", "ground_truth_soft", "applicability"]
-    for name in outputs:
-      out_vi[name] = helper.make_tensor_value_info(name, TensorProto.DOUBLE, ["B"])
-  else:
-    nodes.append(ident("surrogate", "prediction"))
-    for name in outputs:
-      out_vi[name] = helper.make_tensor_value_info(name, TensorProto.DOUBLE, ["B"])
+      collect(_blender_model(), f"{p}bl")
+      nodes.append(ident(f"{p}surrogate", f"{p}bl__soft"))
+      nodes.append(ident(f"{p}ground_truth_soft", f"{p}bl__hard"))
+      nodes.append(ident(f"{p}applicability", f"{p}bl__a"))
+      nodes.append(ident(f"{p}bl__prediction", f"{p}prediction"))
+    else:
+      nodes.append(ident(f"{p}surrogate", f"{p}prediction"))
 
+    nodes.append(ident(f"{p}prediction", entry["output"]))
+    outputs.append(entry["output"])
+
+  out_vi = [helper.make_tensor_value_info(n, TensorProto.DOUBLE, ["B"]) for n in outputs]
   graph = helper.make_graph(
     _toposort(nodes, {"input"} | {i.name for i in inits}),
     "olinda_model",
     [helper.make_tensor_value_info("input", TensorProto.FLOAT, ["B", int(n_features)])],
-    [out_vi[n] for n in outputs],
+    out_vi,
     initializer=inits,
   )
   model = helper.make_model(graph, opset_imports=[helper.make_opsetid(d, v) for d, v in opset.items()])
-  md = _bundle_metadata(model_dir, featurizer, featurizer_class, has_hard, outputs)
+  md = _bundle_metadata(manifest, plan, featurizer, featurizer_class, outputs)
 
   # Standard ONNX provenance, so the file identifies itself to any tool (Netron, hub tooling, the
   # onnx CLI) without them having to know about the custom metadata key below.
@@ -514,13 +583,18 @@ def _fuse(model_dir: Path):
     f"Input: {int(n_features)}-d Morgan count fingerprint "
     f"(RDKit {md['featurizer'].get('rdkit_version')}). Outputs: {', '.join(outputs)}."
   )
-  entry = model.metadata_props.add()
-  entry.key, entry.value = "olinda", json.dumps(md)
-  return model, has_hard, outputs
+  entry_prop = model.metadata_props.add()
+  # json_safe first: metrics can carry NaN, which strict JSON parsers in other languages reject.
+  entry_prop.key, entry_prop.value = "olinda", json.dumps(json_safe(md))
+  return model, plan, outputs
 
 
 def build_bundle(model_dir: str | Path) -> dict:
-  """Fuse *model_dir* into ``model.onnx`` and gate on numeric parity vs the Python reference. Returns paths."""
+  """Fuse a run directory into ``model.onnx``, gated on numeric parity against the Python pipeline.
+
+  Every column is checked independently: the graph's output for that column must match a pure-Python
+  recomposition of exactly the same artifacts, so a mis-wired subgraph cannot slip through.
+  """
   import onnxruntime as ort
 
   from olinda.featurizer import featurizer_from_meta
@@ -528,52 +602,61 @@ def build_bundle(model_dir: str | Path) -> dict:
 
   model_dir = Path(model_dir)
   rule("olinda · export", style="green", right=str(model_dir))
-  echo("fusing pipeline → model.onnx", "run")
-  model, has_hard, outputs = _fuse(model_dir)
+  model, plan, outputs = _fuse(model_dir)
+  echo(f"fusing {len(plan)} column(s) → model.onnx", "run")
   _save(model, model_dir / MODEL_NAME)
 
-  # parity: run the fused graph vs the Python composition of the exact sources
   echo("checking parity: model.onnx vs Python reference", "run")
-  sm = StudentModel.load(model_dir, featurizer_factory=featurizer_from_meta)
-  fp = sm.featurizer.transform(_SAMPLE_SMILES).astype(np.float32)
-  raw = np.asarray(sm.predict(X=fp, calibrate=False)).ravel()
-  cal_soft = _fit_soft_calibration(sm, model_dir)
-  surrogate_ref = (
-    np.asarray(cal_soft.transform(raw)).ravel() if cal_soft is not None else raw.astype(np.float64)
-  )
-  ref = {"surrogate": surrogate_ref, "prediction": surrogate_ref}
+  ref: dict = {}
+  fp = None
+  for entry in plan:
+    sm = StudentModel.load(entry["dir"], featurizer_factory=featurizer_from_meta)
+    if fp is None:
+      fp = sm.featurizer.transform(_SAMPLE_SMILES).astype(np.float32)
+    raw = np.asarray(sm.predict(X=fp, calibrate=False)).ravel()
+    surrogate = (
+      np.asarray(sm.calibrator.transform(raw)).ravel()
+      if sm.calibrator is not None
+      else raw.astype(np.float64)
+    )
+    if not entry["has_hard"]:
+      ref[entry["output"]] = surrogate
+      continue
 
-  if has_hard:
     from lazyqsar.base.xgboost import BaseXGBArtifact
 
     from olinda.applicability import ApplicabilityClassifier
     from olinda.calibrate import IsotonicCalibrator
 
-    gt_root = model_dir / GT_DIRNAME
+    gt_root = entry["dir"] / GT_DIRNAME
     g = np.asarray(BaseXGBArtifact.load(str(gt_root / GT_MODEL_SUBDIR)).run(fp))[:, 1].astype(np.float64)
     gsoft = np.asarray(IsotonicCalibrator.load(gt_root / CALIBRATOR_NAME).transform(g)).ravel()
     a = np.asarray(ApplicabilityClassifier.load(gt_root / APPLICABILITY_NAME).weight(fp > 0)).ravel()
-    ref = {
-      "surrogate": surrogate_ref,
-      "ground_truth": g,
-      "ground_truth_soft": gsoft,
-      "applicability": a,
-      "prediction": (1.0 - a) * surrogate_ref + a * gsoft,
-    }
+    ref[entry["output"]] = (1.0 - a) * surrogate + a * gsoft
 
   sess = ort.InferenceSession((model_dir / MODEL_NAME).read_bytes(), providers=["CPUExecutionProvider"])
   got = {o.name: np.asarray(v).ravel() for o, v in zip(sess.get_outputs(), sess.run(None, {"input": fp}))}
   parity = {k: float(np.max(np.abs(got[k] - ref[k]))) for k in outputs}
   worst = max(parity.values())
   if worst > _PARITY_TOL:
-    raise RuntimeError(f"model.onnx parity failed: max abs diff {worst:.2e} > {_PARITY_TOL:.0e} ({parity})")
+    offender = max(parity, key=parity.get)
+    raise RuntimeError(
+      f"model.onnx parity failed on column {offender!r}: max abs diff {worst:.2e} > {_PARITY_TOL:.0e}"
+    )
 
-  rows = [
-    ("Head", "soft + hard (blend)" if has_hard else "soft only"),
-    ("Outputs", " · ".join(outputs)),
-    ("Parity (max)", f"[bold]{worst:.2e}[/] ≤ {_PARITY_TOL:.0e}"),
-    ("Saved", f"[dim]{model_dir / MODEL_NAME}[/]"),
-  ]
-  summary_panel("olinda · export", rows, border_style="green", icon="✓")
+  n_hard = sum(1 for e in plan if e["has_hard"])
+  size_mb = (model_dir / MODEL_NAME).stat().st_size / 1e6
+  summary_panel(
+    "olinda · export",
+    [
+      ("Columns", f"[bold]{len(plan)}[/] · {n_hard} with a hard head"),
+      ("Outputs", " · ".join(outputs)),
+      ("Parity (max)", f"[bold]{worst:.2e}[/] ≤ {_PARITY_TOL:.0e}"),
+      ("Size", f"[bold]{size_mb:.1f} MB[/]"),
+      ("Saved", f"[dim]{model_dir / MODEL_NAME}[/]"),
+    ],
+    border_style="green",
+    icon="✓",
+  )
   success(f"fused model.onnx built and parity-checked → [dim]{model_dir / MODEL_NAME}[/]")
-  return {"model": str(model_dir / MODEL_NAME), "has_hard": has_hard, "parity": parity}
+  return {"model": str(model_dir / MODEL_NAME), "columns": outputs, "parity": parity}

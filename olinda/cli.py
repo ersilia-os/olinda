@@ -208,24 +208,29 @@ def fit_cmd(
 )
 @click.option("--val-frac", default=0.1, type=float, show_default=True)
 def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac):
-  """Prepare the reference (soft) split and, optionally, the hard-label set into one run directory.
+  """Prepare every teacher column in --soft-labels into one run directory.
 
-  Writes the value-stratified, shuffled train/val split (train.h5 / val.h5) from --soft-labels, and —
-  if --hard-labels is given — featurizes those compounds into hard.h5 for a later `learn-hard`.
+  Each value column gets its own value-stratified train/val split, recorded as row indices rather
+  than a copy of the descriptor matrix. With --hard-labels (a wide file: SMILES plus one column per
+  assay, empty where untested), each hard column is matched onto its soft column by name and
+  featurized into that column's hard.h5 for a later `learn-hard`.
   """
   import h5py
-  import numpy as np
 
+  from olinda import run as runlib
   from olinda.console import echo, rule, step, summary_panel
   from olinda.data import (
     OLINDA_HOME,
     MORGAN_FINGERPRINTS_FILENAME,
-    load_reference_calcs,
-    split_reference_to_h5,
+    check_column_budget,
+    load_reference_calcs_frame,
+    match_hard_columns,
+    split_reference_to_indices,
   )
 
   rule("olinda · prepare", style="cyan", right=str(model_dir))
-  n_steps = 3 if hard_labels is not None else 2
+  md = Path(model_dir)
+  md.mkdir(parents=True, exist_ok=True)
 
   descriptors = OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME
   if not descriptors.exists():
@@ -235,44 +240,100 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
       "(or scripts/compute_morgan_fingerprints.py to generate them locally)."
     )
 
-  # Stamp the split with its feature identity so `learn-soft` attaches the matching featurizer.
-  feature_attrs = {"features": "morgan"}
+  features = {"features": "morgan"}
   with h5py.File(descriptors, "r") as f:
+    n_rows, dim = int(f["data"].shape[0]), int(f["data"].shape[1])
     for k in ("radius", "nbits"):
       if k in f.attrs:
-        feature_attrs[k] = int(f.attrs[k])
+        features[k] = int(f.attrs[k])
 
-  step(1, n_steps, "splitting the reference library (train / val)")
-  y = load_reference_calcs(soft_labels, descriptors)
-  split_reference_to_h5(
-    descriptors, y, out_dir=model_dir, val_frac=val_frac, limit=max_samples, feature_attrs=feature_attrs
-  )
+  n_steps = 3 if hard_labels is not None else 2
 
-  # Persist the reference-aligned soft-label vector (row-for-row with erl0_morgan.h5) so `learn-hard` can
-  # calibrate the hard model against the soft labels across the full reference library.
-  step(2, n_steps, "saving reference-aligned soft labels")
-  md = Path(model_dir)
-  md.mkdir(parents=True, exist_ok=True)
-  with h5py.File(md / "soft.h5", "w") as f:
-    f.create_dataset("y", data=np.asarray(y, dtype=np.float32))
-  echo(f"soft.h5 · [bold]{len(y):,}[/] rows", "run")
+  # --- soft labels: every value column in the file, verified against the library once -------
+  step(1, n_steps, "reading teacher columns")
+  try:
+    all_cols, targets = load_reference_calcs_frame(soft_labels, descriptors)
+    check_column_budget(all_cols)
+  except ValueError as exc:
+    raise click.ClickException(str(exc)) from exc
+  echo(f"{len(all_cols)} teacher column(s): [bold]{', '.join(all_cols)}[/]", "run")
 
-  hard_info = None
+  # --- hard labels: match them onto the soft columns before doing any work ------------------
+  hard_map: dict = {}
   if hard_labels is not None:
-    from olinda.ground_truth import prepare_hard_labels
+    from olinda.data.reference import _read_table, resolve_smiles_frame
+
+    _, hard_values = resolve_smiles_frame(_read_table(hard_labels))
+    try:
+      hard_map = match_hard_columns(all_cols, [str(c) for c in hard_values.columns])
+    except ValueError as exc:
+      raise click.ClickException(str(exc)) from exc
+    for hard_col, soft_col in hard_map.items():
+      note = "exact" if hard_col == soft_col else "suffix"
+      echo(f"hard '{hard_col}' → '{soft_col}' ([dim]{note}[/])", "run")
+
+  # --- per-column value-stratified splits; the descriptor matrix is never copied ------------
+  step(2, n_steps, "planning per-column splits")
+  manifest = runlib.new_manifest(
+    soft_labels=soft_labels,
+    hard_labels=hard_labels,
+    reference={"name": MORGAN_FINGERPRINTS_FILENAME, "n_rows": n_rows, "dim": dim},
+    features=features,
+    val_frac=val_frac,
+    seed=42,
+    limit=max_samples,
+  )
+  by_id, splits, name_to_id = {}, {}, {}
+  for name in all_cols:
+    y = targets[name]
+    train_idx, val_idx = split_reference_to_indices(y, val_frac=val_frac, limit=max_samples)[:2]
+    entry = runlib.add_column(manifest, name=name, y=y, train_idx=train_idx, val_idx=val_idx)
+    by_id[entry["id"]] = y
+    splits[entry["id"]] = (train_idx, val_idx)
+    name_to_id[name] = entry["id"]
+    runlib.column_dir(md, entry["id"]).mkdir(parents=True, exist_ok=True)
+    echo(f"{name}: [bold]{len(train_idx):,}[/] train · [bold]{len(val_idx):,}[/] val", "run")
+
+  runlib.write_targets(md, by_id)
+  runlib.write_splits(md, splits)
+
+  # --- hard labels: featurize once, then slice per matched column ---------------------------
+  hard_info: dict = {}
+  if hard_map:
+    from olinda.ground_truth import prepare_hard_labels_wide
 
     step(3, n_steps, "featurizing hard labels")
-    hard_info = prepare_hard_labels(hard_labels, model_dir, task=task)
-    echo(f"hard.h5 · [bold]{hard_info['n']:,}[/] rows · task=[bold]{hard_info['task']}[/]", "run")
+    try:
+      hard_info = prepare_hard_labels_wide(
+        hard_labels, md, {h: name_to_id[s] for h, s in hard_map.items()}, task=task
+      )
+    except (ValueError, NotImplementedError) as exc:
+      raise click.ClickException(str(exc)) from exc
+    for hard_col, info in hard_info.items():
+      soft_col = hard_map[hard_col]
+      col = runlib.find_column(manifest, soft_col)
+      col["hard"] = {
+        "source_column": hard_col,
+        "match": "exact" if hard_col == soft_col else "suffix",
+        **info,
+      }
+      pos = f" · {info['n_positive']} positive" if info["n_positive"] is not None else ""
+      echo(f"{soft_col}: [bold]{info['n']:,}[/] hard rows · {info['task']}{pos}", "run")
 
-  rows = [
-    ("Soft split", f"train.h5 / val.h5 · val_frac {val_frac}"),
-    ("Soft labels", f"[bold]{len(y):,}[/] reference rows → soft.h5"),
-  ]
-  if hard_info is not None:
-    rows.append(("Hard labels", f"[bold]{hard_info['n']:,}[/] rows · task [bold]{hard_info['task']}[/]"))
-  rows.append(("Saved", f"[dim]{md}[/]"))
-  summary_panel("olinda · prepare", rows, border_style="green", icon="✓")
+  runlib.write_manifest(md, manifest)
+
+  n_hard = sum(1 for c in manifest["columns"] if c.get("hard"))
+  summary_panel(
+    "olinda · prepare",
+    [
+      ("Columns", f"[bold]{len(manifest['columns'])}[/] · {n_hard} with hard labels"),
+      ("Split", f"value-stratified per column · val_frac {val_frac}"),
+      ("Targets", f"[dim]{md / runlib.TARGETS_NAME}[/]"),
+      ("Saved", f"[dim]{md}[/]"),
+    ],
+    border_style="green",
+    icon="✓",
+  )
 
 
 @cli.command("learn-soft")
@@ -296,44 +357,92 @@ def learn_soft_cmd(model_dir, num_boost_round):
   reported, and a single self-describing `model.onnx` bundle is fused at the end (soft-only here;
   `learn-hard` re-fuses it with the hard head).
   """
-  import json
-
-  import h5py
-  import numpy as np
-
-  from olinda.console import echo, rule, engine_banner, strategy_banner, summary_panel
-  from olinda.data import resolve_regression_weights
-  from olinda.models import StudentModel
-  from olinda.train.backend import CANONICAL_DEFAULTS, get_backend, select_backend
-  from olinda.train.plots import save_true_vs_pred
+  from olinda import run as runlib
+  from olinda.console import echo, rule, engine_banner, summary_panel
+  from olinda.data import OLINDA_HOME, MORGAN_FINGERPRINTS_FILENAME
+  from olinda.data.matrix import ReferenceMatrix
+  from olinda.train.backend import get_backend, select_backend
 
   model_dir = Path(model_dir)
-  # Early-stopping patience scales with the round budget (1%, floored at 50) — not a user knob.
-  early_stopping = max(50, num_boost_round // 100)
-  train_h5 = model_dir / "train.h5"
-  val_h5 = model_dir / "val.h5"
-  for p in (train_h5, val_h5):
-    if not p.exists():
-      echo(f"missing {p.name} · [dim]{p}[/]", "error")
-      raise click.ClickException(f"missing {p.name} in {model_dir} — run `olinda prepare` first")
+  try:
+    manifest = runlib.read_manifest(model_dir)
+  except FileNotFoundError as exc:
+    raise click.ClickException(str(exc)) from exc
 
-  with h5py.File(train_h5, "r") as f:
-    x_dim = int(f["x"].shape[1])
-    features = str(f.attrs.get("features", "morgan"))
-    feat_radius = int(f.attrs["radius"]) if "radius" in f.attrs else 3
-    ytr = np.asarray(f["y"][:], dtype=np.float64)
-  rule("olinda · train", style="green", right=f"{features} · {x_dim}-dim features")
+  columns = manifest["columns"]
+  features = manifest["features"].get("features", "morgan")
+  dim = manifest["reference_library"]["dim"]
+  rule("olinda · learn-soft", style="green", right=f"{len(columns)} column(s) · {features} · {dim}-dim")
 
   # Engine auto-selected by device (GPU→XGBoost, CPU→LightGBM); OLINDA_BACKEND overrides.
   backend_name, device, backend_reason = select_backend()
   be = get_backend(backend_name, device)
   engine_banner(backend_name, device, backend_reason)
 
-  # Single objective: squared error (well-conditioned, ONNX-safe). Backend maps to its native loss.
-  obj_native = be.objective_params()
+  # The descriptor matrix is identical for every column, so it is read once and addressed by index.
+  descriptors = OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME
+  if not descriptors.exists():
+    raise click.ClickException(f"reference library missing at {descriptors} — run `olinda setup`")
+  echo(f"loading reference descriptors · [dim]{descriptors.name}[/]", "run")
+  matrix = ReferenceMatrix.load(descriptors)
 
-  # Automatic target reweighting: 'auto' weights only when imbalanced (olinda picks none/KDE/bins from the
-  # target's shape); 'on'/'off' force/disable. When active, weights apply to train AND val together.
+  results = []
+  for i, col in enumerate(columns, start=1):
+    rule(f"olinda · learn-soft · {col['name']}", style="green", right=f"column {i}/{len(columns)}")
+    results.append(_train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_boost_round))
+    col["status"]["soft_trained"] = True
+    runlib.write_manifest(model_dir, manifest)
+
+  del matrix  # release ~2.8 GB before fusing, which is itself memory-hungry
+
+  from olinda.export import build_bundle
+
+  build_bundle(model_dir)
+
+  summary_panel(
+    "olinda · learn-soft",
+    [
+      ("Columns", f"[bold]{len(results)}[/] trained · {backend_name}"),
+      *[
+        (
+          r["name"],
+          f"R² [bold]{r['metrics']['r2']:.4f}[/] · ρ {r['metrics']['spearman']:.4f} · {r['n_trees']:,} trees",
+        )
+        for r in results
+      ],
+      ("Model", f"[dim]{model_dir / 'model.onnx'}[/]"),
+    ],
+    border_style="green",
+    icon="✓",
+  )
+
+
+def _train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_boost_round) -> dict:
+  """Train one column's surrogate into ``columns/<id>/``; returns its name, metrics and tree count."""
+  import json
+
+  import numpy as np
+
+  from olinda import run as runlib
+  from olinda.calibrate import IsotonicCalibrator
+  from olinda.console import echo, strategy_banner
+  from olinda.data import resolve_regression_weights
+  from olinda.featurizer import MorganCountFeaturizer
+  from olinda.metrics import regression_metrics
+  from olinda.models import StudentModel
+  from olinda.train.backend import CANONICAL_DEFAULTS
+  from olinda.train.plots import save_true_vs_pred
+
+  col_dir = runlib.column_dir(model_dir, col["id"])
+  col_dir.mkdir(parents=True, exist_ok=True)
+  # Early-stopping patience scales with the round budget (1%, floored at 50) — not a user knob.
+  early_stopping = max(50, num_boost_round // 100)
+
+  y = runlib.read_target(model_dir, col["id"])
+  train_idx, val_idx = runlib.read_split(model_dir, col["id"])
+  ytr = np.asarray(y[train_idx], dtype=np.float64)
+
+  # Automatic target reweighting, decided independently per column from that column's own shape.
   bin_edges, bin_weights, reweight_info = resolve_regression_weights(ytr, mode="auto")
   weighted = bin_weights is not None
   reweight_info["used_in"] = {"training": weighted, "evaluation": weighted, "early_stopping": weighted}
@@ -343,41 +452,15 @@ def learn_soft_cmd(model_dir, num_boost_round):
     weight_range=reweight_info.get("weight_range") if weighted else None,
   )
 
-  # Use tuned (canonical) hyperparameters if a prior `olinda tune -m <model-dir>` left best_params.json here.
-  tuned_params: dict = {}
-  tuned_path = model_dir / "best_params.json"
-  if tuned_path.exists():
-    with open(tuned_path) as fp:
-      tuned_params = json.load(fp)
-    tag = tuned_params.pop("backend", None)  # a tag, not a hyperparameter
-    if tag and tag != backend_name:
-      echo(
-        f"best_params.json was tuned on {tag}; its canonical params still apply to {backend_name}", "warning"
-      )
-    unknown = [k for k in tuned_params if k not in CANONICAL_DEFAULTS]
-    if unknown:
-      echo(
-        f"ignoring unrecognized best_params.json keys {unknown} (stale format?) — re-run `olinda tune`",
-        "warning",
-      )
-      for k in unknown:
-        tuned_params.pop(k)
-    shown = " · ".join(
-      f"{k}={v}"
-      for k, v in tuned_params.items()
-      if k in ("learning_rate", "max_depth", "min_split_gain", "min_child_weight")
-    )
-    echo(f"Tuned hyperparameters from {tuned_path.name} — {shown}", "run")
-  else:
-    echo("No best_params.json in model-dir — using built-in defaults (run `olinda tune -m` to tune)", "info")
-
+  tuned_params = _resolve_tuned_params(model_dir, col_dir, backend_name)
   canonical = {**CANONICAL_DEFAULTS, **tuned_params}
-  native_params = {**be.translate(canonical), **obj_native}
-  # Load val once — used for live R²/ρ during training AND the final metrics/plot below.
-  with h5py.File(val_h5, "r") as f:
-    xval = np.asarray(f["x"][:], dtype=np.float32)
-    yval = np.asarray(f["y"][:], dtype=np.float32)
-  dtrain, dval = be.build_train_val(train_h5, val_h5, canonical["max_bin"], bin_edges, bin_weights)
+  native_params = {**be.translate(canonical), **be.objective_params()}
+
+  xval = matrix.gather(val_idx)
+  yval = np.asarray(y[val_idx], dtype=np.float32)
+  dtrain, dval = be.build_train_val_indexed(
+    matrix, y, train_idx, val_idx, canonical["max_bin"], bin_edges, bin_weights
+  )
   res = be.train(
     dtrain,
     dval,
@@ -388,58 +471,81 @@ def learn_soft_cmd(model_dir, num_boost_round):
     val_eval=(xval, yval),
   )
 
-  # Attach the Morgan featurizer so the saved model can predict directly from SMILES.
-  from olinda.featurizer import MorganCountFeaturizer
-
-  featurizer = MorganCountFeaturizer(radius=feat_radius, fp_size=x_dim)
-
+  x_dim = int(matrix.n_cols)
+  featurizer = MorganCountFeaturizer(radius=int(manifest["features"].get("radius", 3)), fp_size=x_dim)
   student = StudentModel(
     model=res.model,
     backend=backend_name,
     featurizer=featurizer,
     metadata={
       "task": "regression",
+      "column": col["name"],
       "x_dim": x_dim,
-      "features": features,
+      "features": manifest["features"].get("features", "morgan"),
       "backend": backend_name,
       "objective": "squarederror",
       "reweight": reweight_info,
       "hyperparams": {"source": "tuned" if tuned_params else "defaults", "tuned": tuned_params or None},
     },
   )
-  student.save(model_dir)
-
-  # Validation metrics (val already loaded above for live progress).
-  from olinda.metrics import regression_metrics
+  student.save(col_dir)
 
   pval = be.predict(res.model, xval)
   metrics = regression_metrics(yval, pval)
-  with open(model_dir / "val_metrics.json", "w") as fp:
+  with open(col_dir / "val_metrics.json", "w") as fp:
     json.dump(metrics, fp, indent=2)
+  col["metrics"] = metrics
 
-  # True-vs-pred scatter saved alongside the model (skipped with a warning if stylia is absent).
-  plot_path = save_true_vs_pred(
-    yval, pval, model_dir / "val_true_pred.png", title=f"Validation  (R²={metrics['r2']:.3f})"
+  # Fit the surrogate's isotonic correction here, where the validation predictions already exist.
+  # Export then only loads calibrator.json instead of re-reading and re-predicting the whole split.
+  if len(yval) >= 4 and np.isfinite(yval).any():
+    IsotonicCalibrator().fit(raw=pval, target=np.asarray(yval, dtype=np.float64)).save(
+      col_dir / "calibrator.json"
+    )
+
+  save_true_vs_pred(
+    yval, pval, col_dir / "val_true_pred.png", title=f"{col['name']}  (R²={metrics['r2']:.3f})"
   )
+  echo(
+    f"R² [bold]{metrics['r2']:.4f}[/] · ρ {metrics['spearman']:.4f} · RMSE {metrics['rmse']:.5f} "
+    f"· {res.n_trees:,} trees",
+    "success",
+  )
+  del xval
+  return {"name": col["name"], "metrics": metrics, "n_trees": res.n_trees}
 
-  rows = [
-    (
-      "Trees",
-      f"[bold]{res.n_trees}[/]  [dim]· {backend_name} · {obj_native['objective']} · reweight: "
-      f"{reweight_info['strategy']}{' (train+val)' if weighted else ''}[/]",
-    ),
-    ("Val rows", f"{metrics['n']:,}  [dim]· metrics below are unweighted / global[/]"),
-    ("RMSE", f"[bold]{metrics['rmse']:.5f}[/]  [dim]· MAE {metrics['mae']:.5f}[/]"),
-    (
-      "R²",
-      f"[bold]{metrics['r2']:.4f}[/]  ·  Pearson [bold]{metrics['pearson']:.4f}[/]  ·  Spearman [bold]{metrics['spearman']:.4f}[/]",
-    ),
-    ("Top-decile RMSE", f"[bold]{metrics['top_decile_rmse']:.5f}[/]  [dim](sparse high-value tail)[/]"),
-  ]
-  if plot_path is not None:
-    rows.append(("Plot", f"[dim]{plot_path}[/]"))
-  rows.append(("Model", f"[dim]{model_dir}[/]"))
-  summary_panel("olinda · train", rows, border_style="green", icon="✓")
+
+def _resolve_tuned_params(model_dir: Path, col_dir: Path, backend_name: str) -> dict:
+  """Tuned hyperparameters for a column: its own ``best_params.json``, else the run-level one."""
+  import json
+
+  from olinda.console import echo
+  from olinda.train.backend import CANONICAL_DEFAULTS
+
+  path = next((p for p in (col_dir / "best_params.json", model_dir / "best_params.json") if p.exists()), None)
+  if path is None:
+    echo("no best_params.json — using built-in defaults (`olinda tune -m` to tune)", "info")
+    return {}
+
+  with open(path) as fp:
+    tuned = json.load(fp)
+  tag = tuned.pop("backend", None)  # a tag, not a hyperparameter
+  if tag and tag != backend_name:
+    echo(
+      f"best_params.json was tuned on {tag}; its canonical params still apply to {backend_name}", "warning"
+    )
+  unknown = [k for k in tuned if k not in CANONICAL_DEFAULTS]
+  if unknown:
+    echo(f"ignoring unrecognized best_params.json keys {unknown} — re-run `olinda tune`", "warning")
+    for k in unknown:
+      tuned.pop(k)
+  shown = " · ".join(
+    f"{k}={v}"
+    for k, v in tuned.items()
+    if k in ("learning_rate", "max_depth", "min_split_gain", "min_child_weight")
+  )
+  echo(f"tuned hyperparameters from {path.name} — {shown}", "run")
+  return tuned
 
   # Fuse the served bundle: a single self-describing model.onnx (soft-only here; learn-hard re-fuses).
   from olinda.export import build_bundle
@@ -505,19 +611,43 @@ def learn_hard_cmd(model_dir):
   surrogate / ground_truth_soft / ground_truth / applicability channels (the gate needs no similarity search
   and the blend favours the surrogate away from the labeled set).
   """
+  from olinda import run as runlib
+  from olinda.console import rule, summary_panel
   from olinda.ground_truth import HARD_H5_NAME, train_ground_truth
 
   md = Path(model_dir)
-  if not (md / HARD_H5_NAME).exists():
-    raise click.ClickException(
-      f"no {HARD_H5_NAME} in {model_dir!r} — run `olinda prepare --hard-labels <file> -m {model_dir}` first"
-    )
-  train_ground_truth(md)
+  try:
+    manifest = runlib.read_manifest(md)
+  except FileNotFoundError as exc:
+    raise click.ClickException(str(exc)) from exc
 
-  # Re-fuse the served bundle to include the hard head (blended model.onnx).
+  with_hard = [c for c in manifest["columns"] if (runlib.column_dir(md, c["id"]) / HARD_H5_NAME).exists()]
+  if not with_hard:
+    raise click.ClickException(
+      f"no column in {model_dir!r} has hard labels — run "
+      f"`olinda prepare -s <soft> -h <hard> -m {model_dir}` first"
+    )
+
+  for i, col in enumerate(with_hard, start=1):
+    rule(f"olinda · learn-hard · {col['name']}", style="green", right=f"column {i}/{len(with_hard)}")
+    train_ground_truth(runlib.column_dir(md, col["id"]), soft=runlib.read_target(md, col["id"]))
+    col["status"]["hard_trained"] = True
+    runlib.write_manifest(md, manifest)
+
+  # Re-fuse the served bundle so every column's hard head is included.
   from olinda.export import build_bundle
 
   build_bundle(md)
+  summary_panel(
+    "olinda · learn-hard",
+    [
+      ("Columns", f"[bold]{len(with_hard)}[/] of {len(manifest['columns'])} have a hard head"),
+      *[(c["name"], f"[dim]{(c.get('hard') or {}).get('n', '?')} labelled compounds[/]") for c in with_hard],
+      ("Model", f"[dim]{md / 'model.onnx'}[/]"),
+    ],
+    border_style="green",
+    icon="✓",
+  )
 
 
 @cli.command("export")
@@ -577,36 +707,31 @@ def predict_cmd(model_dir, input_path, out_path):
 
 
 def _predict_onnx(model_dir, input_path, out_path):
-  """Predict via the fused ``model.onnx`` (featurizer embedded in metadata); write the channel columns.
+  """Predict via the fused ``model.onnx`` and write one column per task.
 
-  Loads the graph first — which verifies the installed RDKit matches the build recorded in the metadata
-  (fingerprints are only reproducible on the exact build) — then featurizes the SMILES and runs the graph.
+  Goes through the same :class:`~olinda.artifact.OlindaArtifact` the library exposes, so the CLI and a
+  Python caller produce identical output. Loading verifies the installed RDKit against the build
+  recorded in the model's metadata.
   """
-  import pandas as pd
   import rdkit
 
+  from olinda.artifact import OlindaArtifact, RDKitVersionMismatch
   from olinda.console import echo, success
-  from olinda.onnx_pipeline import OnnxPipeline, RDKitVersionMismatch
 
   try:
-    pipe = OnnxPipeline.load(model_dir)  # verifies RDKit version against the model's metadata
+    model = OlindaArtifact(model_dir)
   except RDKitVersionMismatch as exc:
     echo(str(exc), "error")
-    raise click.ClickException(str(exc))
-  want = (pipe.meta.get("featurizer") or {}).get("rdkit_version", "?")
-  echo(f"rdkit [bold]{rdkit.__version__}[/] · matches model ({want})", "info")
+    raise click.ClickException(str(exc)) from exc
+  echo(f"rdkit [bold]{rdkit.__version__}[/] · matches model ({model.rdkit_version})", "info")
 
   smiles = _read_smiles(input_path)
-  head = "blend" if pipe.meta.get("has_hard") else "soft"
-  echo(f"model.onnx · [bold]{head}[/] · {len(smiles):,} SMILES", "run")
-  ch = pipe.predict_channels(smiles)
-
-  order = [
-    k for k in ("prediction", "surrogate", "ground_truth_soft", "ground_truth", "applicability") if k in ch
-  ]
+  head = "blend" if model.has_ground_truth else "soft"
+  echo(f"model.onnx · [bold]{model.n_columns}[/] column(s) · {head} · {len(smiles):,} SMILES", "run")
+  df = model.run(smiles)
   out_path = Path(out_path)
-  pd.DataFrame({"smiles": smiles, **{k: ch[k] for k in order}}).to_csv(out_path, index=False)
-  success(f"predictions ({' · '.join(order)}) → [dim]{out_path}[/]")
+  df.to_csv(out_path, index=False)
+  success(f"predictions ({' · '.join(model.columns)}) → [dim]{out_path}[/]")
 
 
 def _read_smiles(input_path: Path, smiles_col: str = "smiles") -> list[str]:

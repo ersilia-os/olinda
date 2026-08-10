@@ -68,9 +68,9 @@ The `olinda` command belongs to `[train]`; on a base install it exits with a mes
 A trained olinda model is **one self-describing `model.onnx`**. The featurizer configuration, the RDKit build it was fused against, the task names and the provenance all travel inside the file, so the `.onnx` is the only input you need &mdash; no run directory, no config, no reference library:
 
 ```python
-from olinda import OnnxArtifact
+from olinda import OlindaArtifact
 
-model = OnnxArtifact("model.onnx")
+model = OlindaArtifact("model.onnx")
 df = model.run(["CCO", "c1ccccc1", "CC(=O)Oc1ccccc1C(=O)O"])
 ```
 
@@ -89,7 +89,7 @@ model.describe()  # all of the above, as a dict
 
 The installed RDKit is checked against the recorded build on load and **refused on mismatch** &mdash; Morgan fingerprints only reproduce bit-for-bit on the exact version, so a silent mismatch would corrupt every prediction.
 
-Predictions already fold in the applicability weighting; `prediction` is the final number. To inspect the pieces behind it &mdash; the raw surrogate, the calibrated ground truth, and the applicability weight &mdash; use `model.run_channels(smiles)`.
+Each value already folds in the applicability weighting: where a task has a ground-truth head, its prediction is the blend of the distilled surrogate and your calibrated measured data, weighted by how close the query is to your labelled chemistry. The graph exposes exactly one output per task, so that blending happens inside the model rather than being something you assemble afterwards.
 
 Large inputs are batched internally; pass `batch_size=` to change the default.
 

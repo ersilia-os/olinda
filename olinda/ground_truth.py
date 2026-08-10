@@ -283,7 +283,104 @@ def prepare_hard_labels(input_csv: str | Path, out_dir: str | Path, *, task: str
   return {"task": resolved_task, "n": int(len(y)), "n_dropped": n_dropped, "path": str(out_path)}
 
 
-def train_ground_truth(model_dir: str | Path) -> dict:
+MIN_HARD_ROWS = 4
+MIN_PER_CLASS = 2  # below this a class-stratified train/val split is impossible
+
+
+def prepare_hard_labels_wide(
+  input_path: str | Path, run_dir: str | Path, mapping: dict, *, task: str = "auto"
+) -> dict:
+  """Featurize a wide hard-label file once and write one ``hard.h5`` per matched column.
+
+  The file carries a SMILES column plus one column per assay, empty where a compound was not tested.
+  RDKit featurization is the expensive part and does not depend on the column, so it happens once for
+  the whole file; each column then selects the rows where its own value is present.
+
+  Parameters
+  ----------
+  input_path : str or Path
+      CSV/TSV/Parquet: a SMILES column followed by one value column per assay.
+  run_dir : str or Path
+      The run directory; each column's file lands in ``columns/<id>/hard.h5``.
+  mapping : dict
+      ``{hard_column: column_id}`` — which hard column feeds which prepared column.
+  task : {"auto", "binary", "regression"}
+      ``"auto"`` resolves the task per column.
+
+  Returns
+  -------
+  dict
+      ``{hard_column: {"task", "n", "n_positive", "n_dropped", "path"}}``.
+
+  Raises
+  ------
+  ValueError
+      If a column has too few usable rows, or — for a binary column — too few of either class to
+      support a stratified split. Raised here rather than hours later inside ``learn-hard``.
+  """
+  import h5py
+
+  from olinda.data.reference import _read_table, resolve_smiles_frame
+  from olinda.run import column_dir
+
+  smiles, values = resolve_smiles_frame(_read_table(input_path))
+  featurizer = MorganCountFeaturizer()
+  X, parsed = _featurize(smiles, featurizer)
+  if (~parsed).any():
+    echo(f"dropping {int((~parsed).sum())} unparseable SMILES", "warning")
+
+  out: dict[str, dict] = {}
+  for hard_col, col_id in mapping.items():
+    y_raw = np.asarray(values[hard_col].to_numpy(), dtype=np.float64)
+    keep = parsed & np.isfinite(y_raw)
+    xc, yc = X[keep], y_raw[keep]
+    if len(yc) < MIN_HARD_ROWS:
+      raise ValueError(
+        f"hard column '{hard_col}' has only {len(yc)} usable row(s); at least {MIN_HARD_ROWS} needed"
+      )
+
+    resolved = _detect_task(yc) if task == "auto" else task
+    if resolved not in ("binary", "regression"):
+      raise ValueError(f"unknown task {task!r}")
+    n_positive = None
+    if resolved == "binary":
+      yc = yc.astype(int).astype(np.float64)
+      n_positive = int(yc.sum())
+      n_negative = int(len(yc) - n_positive)
+      if min(n_positive, n_negative) < MIN_PER_CLASS:
+        raise ValueError(
+          f"hard column '{hard_col}' has {n_positive} positive and {n_negative} negative row(s); "
+          f"at least {MIN_PER_CLASS} of each are needed for a class-stratified split. "
+          "Drop the column or supply more labels."
+        )
+    else:
+      raise NotImplementedError(
+        f"hard column '{hard_col}' looks continuous; only binary ground truth is supported today"
+      )
+
+    perm = np.random.RandomState(42).permutation(len(yc))
+    xc, yc = xc[perm], yc[perm]
+    out_dir = column_dir(run_dir, col_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / HARD_H5_NAME
+    with h5py.File(out_path, "w") as f:
+      f.create_dataset("x", data=xc.astype(np.float32))
+      f.create_dataset("y", data=yc.astype(np.float32))
+      f.attrs["task"] = resolved
+      f.attrs["features"] = "morgan_count"
+      f.attrs["featurizer"] = json.dumps(featurizer.to_dict())
+      f.attrs["n_dropped"] = int((~keep).sum())
+    out[hard_col] = {
+      "task": resolved,
+      "n": int(len(yc)),
+      "n_positive": n_positive,
+      "n_dropped": int((~keep).sum()),
+      "path": str(out_path),
+    }
+  return out
+
+
+def train_ground_truth(model_dir: str | Path, soft=None) -> dict:
   """Train the hard-label model ``G`` and calibrate it onto the soft-label scale.
 
   Reads ``<model_dir>/hard.h5`` (written by :func:`prepare_hard_labels`) and ``<model_dir>/soft.h5``
@@ -310,12 +407,12 @@ def train_ground_truth(model_dir: str | Path) -> dict:
     raise FileNotFoundError(
       f"no {HARD_H5_NAME} in {model_dir} — run `olinda prepare --hard-labels <file> -m {model_dir}` first"
     )
-  soft_path = model_dir / "soft.h5"
-  if not soft_path.exists():
-    raise FileNotFoundError(
-      f"no soft.h5 in {model_dir} — run `olinda prepare -s <soft-labels> -m {model_dir}` first "
-      "(it saves the reference-aligned soft labels the calibration needs)"
+  if soft is None:
+    raise ValueError(
+      "train_ground_truth needs this column's reference-aligned soft labels; the caller reads them "
+      "from the run's targets.h5"
     )
+  soft = np.asarray(soft, dtype=np.float64)
   ref_path = _reference_path()  # raises a friendly error if erl0_morgan.h5 is missing
 
   gt_root = model_dir / GT_DIRNAME
@@ -356,8 +453,6 @@ def train_ground_truth(model_dir: str | Path) -> dict:
     from olinda.calibrate import IsotonicCalibrator, _spearman_sign
 
     echo("Step 3/4 · calibrating G → soft-label scale", "run")
-    with h5py.File(soft_path, "r") as f:
-      soft = np.asarray(f["y"][:], dtype=np.float64)
     m = min(len(g_ref), len(soft))
     gv, sv = g_ref[:m].astype(np.float64), soft[:m]
     mask = np.isfinite(gv) & np.isfinite(sv)

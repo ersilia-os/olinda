@@ -153,9 +153,7 @@ def test_indexed_training_matches_per_column_files(backend, tmp_path, monkeypatc
       f.create_dataset("x", data=x[idx].astype(np.float32))
       f.create_dataset("y", data=y[idx])
   from_files = be.train(
-    *be.build_train_val(
-      tmp_path / "train.h5", tmp_path / "val.h5", canonical["max_bin"], edges, weights
-    ),
+    *be.build_train_val(tmp_path / "train.h5", tmp_path / "val.h5", canonical["max_bin"], edges, weights),
     params,
     **fit,
   )
