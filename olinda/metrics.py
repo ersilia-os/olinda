@@ -1,7 +1,7 @@
 """Regression metrics shared by training, distillation, and robustness evaluation.
 
 Numpy-only, no SciPy: the same six numbers are reported by ``olinda learn-soft``
-(``val_metrics.json``), by :mod:`olinda.pipeline`, and by :mod:`olinda.robustness`, so they stay
+(``val_metrics.json``) for every column, and by :mod:`olinda.robustness`, so they stay
 comparable across every code path that scores a student model.
 
 ``top_decile_rmse`` (error on the sparse high-value tail) and ``spearman`` (rank correlation) are
