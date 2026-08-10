@@ -375,11 +375,11 @@ def learn_soft_cmd(model_dir, num_boost_round):
 
   from olinda.console import (
     STEP_COLORS,
+    LiveTable,
     echo,
     elapsed,
     engine_banner,
     path as cpath,
-    resources,
     rule,
     set_active_color,
     summary_panel,
@@ -418,15 +418,32 @@ def learn_soft_cmd(model_dir, num_boost_round):
   matrix = ReferenceMatrix.load(descriptors)
 
   results = []
-  for i, col in enumerate(columns, start=1):
-    rule(
-      f"STEP {i}/{len(columns)} · {col['name']}",
-      style=STEP_COLORS["learn-soft"],
-      right=resources(),
-    )
-    results.append(_train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_boost_round))
-    col["status"]["soft_trained"] = True
-    runlib.write_manifest(model_dir, manifest)
+  with LiveTable(
+    [c["name"] for c in columns],
+    title="Distilling columns",
+    fields=["R²", "ρ", "RMSE", "Trees", "Time"],
+    item_label="Column",
+    running_verb="training",
+    color=STEP_COLORS["learn-soft"],
+  ) as table:
+    for col in columns:
+      table.start(col["name"])
+      started = time.time()
+      result = _train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_boost_round)
+      m = result["metrics"]
+      table.finish(
+        col["name"],
+        **{
+          "R²": f"{m['r2']:.4f}",
+          "ρ": f"{m['spearman']:.4f}",
+          "RMSE": f"{m['rmse']:.5f}",
+          "Trees": f"{result['n_trees']:,}",
+          "Time": elapsed(time.time() - started),
+        },
+      )
+      results.append(result)
+      col["status"]["soft_trained"] = True
+      runlib.write_manifest(model_dir, manifest)
 
   del matrix  # release ~2.8 GB before fusing, which is itself memory-hungry
 
@@ -461,7 +478,7 @@ def _train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_bo
 
   from olinda import run as runlib
   from olinda.calibrate import IsotonicCalibrator
-  from olinda.console import echo, strategy_banner
+  from olinda.console import echo, live_region_taken, strategy_banner
   from olinda.data import resolve_regression_weights
   from olinda.featurizer import MorganCountFeaturizer
   from olinda.metrics import regression_metrics
@@ -482,11 +499,13 @@ def _train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_bo
   bin_edges, bin_weights, reweight_info = resolve_regression_weights(ytr, mode="auto")
   weighted = bin_weights is not None
   reweight_info["used_in"] = {"training": weighted, "evaluation": weighted, "early_stopping": weighted}
-  strategy_banner(
-    reweight_info["strategy"],
-    reweight_info["reason"],
-    weight_range=reweight_info.get("weight_range") if weighted else None,
-  )
+  quiet = live_region_taken()  # a live table already reports this column's status
+  if not quiet:
+    strategy_banner(
+      reweight_info["strategy"],
+      reweight_info["reason"],
+      weight_range=reweight_info.get("weight_range") if weighted else None,
+    )
 
   tuned_params = _resolve_tuned_params(model_dir, col_dir, backend_name)
   canonical = {**CANONICAL_DEFAULTS, **tuned_params}
@@ -542,11 +561,12 @@ def _train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_bo
   save_true_vs_pred(
     yval, pval, col_dir / "val_true_pred.png", title=f"{col['name']}  (R²={metrics['r2']:.3f})"
   )
-  echo(
-    f"R² [bold]{metrics['r2']:.4f}[/] · ρ {metrics['spearman']:.4f} · RMSE {metrics['rmse']:.5f} "
-    f"· {res.n_trees:,} trees",
-    "success",
-  )
+  if not quiet:
+    echo(
+      f"R² [bold]{metrics['r2']:.4f}[/] · ρ {metrics['spearman']:.4f} · RMSE {metrics['rmse']:.5f} "
+      f"· {res.n_trees:,} trees",
+      "success",
+    )
   del xval
   return {"name": col["name"], "metrics": metrics, "n_trees": res.n_trees}
 

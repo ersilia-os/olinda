@@ -237,14 +237,28 @@ def spinner(i: int) -> str:
   return _SPINNER[i % len(_SPINNER)]
 
 
+_live_owner: object | None = None
+
+
+def live_region_taken() -> bool:
+  """True while something already owns the terminal's live region.
+
+  Rich's ``Live`` assumes it is the only writer repainting the screen, so two of them fight and tear.
+  A long-running inner stage checks this and stays quiet rather than competing with the outer
+  progress display that is already showing its status.
+  """
+  return _live_owner is not None
+
+
 @contextmanager
 def live_status(*, enabled: bool = True):
   """Yield an ``update(markup)`` that redraws a single transient status line in place.
 
-  Falls back to a no-op updater when ``enabled`` is False or the console is not a TTY (e.g. piped/CI
-  output), so callers should also emit plain milestone lines in that case.
+  Falls back to a no-op updater when ``enabled`` is False, when the console is not a TTY (e.g.
+  piped/CI output), or when an outer live region already owns the screen — so callers should also
+  emit plain milestone lines.
   """
-  if not enabled or not console.is_terminal:
+  if not enabled or live_region_taken() or not console.is_terminal:
     yield lambda markup: None
     return
   live = Live(console=console, transient=True, refresh_per_second=12)
@@ -253,6 +267,122 @@ def live_status(*, enabled: bool = True):
     yield live.update
   finally:
     live.__exit__(None, None, None)
+
+
+class LiveTable:
+  """A fixed-height live table with one row per work item.
+
+  Every row exists from the start as ``queued``, so the table never grows and the display cannot
+  reflow mid-run. While it is open it owns the terminal's live region, and inner stages fall silent
+  (see :func:`live_region_taken`) rather than fighting it for the screen.
+
+  Falls back to plain one-line-per-item output when the console is not a TTY, so CI logs stay
+  readable and ordered.
+
+      with LiveTable(["a", "b"], title="Training", fields=["R²", "Time"]) as table:
+          table.start("a")
+          table.finish("a", **{"R²": "0.86", "Time": "42s"})
+  """
+
+  def __init__(
+    self,
+    items,
+    *,
+    title: str,
+    fields,
+    item_label: str = "Item",
+    running_verb: str = "running",
+    color: str | None = None,
+  ) -> None:
+    self.items = [str(i) for i in items]
+    self.title = title
+    self.fields = list(fields)
+    self.item_label = item_label
+    self.running_verb = running_verb
+    self.color = color or active_color()
+    self._state = {
+      i: {"status": "queued", "started": None, "elapsed": None, "values": {}} for i in self.items
+    }
+    self._live = None
+
+  # -- rendering ---------------------------------------------------------
+
+  def _status_cell(self, s: dict) -> str:
+    if s["status"] == "queued":
+      return "[dim]queued[/]"
+    if s["status"] == "running":
+      return f"[{self.color}]{spinner(int(time.time() * 10))} {self.running_verb}[/]"
+    if s["status"] == "failed":
+      return "[red]failed[/]"
+    return "[green]✓ done[/]"
+
+  def _render(self) -> Table:
+    done = sum(1 for s in self._state.values() if s["status"] in ("done", "failed"))
+    table = Table(
+      title=f"[bold {self.color}]{self.title} · {done}/{len(self.items)}[/]",
+      title_justify="left",
+      box=box.SIMPLE_HEAD,
+      border_style=self.color,
+      header_style=f"bold {self.color}",
+      pad_edge=False,
+      expand=False,
+    )
+    table.add_column(self.item_label, no_wrap=True, overflow="ellipsis", max_width=32)
+    table.add_column("Status", no_wrap=True, width=18)
+    for name in self.fields:
+      table.add_column(name, justify="right", no_wrap=True)
+    for item in self.items:
+      s = self._state[item]
+      row = [item, self._status_cell(s)]
+      row += [str(s["values"].get(f, "[dim]—[/]")) for f in self.fields]
+      table.add_row(*row)
+    return table
+
+  def _refresh(self) -> None:
+    if self._live is not None:
+      self._live.update(self._render(), refresh=True)
+
+  # -- lifecycle ---------------------------------------------------------
+
+  def start(self, item) -> None:
+    item = str(item)
+    self._state[item].update(status="running", started=time.time())
+    if self._live is None:
+      i = self.items.index(item) + 1
+      echo(f"{self.running_verb} {item} [dim]({i}/{len(self.items)})[/]", "run")
+    self._refresh()
+
+  def update(self, item, **values) -> None:
+    self._state[str(item)]["values"].update(values)
+    self._refresh()
+
+  def finish(self, item, ok: bool = True, **values) -> None:
+    item = str(item)
+    s = self._state[item]
+    s["status"] = "done" if ok else "failed"
+    if s["started"] is not None:
+      s["elapsed"] = time.time() - s["started"]
+    s["values"].update(values)
+    if self._live is None:
+      shown = "  ".join(f"{k} {v}" for k, v in s["values"].items())
+      echo(f"{'✓' if ok else '✖'} {item}  [dim]{shown}[/]", "info")
+    self._refresh()
+
+  def __enter__(self) -> LiveTable:
+    global _live_owner
+    if console.is_terminal and not live_region_taken():
+      self._live = Live(self._render(), console=console, transient=True, refresh_per_second=8)
+      self._live.__enter__()
+      _live_owner = self
+    return self
+
+  def __exit__(self, *exc) -> None:
+    global _live_owner
+    if self._live is not None:
+      self._live.__exit__(*exc)
+      self._live = None
+      _live_owner = None
+      console.print(self._render())  # persist the finished table as the step's record
 
 
 def _bar(frac: float, width: int = 12) -> str:

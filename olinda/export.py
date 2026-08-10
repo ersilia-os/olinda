@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from olinda.console import echo, path as cpath, rule, success, summary_panel
+from olinda.console import STEP_COLORS, echo, path as cpath, rule, success, summary_panel
 from olinda.metrics import json_safe
 from olinda.ground_truth import (
   APPLICABILITY_NAME,
@@ -601,7 +601,7 @@ def build_bundle(model_dir: str | Path) -> dict:
   from olinda.models.bundle import StudentModel
 
   model_dir = Path(model_dir)
-  rule("olinda · export", style="green", right=str(model_dir))
+  rule("olinda · export", style=STEP_COLORS["export"], right=cpath(model_dir))
   model, plan, outputs = _fuse(model_dir)
   echo(f"fusing {len(plan)} column(s) → model.onnx", "run")
   _save(model, model_dir / MODEL_NAME)
@@ -656,7 +656,7 @@ def build_bundle(model_dir: str | Path) -> dict:
       ("Size", f"[bold]{size_txt}[/]"),
       ("Saved", f"[dim]{cpath(model_dir / MODEL_NAME)}[/]"),
     ],
-    border_style="green",
+    border_style=STEP_COLORS["export"],
     icon="✓",
   )
   success(f"fused model.onnx built and parity-checked → [dim]{cpath(model_dir / MODEL_NAME)}[/]")
