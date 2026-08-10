@@ -34,7 +34,17 @@ A_HIGH: float = 0.66
 NB_ALPHA: float = 1.0  # Laplace smoothing for the Bernoulli likelihoods
 
 
-def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray) -> np.ndarray:
+def prepare_gt_bits(gt_bits: np.ndarray):
+  """Binarize the labelled set once, returning ``(g, g_card)`` for reuse across many query chunks.
+
+  The reference library is scanned in chunks, so without this the labelled-set matrix and its
+  cardinalities are rebuilt for every chunk — tens of megabytes of identical work per pass.
+  """
+  g = (np.asarray(gt_bits) > 0).astype(np.float32)
+  return g, g.sum(axis=1)[None, :]
+
+
+def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray = None, *, prepared=None) -> np.ndarray:
   """Max Tanimoto similarity of each query to the labeled (ground-truth) set.
 
   Brute-force and exact — used at ``learn-hard`` time to label the reference library. Operates on binary
@@ -54,14 +64,13 @@ def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray) -> np.ndarray:
       (e.g. an unparseable SMILES) and ``0`` when the labeled set is empty.
   """
   q = (np.asarray(query_bits) > 0).astype(np.float32)
-  g = (np.asarray(gt_bits) > 0).astype(np.float32)
+  g, g_card = prepared if prepared is not None else prepare_gt_bits(gt_bits)
   m = q.shape[0]
   if g.shape[0] == 0 or m == 0:
     return np.zeros(m, dtype=np.float64)
 
   inter = q @ g.T  # (m, n) intersection counts
   q_card = q.sum(axis=1)[:, None]  # (m, 1)
-  g_card = g.sum(axis=1)[None, :]  # (1, n)
   union = q_card + g_card - inter
   with np.errstate(divide="ignore", invalid="ignore"):
     tan = np.where(union > 0, inter / union, 0.0)  # 0/0 (both empty) → 0, not NaN

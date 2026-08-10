@@ -231,7 +231,18 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
   import h5py
 
   from olinda import run as runlib
-  from olinda.console import echo, path as cpath, rule, step, summary_panel
+  import time
+
+  from olinda.console import (
+    STEP_COLORS,
+    echo,
+    elapsed,
+    path as cpath,
+    rule,
+    set_active_color,
+    step,
+    summary_panel,
+  )
   from olinda.data import (
     OLINDA_HOME,
     MORGAN_FINGERPRINTS_FILENAME,
@@ -241,7 +252,9 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
     split_reference_to_indices,
   )
 
-  rule("olinda · prepare", style="cyan", right=str(model_dir))
+  started = time.time()
+  set_active_color(STEP_COLORS["prepare"])
+  rule("olinda · prepare", style=STEP_COLORS["prepare"], right=cpath(model_dir))
   md = Path(model_dir)
   md.mkdir(parents=True, exist_ok=True)
 
@@ -343,8 +356,9 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
       ("Split", f"value-stratified per column · val_frac {val_frac}"),
       ("Targets", f"[dim]{cpath(md / runlib.TARGETS_NAME)}[/]"),
       ("Saved", f"[dim]{cpath(md)}[/]"),
+      ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
     ],
-    border_style="green",
+    border_style=STEP_COLORS["prepare"],
     icon="✓",
   )
 
@@ -667,11 +681,22 @@ def learn_hard_cmd(model_dir):
   surrogate / ground_truth_soft / ground_truth / applicability channels (the gate needs no similarity search
   and the blend favours the surrogate away from the labeled set).
   """
+  import time
+
   from olinda import run as runlib
-  from olinda.console import path as cpath, rule, summary_panel
+  from olinda.console import (
+    STEP_COLORS,
+    elapsed,
+    path as cpath,
+    rule,
+    set_active_color,
+    summary_panel,
+  )
   from olinda.ground_truth import HARD_H5_NAME, train_ground_truth
 
   md = Path(model_dir)
+  started = time.time()
+  set_active_color(STEP_COLORS["learn-hard"])
   try:
     manifest = runlib.read_manifest(md)
   except FileNotFoundError as exc:
@@ -685,7 +710,11 @@ def learn_hard_cmd(model_dir):
     )
 
   for i, col in enumerate(with_hard, start=1):
-    rule(f"olinda · learn-hard · {col['name']}", style="green", right=f"column {i}/{len(with_hard)}")
+    rule(
+      f"STEP {i}/{len(with_hard)} · {col['name']}",
+      style=STEP_COLORS["learn-hard"],
+      right=f"column {i}/{len(with_hard)}",
+    )
     train_ground_truth(runlib.column_dir(md, col["id"]), soft=runlib.read_target(md, col["id"]))
     col["status"]["hard_trained"] = True
     runlib.write_manifest(md, manifest)
@@ -700,8 +729,9 @@ def learn_hard_cmd(model_dir):
       ("Columns", f"[bold]{len(with_hard)}[/] of {len(manifest['columns'])} have a hard head"),
       *[(c["name"], f"[dim]{(c.get('hard') or {}).get('n', '?')} labelled compounds[/]") for c in with_hard],
       ("Model", f"[dim]{cpath(md / 'model.onnx')}[/]"),
+      ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
     ],
-    border_style="green",
+    border_style=STEP_COLORS["learn-hard"],
     icon="✓",
   )
 
@@ -745,12 +775,13 @@ def predict_cmd(model_dir, input_path, out_path):
   `ground_truth_soft` / `ground_truth` / `applicability`. The featurizer + RDKit version are read from the
   model's embedded metadata (the file is self-describing).
   """
-  from olinda.console import echo, rule
+  from olinda.console import STEP_COLORS, echo, path as cpath, rule, set_active_color
   from olinda.onnx_pipeline import OnnxPipeline
 
   model_dir = Path(model_dir)
   input_path = Path(input_path)
-  rule("olinda · predict", style="cyan", right=str(model_dir))
+  set_active_color(STEP_COLORS["predict"])
+  rule("olinda · predict", style=STEP_COLORS["predict"], right=cpath(model_dir))
   if not input_path.exists():
     echo(f"input not found · [dim]{input_path}[/]", "error")
     raise click.ClickException("input file does not exist")

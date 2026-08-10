@@ -160,7 +160,14 @@ def _fit_applicability(
   """
   import h5py
 
-  from olinda.applicability import A_HIGH, A_LOW, ApplicabilityClassifier, BernoulliNB, tanimoto_nn
+  from olinda.applicability import (
+    A_HIGH,
+    A_LOW,
+    ApplicabilityClassifier,
+    BernoulliNB,
+    prepare_gt_bits,
+    tanimoto_nn,
+  )
 
   d = int(n_features)
   # Bernoulli-NB sufficient statistics per target: rows-per-class (2,) and feature-on counts (2, d).
@@ -177,13 +184,14 @@ def _fit_applicability(
       if m.any():
         feat_on[c] += bits[m].sum(axis=0)
 
+  gt_prepared = prepare_gt_bits(gt_bits)  # built once, reused for every chunk
   with h5py.File(ref_path, "r") as f:
     key = "data" if "data" in f else next(iter(f.keys()))
     n = int(f[key].shape[0])
     for start in range(0, n, chunk):
       xb = np.asarray(f[key][start : start + chunk])
       bits = (xb > 0).astype(np.float32)
-      sim = tanimoto_nn(bits, gt_bits)
+      sim = tanimoto_nn(bits, prepared=gt_prepared)
       y_low = (sim >= sim_lo).astype(np.int64)
       y_high = (sim >= sim_hi).astype(np.int64)
       _accumulate(bits, y_low, low_n, low_on)
