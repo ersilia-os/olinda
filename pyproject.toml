@@ -5,13 +5,24 @@ description = "A model distillation library"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "click>=8.1.0",
+    "h5py>=3.12.0",
+    # Ground-truth (hard-label) models + applicability domain, used in descriptor-agnostic mode
+    # (feature matrix in, ONNX out — no [descriptors] extra, so no torch/rdkit/FPSim2 from lazyqsar).
+    # NOTE: lazyqsar[fit] pins exact versions that cap several deps below — hence the floors here
+    # (pandas 2.3.0, onnxruntime 1.20.1, xgboost 3.2.0) are aligned to what lazyqsar[fit]==3.4.2 forces.
+    "lazyqsar[fit]==3.4.2",
+    "lightgbm==4.6.0",
     "loguru>=0.7.3",
+    "numpy>=2.1.0",
+    "onnx>=1.17.0",
     "onnxmltools>=1.16.0",
-    "onnxruntime>=1.24.2",
-    "pandas>=2.3.3",
+    "onnxruntime>=1.20.1",
+    "pandas>=2.3.0",
     "pyarrow>=23.0.1",
-    "rdkit>=2025.9.5",
+    "rdkit==2025.9.4",
     "rich-click>=1.9.7",
+    "tqdm>=4.66.0",
     "xgboost>=3.2.0",
 ]
 
@@ -21,7 +32,7 @@ dev = [
     "ruff>=0.15.2",
 ]
 train = [
-    "optuna>=4.7.0",
+    "optuna==4.9.0",
 ]
 viz = [
     "matplotlib>=3.10.8",

@@ -1,5 +1,19 @@
-# Eosvc
-data/
+# Eosvc — anchored to the repo root, so it cannot swallow the olinda/data/ package
+/data/
+.eosvc/
+access.json
+
+# macOS
+.DS_Store
+
+# Scratch data / run artifacts at repo root
+/train.h5
+/val.h5
+/*.png
+/best_params.json
+
+# Local example inputs (teacher values over the full reference library — 136MB)
+example/
 
 # Python-generated files
 __pycache__/
