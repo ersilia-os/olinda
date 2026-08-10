@@ -74,7 +74,7 @@ model = OnnxArtifact("model.onnx")
 df = model.run(["CCO", "c1ccccc1", "CC(=O)Oc1ccccc1C(=O)O"])
 ```
 
-`run()` returns a DataFrame with a `smiles` column plus the model's values. A multi-task model gives one column per task, named after the task; a single-task model gives its `prediction` alongside the channels behind it.
+`run()` returns a DataFrame with a `smiles` column plus **one column per task**, named after the task. A single-task model is simply the one-column case &mdash; there is no separate mode.
 
 The artifact describes itself:
 

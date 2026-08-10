@@ -74,6 +74,16 @@ def test_artifact_loads_from_the_onnx_alone(tmp_path, monkeypatch):
   assert np.isfinite(df["prediction"].to_numpy()).all()
 
 
+def test_run_returns_one_column_per_task(tmp_path, monkeypatch):
+  """A single-task model is just the one-column case — no channels, no special mode."""
+  model = OnnxArtifact(_build_artifact(tmp_path, monkeypatch))
+  df = model.run(_SM[:3])
+  assert list(df.columns) == ["smiles", *model.columns]
+  assert model.n_columns == len(model.columns) == 1
+  # the intermediate channels are reachable, just not in the headline frame
+  assert set(model.run_channels(_SM[:3])) >= {"prediction", "surrogate"}
+
+
 def test_artifact_describes_itself(tmp_path, monkeypatch):
   model = OnnxArtifact(_build_artifact(tmp_path, monkeypatch))
   d = model.describe()

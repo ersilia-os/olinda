@@ -79,19 +79,27 @@ class OnnxArtifact:
     self._input_name = self._session.get_inputs()[0].name
     self._output_names = [o.name for o in self._session.get_outputs()]
 
+    # A single-task model is just the one-column case, so normalise here and let everything
+    # downstream treat every artifact identically. The fallback covers bundles fused before
+    # columns were recorded, which named their blended output "prediction".
+    self._columns = self.metadata.get("columns") or [
+      {
+        "name": "prediction",
+        "output": "prediction",
+        "has_hard": bool(self.metadata.get("has_hard")),
+      }
+    ]
+
   # ── what the artifact says about itself ────────────────────────────────────
 
   @property
   def columns(self) -> list[str]:
     """The task names this model predicts, in output order."""
-    cols = self.metadata.get("columns")
-    if cols:
-      return [c["name"] for c in cols]
-    return list(self._output_names)
+    return [c["name"] for c in self._columns]
 
   @property
   def n_columns(self) -> int:
-    return len(self.metadata.get("columns") or []) or 1
+    return len(self._columns)
 
   @property
   def trained_at(self) -> str | None:
@@ -110,10 +118,7 @@ class OnnxArtifact:
   @property
   def has_ground_truth(self) -> bool:
     """True if any task blends in a hard-label head, so predictions use measured data."""
-    cols = self.metadata.get("columns")
-    if cols:
-      return any(c.get("has_hard") for c in cols)
-    return bool(self.metadata.get("has_hard"))
+    return any(c.get("has_hard") for c in self._columns)
 
   @property
   def n_features(self) -> int:
@@ -167,24 +172,15 @@ class OnnxArtifact:
     Returns
     -------
     pandas.DataFrame
-        A ``smiles`` column followed by one column per task, named after the task. For a
-        single-task model that predates named columns, the model's own output names are used.
+        A ``smiles`` column followed by **one column per task** — the final blended prediction,
+        which already folds in the applicability weighting. The intermediate channels behind it
+        are available from :meth:`run_channels`.
     """
     import pandas as pd
 
     smiles = [str(s) for s in smiles]
     channels = self.run_channels(smiles, batch_size=batch_size)
-
-    cols = self.metadata.get("columns")
-    if cols:  # multi-task: one blended prediction per task, named after the task
-      values = {c["name"]: channels[c["output"]] for c in cols}
-    else:  # single-task bundle: keep the model's own channel names
-      order = [
-        n
-        for n in ("prediction", "surrogate", "ground_truth_soft", "ground_truth", "applicability")
-        if n in channels
-      ]
-      values = {n: channels[n] for n in order or self._output_names}
+    values = {c["name"]: channels[c["output"]] for c in self._columns}
     return pd.DataFrame({"smiles": smiles, **values})
 
   def __len__(self) -> int:
