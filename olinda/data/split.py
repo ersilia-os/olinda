@@ -42,6 +42,63 @@ def _write_split_h5(
         bar.update(min(j + len(sl), m))
 
 
+def split_reference_to_indices(
+  y, val_frac: float = 0.1, seed: int = 42, limit: int | None = None
+) -> tuple[np.ndarray, np.ndarray, dict]:
+  """Value-stratified train/val split of the reference library, returned as row indices.
+
+  The split is the same one :func:`split_reference_to_h5` performs — rows sorted by value with
+  equally-spaced-by-rank validation, then shuffled — but nothing is read or written. Multi-column runs
+  need one of these per column while sharing a single copy of the descriptor matrix, so materialising
+  the features per column (~11 GB each) is avoided entirely.
+
+  Parameters
+  ----------
+  y : array-like
+      Teacher value per reference row. Non-finite entries are excluded from both splits.
+  val_frac : float, optional
+      Validation fraction, taken equally-spaced by value rank.
+  seed : int, optional
+      Shuffle seed.
+  limit : int, optional
+      Consider only the first N reference rows (development subsampling).
+
+  Returns
+  -------
+  (np.ndarray, np.ndarray, dict)
+      Shuffled ``train_idx`` and ``val_idx`` (int64, indices into the reference library), and an
+      ``info`` dict with ``n_total``, ``n_used``, ``n_dropped``, ``vmin`` and ``vmax``.
+  """
+  y = np.asarray(y, dtype=np.float32)
+  n_total = len(y)
+  if limit is not None and limit < n_total:
+    n_total = int(limit)
+    y = y[:n_total]
+
+  valid = np.where(np.isfinite(y))[0]
+  m = len(valid)
+  if m < 2:
+    raise ValueError("need at least 2 finite reference-calcs values to split")
+
+  order = valid[np.argsort(y[valid], kind="stable")]
+  n_val = max(1, min(int(round(m * val_frac)), m - 1))
+  val_pos = np.unique(np.round(np.linspace(0, m - 1, n_val)).astype(np.int64))
+  is_val = np.zeros(m, dtype=bool)
+  is_val[val_pos] = True
+
+  rng = np.random.default_rng(seed)
+  train_idx = rng.permutation(order[~is_val])
+  val_idx = rng.permutation(order[is_val])
+  info = {
+    "n_total": int(n_total),
+    "n_used": int(m),
+    "n_dropped": int(n_total - m),
+    "vmin": float(y[valid].min()),
+    "vmax": float(y[valid].max()),
+  }
+  return train_idx.astype(np.int64), val_idx.astype(np.int64), info
+
+
 def split_reference_to_h5(
   descriptors_h5: str | Path,
   y,
@@ -95,33 +152,16 @@ def split_reference_to_h5(
 
     rule("olinda · reference split", right=f"{n_total:,} compounds")
 
-    finite = np.isfinite(y)
-    valid = np.where(finite)[0]
-    m = len(valid)
-    n_dropped = int(n_total - m)
-    if m < 2:
-      raise ValueError("need at least 2 finite reference-calcs values to split")
+    train_shuf, val_shuf, info = split_reference_to_indices(y, val_frac=val_frac, seed=seed)
+    m, n_dropped = info["n_used"], info["n_dropped"]
+    vmin, vmax = info["vmin"], info["vmax"]
     if n_dropped:
       echo(f"Dropped {n_dropped:,} non-finite value(s)", "warning")
-
-    # Sort valid rows by value, take equally-spaced-by-rank samples as validation.
-    order = valid[np.argsort(y[valid], kind="stable")]
-    n_val = max(1, min(int(round(m * val_frac)), m - 1))
-    val_pos = np.unique(np.round(np.linspace(0, m - 1, n_val)).astype(np.int64))
-    is_val = np.zeros(m, dtype=bool)
-    is_val[val_pos] = True
-    val_idx = order[is_val]
-    train_idx = order[~is_val]
     echo(
-      f"Value-stratified split · {val_frac:.0%} validation ({len(train_idx):,} train · {len(val_idx):,} val)",
+      f"Value-stratified split · {val_frac:.0%} validation ({len(train_shuf):,} train · {len(val_shuf):,} val)",
       "run",
     )
 
-    rng = np.random.default_rng(seed)
-    train_shuf = rng.permutation(train_idx)
-    val_shuf = rng.permutation(val_idx)
-
-    vmin, vmax = float(y[valid].min()), float(y[valid].max())
     echo("Loading descriptors into memory", "run")
     x_all = np.asarray(data[:n_total], dtype=np.float32)  # one sequential read (fast)
 
@@ -136,8 +176,8 @@ def split_reference_to_h5(
     [
       ("Total", f"{n_total:,}"),
       ("Used", f"[bold]{m:,}[/]" + (f"  [dim]({n_dropped:,} dropped)[/]" if n_dropped else "")),
-      ("Train", f"[bold]{len(train_idx):,}[/]  [dim]shuffled[/]"),
-      ("Val", f"[bold]{len(val_idx):,}[/]  [dim]{val_frac:.0%} · stratified · shuffled[/]"),
+      ("Train", f"[bold]{len(train_shuf):,}[/]  [dim]shuffled[/]"),
+      ("Val", f"[bold]{len(val_shuf):,}[/]  [dim]{val_frac:.0%} · stratified · shuffled[/]"),
       ("Value range", f"{vmin:.4g} … {vmax:.4g}"),
       ("Output", f"[dim]{train_path}[/]  ·  [dim]{val_path}[/]"),
     ],

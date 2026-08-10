@@ -125,6 +125,20 @@ class XGBoostBackend:
     dval = build_qdmatrix(val_h5, max_bin=max_bin, ref=dtrain, bin_edges=bin_edges, bin_weights=bin_weights)
     return dtrain, dval
 
+  # -- multi-column path (one resident library, per-column indices) --
+  def build_train_val_indexed(self, matrix, y, train_idx, val_idx, max_bin, bin_edges, bin_weights):
+    """Same as :meth:`build_train_val` but reading a shared in-RAM matrix by index."""
+    import xgboost as xgb
+
+    from olinda.data.dataset import IndexDataIter
+
+    def _qdm(idx, ref=None):
+      it = IndexDataIter(matrix, y, idx, bin_edges=bin_edges, bin_weights=bin_weights)
+      return xgb.QuantileDMatrix(it, max_bin=int(max_bin), ref=ref)
+
+    dtrain = _qdm(train_idx)
+    return dtrain, _qdm(val_idx, ref=dtrain)
+
   def train(
     self, dtrain, dval, native_params, num_boost_round, early_stopping, train_weighted, val_eval=None
   ):
@@ -290,6 +304,29 @@ class LightGBMBackend:
     dtrain = _ds(train_h5)
     dval = _ds(val_h5, reference=dtrain)
     return dtrain, dval
+
+  # -- multi-column path (one resident library, per-column indices) --
+  def build_train_val_indexed(self, matrix, y, train_idx, val_idx, max_bin, bin_edges, bin_weights):
+    """Same as :meth:`build_train_val` but reading a shared in-RAM matrix by index."""
+    import lightgbm as lgb
+
+    from olinda.data import apply_bin_weights
+    from olinda.data.matrix import index_sequence
+
+    def _ds(idx, reference=None):
+      yy = np.asarray(y, dtype=np.float32)[idx]
+      w = apply_bin_weights(yy, bin_edges, bin_weights) if bin_edges is not None else None
+      return lgb.Dataset(
+        index_sequence(matrix, idx),
+        label=yy,
+        weight=w,
+        params={"max_bin": int(max_bin), "verbosity": -1},
+        reference=reference,
+        free_raw_data=False,
+      )
+
+    dtrain = _ds(train_idx)
+    return dtrain, _ds(val_idx, reference=dtrain)
 
   def train(
     self, dtrain, dval, native_params, num_boost_round, early_stopping, train_weighted, val_eval=None

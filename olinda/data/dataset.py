@@ -256,6 +256,62 @@ def resolve_regression_weights(
   return edges, weights, info
 
 
+class IndexDataIter(xgb.DataIter):
+  """Streams rows of an in-RAM :class:`~olinda.data.matrix.ReferenceMatrix` selected by index.
+
+  The multi-column counterpart of :class:`H5DataIter`: instead of reading a per-column HDF5 split
+  contiguously, it gathers this column's rows from the one resident copy of the reference library.
+  Only a single batch is float32 at a time, so peak memory is the library (uint8) plus one batch.
+  """
+
+  def __init__(
+    self,
+    matrix,
+    y: np.ndarray,
+    idx: np.ndarray,
+    batch_rows: int = 65536,
+    bin_edges: np.ndarray | None = None,
+    bin_weights: np.ndarray | None = None,
+  ) -> None:
+    super().__init__()
+    self.matrix = matrix
+    self.idx = np.asarray(idx)
+    self.y = np.asarray(y, dtype=np.float32)
+    self.batch_rows = int(batch_rows)
+    self.bin_edges = bin_edges
+    self.bin_weights = bin_weights
+    self._n = int(len(self.idx))
+    self._pos = 0
+
+  @property
+  def n_rows(self) -> int:
+    return self._n
+
+  @property
+  def n_cols(self) -> int:
+    return int(self.matrix.n_cols)
+
+  def reset(self) -> None:
+    self._pos = 0
+
+  def next(self, input_data) -> bool:  # type: ignore[override]
+    if self._pos >= self._n:
+      return False
+    j = min(self._pos + self.batch_rows, self._n)
+    rows = self.idx[self._pos : j]
+    x = self.matrix.gather(rows)
+    y = self.y[rows]
+    kwargs = {"data": x, "label": y}
+    if self.bin_edges is not None and self.bin_weights is not None:
+      kwargs["weight"] = apply_bin_weights(y, self.bin_edges, self.bin_weights)
+    input_data(**kwargs)
+    self._pos = j
+    return True
+
+  def close(self) -> None:
+    return None
+
+
 class H5DataIter(xgb.DataIter):
   """Streams an HDF5 split (`x` float32 (m, dim), `y` float32 (m,)) into XGBoost sequentially.
 

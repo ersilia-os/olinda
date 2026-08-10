@@ -1,0 +1,79 @@
+"""One resident copy of the reference descriptors, shared by every column of a run.
+
+Multi-column runs train K independent students over the *same* feature matrix, so materialising a
+per-column split would write ~11 GB of near-identical float32 per column. Instead the library is read
+once into RAM as uint8 (~2.8 GB for 1.35M x 2048) and each column addresses it through its own index
+arrays.
+
+Reading scattered rows straight from HDF5 is not a viable alternative — measured on the real library,
+a 65,536-row gather takes ~49 s from disk versus ~0.05 s from RAM, a ~1000x difference. The whole
+library loads in one sequential read in well under a second, so the resident copy is both faster and
+simpler. uint8 -> float32 conversion happens per batch, never for the whole matrix.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+
+_BATCH_ROWS = 65536
+
+
+class ReferenceMatrix:
+  """The reference-library descriptors held in RAM, addressed by row index.
+
+  Parameters
+  ----------
+  x : np.ndarray
+      The descriptor matrix, ``(n, dim)``, normally uint8 as stored in ``erl0_morgan.h5``.
+
+  Attributes
+  ----------
+  n_rows, n_cols : int
+      Shape of the underlying matrix.
+  """
+
+  def __init__(self, x: np.ndarray) -> None:
+    self.x = x
+    self.n_rows = int(x.shape[0])
+    self.n_cols = int(x.shape[1])
+
+  @classmethod
+  def load(cls, descriptors_h5: str | Path, dataset: str = "data") -> ReferenceMatrix:
+    """Read the whole descriptor dataset into RAM in one sequential pass."""
+    import h5py
+
+    with h5py.File(str(descriptors_h5), "r") as f:
+      return cls(f[dataset][:])
+
+  def gather(self, idx: np.ndarray, dtype=np.float32) -> np.ndarray:
+    """Return the rows at ``idx`` as a new array of ``dtype``."""
+    return np.asarray(self.x[idx], dtype=dtype)
+
+  def nbytes(self) -> int:
+    return int(self.x.nbytes)
+
+
+def index_sequence(matrix: ReferenceMatrix, idx: np.ndarray, batch_rows: int = _BATCH_ROWS):
+  """Return an ``lgb.Sequence`` over ``matrix`` restricted to ``idx``.
+
+  LightGBM only ever asks a Sequence for a single row or a contiguous slice, both of which map onto
+  an index gather. Built lazily so importing this module does not pull lightgbm.
+  """
+  import lightgbm as lgb
+
+  class _IndexSeq(lgb.Sequence):
+    def __init__(self) -> None:
+      self.matrix = matrix
+      self.idx = np.asarray(idx)
+      self.batch_size = int(batch_rows)
+
+    def __getitem__(self, item):
+      # LightGBM samples in double for bin construction, so float64 here (not float32).
+      return self.matrix.gather(self.idx[item], dtype=np.float64)
+
+    def __len__(self) -> int:
+      return int(len(self.idx))
+
+  return _IndexSeq()

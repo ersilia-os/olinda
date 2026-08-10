@@ -16,6 +16,83 @@ from olinda.helpers import logger
 _VERIFY_CHUNK = 100_000
 _SMILES_NAMES = ("smiles", "input")
 
+MAX_COLUMNS = 10
+"""Most value columns a soft-label file may carry.
+
+Each column becomes an independent student fused into one ``model.onnx``. At ~60 MB per column that
+keeps the bundle around 600 MB, well under ONNX's 2 GB protobuf ceiling (~35 columns).
+"""
+
+_HARD_SEPARATORS = ("_", "-")
+
+
+def check_column_budget(columns) -> None:
+  """Raise if a soft-label file carries more value columns than :data:`MAX_COLUMNS`."""
+  if len(columns) > MAX_COLUMNS:
+    raise ValueError(
+      f"soft-label file has {len(columns)} value columns; the maximum is {MAX_COLUMNS}. "
+      f"Drop columns before distilling. Found: {list(columns)}"
+    )
+
+
+def match_hard_columns(soft_columns, hard_columns) -> dict:
+  """Map each hard-label column onto the soft column it provides ground truth for.
+
+  A hard column matches a soft column by exact name, or — because teacher outputs are often the same
+  name with a suffix (``abaumannii_inhibition`` → ``abaumannii_inhibition_probability``) — by being a
+  prefix of exactly one soft column, up to a ``_`` or ``-`` separator. Requiring the separator stops
+  ``tox`` from silently matching ``toxicity_probability``.
+
+  Parameters
+  ----------
+  soft_columns : sequence of str
+      Value columns of the soft-label file.
+  hard_columns : sequence of str
+      Value columns of the hard-label file.
+
+  Returns
+  -------
+  dict
+      ``{hard_column: soft_column}``. Soft columns with no hard counterpart are simply absent, and
+      stay soft-only.
+
+  Raises
+  ------
+  ValueError
+      If a hard column matches no soft column, matches more than one, or if two hard columns claim
+      the same soft column.
+  """
+  soft = [str(c) for c in soft_columns]
+  mapping: dict[str, str] = {}
+  problems: list[str] = []
+
+  for raw in hard_columns:
+    hard = str(raw)
+    if hard in soft:
+      mapping[hard] = hard
+      continue
+    candidates = [s for s in soft if any(s.startswith(hard + sep) for sep in _HARD_SEPARATORS)]
+    if len(candidates) == 1:
+      mapping[hard] = candidates[0]
+    elif not candidates:
+      problems.append(f"hard column '{hard}' matches no soft column")
+    else:
+      problems.append(f"hard column '{hard}' is ambiguous — matches {candidates}")
+
+  claimed: dict[str, str] = {}
+  for hard, target in mapping.items():
+    if target in claimed:
+      problems.append(f"soft column '{target}' claimed by both '{claimed[target]}' and '{hard}'")
+    claimed[target] = hard
+
+  if problems:
+    raise ValueError(
+      "could not align hard labels with soft labels:\n  - "
+      + "\n  - ".join(problems)
+      + f"\nsoft columns: {soft}\nhard columns: {[str(c) for c in hard_columns]}"
+    )
+  return mapping
+
 
 def resolve_smiles_frame(df):
   """Return ``(smiles, values)`` where ``values`` holds every value column after the SMILES column.
