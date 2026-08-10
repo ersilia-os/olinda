@@ -5,13 +5,15 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from loguru import logger as _loguru
-from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-console = Console()
+# One console for the whole package. A second Console() here would own its own cursor state and
+# interleave badly with the live progress bars in olinda.console (Live repaints assume it is the only
+# writer), producing torn or duplicated lines.
+from olinda.console import console as console
 
 _loguru.remove()
 
@@ -52,7 +54,7 @@ class Logger:
     self._loguru.success(msg)
 
   @property
-  def rich(self) -> Console:
+  def rich(self):
     """Direct access to the shared Rich console for advanced output."""
     return self._console
 
