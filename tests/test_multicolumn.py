@@ -73,6 +73,18 @@ def _run(args):
   return CliRunner().invoke(cli, args)
 
 
+def _plain(result) -> str:
+  """A command's output as one flat line: no ANSI, no wrapping.
+
+  Rich sizes itself to the terminal, so the same message is one line in a wide shell and two on CI at
+  80 columns — asserting on a phrase that straddles the break fails only there. Collapsing whitespace
+  makes these assertions about what was said, not about how it happened to be laid out.
+  """
+  import re
+
+  return re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", result.output))
+
+
 def _steps(soft, md, hard=None, *, val_frac="0.2", rounds="40"):
   """Drive the pipeline step by step, i.e. everything ``fit`` does except the closing ``clean``.
 
@@ -162,7 +174,7 @@ def test_more_than_ten_columns_is_rejected(tmp_path, monkeypatch):
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=11)
   r = _run(["prepare", "-s", str(soft), "-m", str(tmp_path / "run")])
   assert r.exit_code != 0
-  assert "11 value columns" in r.output and "10" in r.output
+  assert "11 value columns" in _plain(r) and "10" in _plain(r)
 
 
 def test_fused_graph_has_no_duplicate_names(tmp_path, monkeypatch):
@@ -224,7 +236,7 @@ def test_export_rejects_an_untrained_run(tmp_path, monkeypatch):
 
   r = _run(["export", "-m", str(md)])  # prepared but never trained
   assert r.exit_code != 0
-  assert "not trained yet" in r.output
+  assert "not trained yet" in _plain(r)
 
 
 def test_elapsed_covers_the_whole_command_not_the_last_column(tmp_path, monkeypatch):
@@ -264,7 +276,7 @@ def test_reusing_a_run_directory_is_caught_not_silently_wrong(tmp_path, monkeypa
 
   r = _run(["export", "-m", str(md)])  # the stale booster must not be fused under the new name
   assert r.exit_code != 0
-  assert "stale" in r.output and "trained for column" in r.output
+  assert "stale" in _plain(r) and "trained for column" in _plain(r)
 
 
 def test_a_changed_reference_library_is_refused(tmp_path, monkeypatch):
@@ -285,7 +297,7 @@ def test_a_changed_reference_library_is_refused(tmp_path, monkeypatch):
 
   r = _run(["learn-soft", "-m", str(md), "--num-boost-round", "40"])
   assert r.exit_code != 0
-  assert "library changed" in r.output or "prepared against" in r.output
+  assert "library changed" in _plain(r) or "prepared against" in _plain(r)
 
 
 def test_an_interrupted_learn_hard_does_not_brick_the_run(tmp_path, monkeypatch):
@@ -412,7 +424,7 @@ def test_clean_refuses_without_a_model_and_removes_nothing(tmp_path, monkeypatch
 
   r = _run(["clean", "-m", str(md)])
   assert r.exit_code != 0
-  assert "no model.onnx" in r.output
+  assert "no model.onnx" in _plain(r)
   assert (md / "manifest.json").exists() and (md / "targets.h5").exists()
 
 
@@ -425,7 +437,7 @@ def test_cleaning_twice_is_harmless(tmp_path, monkeypatch):
 
   r = _run(["clean", "-m", str(md)])  # fit already cleaned; this one has nothing left to do
   assert r.exit_code == 0, r.output
-  assert "already clean" in r.output
+  assert "already clean" in _plain(r)
   assert (md / "model.onnx").exists()
 
 
