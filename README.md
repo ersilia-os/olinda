@@ -36,9 +36,12 @@ Fetch the reference library once (~2.8 GB), then fit:
 
 ```bash
 olinda setup
-olinda fit -s teacher.csv -m runs/my_model
-olinda predict -m runs/my_model/model.onnx -i compounds.csv -o predictions.csv
+olinda fit -s teacher.csv -m runs/my_model.onnx
+olinda predict -m runs/my_model.onnx -i compounds.csv -o predictions.csv
 ```
+
+`-m` names the artifact you want. `fit` builds the run in `runs/my_model/` beside it and deletes that
+folder once everything has fused, so what you keep is one file.
 
 `teacher.csv` holds a `smiles` column plus one or more value columns, covering **exactly the
 reference-library molecules in the same order** — olinda verifies this and refuses otherwise.
@@ -52,7 +55,7 @@ no separate mode.
 If you also have real measurements, pass them with `-h`:
 
 ```bash
-olinda fit -s teacher.csv -h measured.csv -m runs/my_model
+olinda fit -s teacher.csv -h measured.csv -m runs/my_model.onnx
 ```
 
 `measured.csv` is a `smiles` column plus one column per assay, left empty where a compound was not
@@ -82,21 +85,16 @@ the distilled surrogate. That weighting is already inside the number `run()` ret
 | `learn-soft` | Train the surrogate for every column |
 | `learn-hard` | Train and calibrate the ground-truth head |
 | `export` | Rebuild `model.onnx` from a trained run |
-| `clean` | Delete the working files, keeping only `model.onnx` |
+| `clean` | Move the model out and delete the run folder |
 
-Every step shares one `--model-dir`. The engine is picked from your hardware — XGBoost on a CUDA GPU,
-LightGBM on CPU — and `OLINDA_BACKEND` overrides it.
+`fit`, `predict` and `clean` take `-m` as a path to the **`.onnx`**; the pipeline steps between them
+take `-m` as the **run folder** they share. The engine is picked from your hardware — XGBoost on a
+CUDA GPU, LightGBM on CPU — and `OLINDA_BACKEND` overrides it.
 
 ## What a run directory holds
 
-`fit` ends with `clean`, so it leaves exactly one file:
-
-```
-runs/my_model/
-  model.onnx         all columns, fused — the only file you need to ship
-```
-
-Everything else was scaffolding. Run the steps by hand and it stays:
+`fit` ends with `clean`, so all it leaves is `runs/my_model.onnx`. Everything else was scaffolding.
+Run the steps by hand — against the folder, `-m runs/my_model` — and it stays:
 
 ```
 runs/my_model/
@@ -104,12 +102,12 @@ runs/my_model/
   targets.h5         one teacher vector per column
   splits.h5          per-column train/val row indices
   columns/c0/        that column's model, metrics, calibrator, plots
-  model.onnx
+  model.onnx         all columns, fused
 ```
 
 That is the reason to take the long path — the per-column metrics and plots only exist there. When
-you are done looking, `olinda clean -m runs/my_model` collapses it to the artifact. It is one-way:
-`export` and `learn-hard` read the manifest, so neither works afterwards.
+you are done looking, `olinda clean -m runs/my_model.onnx` moves the model out and deletes the folder.
+It is one-way: `export` and `learn-hard` read the manifest, so neither works afterwards.
 
 The descriptor matrix is never copied into a run. Splits are stored as row indices into the shared
 library, which is the difference between ~100 MB and ~1 TB for a ten-column run.

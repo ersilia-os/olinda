@@ -57,25 +57,22 @@ def test_fit_soft_only_then_predict(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()
   soft = _stage_reference(home, tmp_path, monkeypatch)
-  md = tmp_path / "model"
+  onnx = tmp_path / "model.onnx"
 
-  r = _run(["fit", "-s", str(soft), "-m", str(md), "--val-frac", "0.2", "--num-boost-round", "80"])
+  r = _run(["fit", "-s", str(soft), "-m", str(onnx), "--val-frac", "0.2", "--num-boost-round", "80"])
   assert r.exit_code == 0, r.output
-  assert (md / "model.onnx").exists()
+  # the artifact is a plain file at the path asked for, and its working folder is gone
+  assert onnx.is_file()
+  assert not (tmp_path / "model").exists()
 
   q = tmp_path / "q.csv"
   pd.DataFrame({"smiles": _SM[:5]}).to_csv(q, index=False)
   out = tmp_path / "pred.csv"
-  r2 = _run(["predict", "-m", str(md / "model.onnx"), "-i", str(q), "-o", str(out)])
+  r2 = _run(["predict", "-m", str(onnx), "-i", str(q), "-o", str(out)])
   assert r2.exit_code == 0, r2.output
   df = pd.read_csv(out)
   assert list(df.columns) == ["smiles", "y"]  # one column per task, named after it
   assert len(df) == 5
-
-  # a run directory still resolves, since fit leaves exactly one artifact in it
-  out2 = tmp_path / "pred2.csv"
-  assert _run(["predict", "-m", str(md), "-i", str(q), "-o", str(out2)]).exit_code == 0
-  pd.testing.assert_frame_equal(pd.read_csv(out), pd.read_csv(out2))
 
 
 def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
@@ -88,7 +85,7 @@ def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
   xu = MorganCountFeaturizer().transform(_SM)
   lab = (xu[:, :100].sum(1) > np.median(xu[:, :100].sum(1))).astype(int)
   pd.DataFrame({"smiles": _SM, "y": lab}).to_csv(gt, index=False)  # matches the soft column
-  md = tmp_path / "model"
+  onnx = tmp_path / "model.onnx"
 
   r = _run([
     "fit",
@@ -97,7 +94,7 @@ def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
     "-h",
     str(gt),
     "-m",
-    str(md),
+    str(onnx),
     "--val-frac",
     "0.2",
     "--num-boost-round",
@@ -107,7 +104,7 @@ def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
 
   from olinda import OlindaArtifact
 
-  model = OlindaArtifact(md)
+  model = OlindaArtifact(onnx)
   assert model.has_ground_truth is True
   assert model.columns == ["y"]
   # the graph exposes exactly one output per task; the blend happens inside it

@@ -16,9 +16,10 @@ vectors and one manifest describing the whole run. A single-column run is simply
 The descriptor matrix is deliberately absent: it is the same for every column, so it is read from the
 shared reference library rather than copied per run.
 
-Everything above ``model.onnx`` is working state. ``olinda fit`` ends by calling :func:`clean_run_dir`
-to delete it, so a directory it produced holds the artifact alone; running the steps individually
-keeps it.
+The whole directory is working state. It is named after the artifact it produces — ``runs/foo.onnx``
+is built in ``runs/foo/`` — and :func:`finish_run` moves the fused model out and deletes the rest, so
+what survives is the single file the user asked for. ``olinda fit`` does that as its last stage;
+running the steps individually keeps the directory until ``olinda clean``.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ COLUMNS_DIRNAME = "columns"
 TARGETS_NAME = "targets.h5"
 SPLITS_NAME = "splits.h5"
 PARAMS_NAME = "best_params.json"
+MODEL_NAME = "model.onnx"
 
 
 def column_id(index: int) -> str:
@@ -133,38 +135,54 @@ def _size_of(path: Path) -> int:
   return path.stat().st_size
 
 
-def clean_run_dir(model_dir: str | Path) -> list[tuple[str, int]]:
-  """Remove the working files, leaving only ``model.onnx``.
+def work_dir_for(model_onnx: str | Path) -> Path:
+  """The working directory that backs an artifact path: same parent, the filename minus ``.onnx``.
 
-  Everything these files carry is inside the fused artifact by this point — the column names, their
+  ``runs/foo.onnx`` is built in ``runs/foo/`` and ends up as the file alone, so the artifact the user
+  names is the only thing that outlives the run. Rejects a path without the extension, since the
+  working directory would otherwise collide with the artifact itself.
+  """
+  path = Path(model_onnx)
+  if path.suffix != ".onnx":
+    raise ValueError(f"--model-onnx must end in .onnx, got {path.name!r}")
+  return path.with_suffix("")
+
+
+def finish_run(model_onnx: str | Path) -> tuple[Path, list[tuple[str, int]]]:
+  """Move the fused artifact to *model_onnx* and delete the working directory behind it.
+
+  Everything the working files carry is inside the artifact by this point — the column names, their
   training sizes and metrics, the featurizer, the reference library and the run's provenance — so the
   ``.onnx`` alone is a complete record. This ends the run: ``learn-hard`` and ``export`` both read the
-  manifest, so neither can run afterwards. ``olinda fit`` calls this as its last stage, after the
-  final fuse; driving the steps by hand leaves the run intact.
+  manifest, and it is gone.
 
   Returns
   -------
-  list of (str, int)
-      What was removed, and how many bytes each entry freed. Empty if there was nothing left to
-      remove, so calling this twice is harmless.
+  (Path, list of (str, int))
+      The artifact's final path, and what was removed with the bytes each entry freed. The list is
+      empty when there was nothing left to remove, so calling this twice is harmless.
   """
   import shutil
 
-  model_dir = Path(model_dir)
-  if not (model_dir / "model.onnx").exists():
-    raise FileNotFoundError(f"refusing to clean {model_dir}: no model.onnx to keep")
+  model_onnx = Path(model_onnx)
+  work = work_dir_for(model_onnx)
+  built = work / MODEL_NAME
 
-  removed = []
-  for name in (MANIFEST_NAME, TARGETS_NAME, SPLITS_NAME, PARAMS_NAME):
-    path = model_dir / name
-    if path.exists():
-      removed.append((name, _size_of(path)))
-      path.unlink()
-  columns = model_dir / COLUMNS_DIRNAME
-  if columns.exists():
-    removed.append((f"{COLUMNS_DIRNAME}/", _size_of(columns)))
-    shutil.rmtree(columns)
-  return removed
+  if not work.exists():
+    # Already finished: the artifact is in place and its scaffolding is gone.
+    if model_onnx.exists():
+      return model_onnx, []
+    raise FileNotFoundError(f"no run at {work} and no artifact at {model_onnx}")
+  if not built.exists():
+    raise FileNotFoundError(f"refusing to finish {work}: no {MODEL_NAME} to keep")
+
+  freed = [(f"{work.name}/", _size_of(work) - _size_of(built))]
+  model_onnx.parent.mkdir(parents=True, exist_ok=True)
+  # Replace, rather than refuse: re-fitting to the same artifact path is the normal case, and the
+  # move is what makes the run's own directory disposable.
+  os.replace(built, model_onnx)
+  shutil.rmtree(work)
+  return model_onnx, freed
 
 
 def find_column(manifest: dict, name_or_id: str) -> dict:

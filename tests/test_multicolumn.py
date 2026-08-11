@@ -74,15 +74,18 @@ def _run(args):
 
 
 def _plain(result) -> str:
-  """A command's output as one flat line: no ANSI, no wrapping.
+  """A command's output as one flat line: no ANSI, no box drawing, no wrapping.
 
-  Rich sizes itself to the terminal, so the same message is one line in a wide shell and two on CI at
-  80 columns — asserting on a phrase that straddles the break fails only there. Collapsing whitespace
+  Rich sizes itself to the terminal, so the same message is one line in a wide shell and several on
+  CI at 80 columns. Worse, a message inside an error panel is wrapped *around the border*, so the
+  raw text reads ``is left │ │ over from another run``. Stripping the frame and collapsing whitespace
   makes these assertions about what was said, not about how it happened to be laid out.
   """
   import re
 
-  return re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", result.output))
+  text = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", result.output)
+  text = re.sub(r"[│┃╭╮╰╯─━┏┓┗┛]", " ", text)
+  return re.sub(r"\s+", " ", text)
 
 
 def _steps(soft, md, hard=None, *, val_frac="0.2", rounds="40"):
@@ -105,14 +108,15 @@ def test_three_columns_fit_and_predict(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=3)
-  md = tmp_path / "run"
+  art = tmp_path / "run.onnx"
 
-  r = _run(["fit", "-s", str(soft), "-m", str(md), "--val-frac", "0.2", "--num-boost-round", "40"])
+  r = _run(["fit", "-s", str(soft), "-m", str(art), "--val-frac", "0.2", "--num-boost-round", "40"])
   assert r.exit_code == 0, r.output
-  # fit cleans up after itself: the artifact is the whole run directory
-  assert [p.name for p in md.iterdir()] == ["model.onnx"]
+  # fit finishes into the artifact it was asked for, and its working folder is gone
+  assert art.is_file()
+  assert not (tmp_path / "run").exists()
 
-  model = OlindaArtifact(md)
+  model = OlindaArtifact(art)
   expected = [f"assay{i}_probability" for i in range(3)]
   assert model.columns == expected
   df = model.run(_SM[:5])
@@ -125,13 +129,13 @@ def test_columns_are_independent_models(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=3)
-  md = tmp_path / "run"
+  art = tmp_path / "run.onnx"
   assert (
-    _run(["fit", "-s", str(soft), "-m", str(md), "--val-frac", "0.2", "--num-boost-round", "40"]).exit_code
+    _run(["fit", "-s", str(soft), "-m", str(art), "--val-frac", "0.2", "--num-boost-round", "40"]).exit_code
     == 0
   )
 
-  model = OlindaArtifact(md)
+  model = OlindaArtifact(art)
   values = model.run(_SM[:8])[model.columns].to_numpy()
   assert not np.allclose(values[:, 0], values[:, 1])
 
@@ -182,10 +186,10 @@ def test_fused_graph_has_no_duplicate_names(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=3)
-  md = tmp_path / "run"
-  assert _run(["fit", "-s", str(soft), "-m", str(md), "--num-boost-round", "40"]).exit_code == 0
+  art = tmp_path / "run.onnx"
+  assert _run(["fit", "-s", str(soft), "-m", str(art), "--num-boost-round", "40"]).exit_code == 0
 
-  m = onnx.load(str(md / "model.onnx"), load_external_data=False)
+  m = onnx.load(str(art), load_external_data=False)
   init_names = [i.name for i in m.graph.initializer]
   node_names = [n.name for n in m.graph.node if n.name]
   assert len(init_names) == len(set(init_names)), "duplicate initializer names"
@@ -199,10 +203,10 @@ def test_metadata_is_valid_json_and_self_contained(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=2)
-  md = tmp_path / "run"
-  assert _run(["fit", "-s", str(soft), "-m", str(md), "--num-boost-round", "40"]).exit_code == 0
+  art = tmp_path / "run.onnx"
+  assert _run(["fit", "-s", str(soft), "-m", str(art), "--num-boost-round", "40"]).exit_code == 0
 
-  model = OlindaArtifact(md / "model.onnx")
+  model = OlindaArtifact(art)
 
   def reject_constant(c):
     raise ValueError(f"non-finite {c} is not valid JSON")
@@ -246,7 +250,7 @@ def test_elapsed_covers_the_whole_command_not_the_last_column(tmp_path, monkeypa
   home = tmp_path / "home"
   home.mkdir()
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=3)
-  r = _run(["fit", "-s", str(soft), "-m", str(tmp_path / "run"), "--num-boost-round", "40"])
+  r = _run(["fit", "-s", str(soft), "-m", str(tmp_path / "run.onnx"), "--num-boost-round", "40"])
   assert r.exit_code == 0, r.output
   plain = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", r.output)
   # learn-soft's summary reports one Elapsed; it must not be a per-column figure of 0s
@@ -380,31 +384,32 @@ def test_the_step_by_step_path_keeps_the_working_files(tmp_path, monkeypatch):
 
 
 def test_cleaning_does_not_change_predictions(tmp_path, monkeypatch):
-  """The claim the whole step rests on: a cleaned run predicts identically."""
-  md = _fit_with_hard(tmp_path, monkeypatch)
+  """The claim the whole step rests on: finishing a run predicts identically."""
+  md = _fit_with_hard(tmp_path, monkeypatch)  # the step-by-step path, so the folder still exists
+  art = md.with_suffix(".onnx")
   before = OlindaArtifact(md).run(_SM)
 
-  r = _run(["clean", "-m", str(md)])
+  r = _run(["clean", "-m", str(art)])
   assert r.exit_code == 0, r.output
-  assert [p.name for p in md.iterdir()] == ["model.onnx"]
+  assert art.is_file() and not md.exists()
 
-  after = OlindaArtifact(md).run(_SM)
+  after = OlindaArtifact(art).run(_SM)
   pd.testing.assert_frame_equal(before, after)
 
 
 def test_tuning_leaves_nothing_behind_either(tmp_path, monkeypatch):
-  """`tune` writes best_params.json into the run root, so `clean` has to take it too."""
+  """`tune` writes best_params.json into the run root, so finishing has to take it too."""
   pytest.importorskip("optuna")
   home = tmp_path / "home"
   home.mkdir()
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=1)
-  md = tmp_path / "run"
+  art = tmp_path / "run.onnx"
   r = _run([
     "fit",
     "-s",
     str(soft),
     "-m",
-    str(md),
+    str(art),
     "--num-boost-round",
     "40",
     "--tune",
@@ -412,7 +417,46 @@ def test_tuning_leaves_nothing_behind_either(tmp_path, monkeypatch):
     "2",
   ])
   assert r.exit_code == 0, r.output
-  assert [p.name for p in md.iterdir()] == ["model.onnx"]
+  assert art.is_file() and not (tmp_path / "run").exists()
+
+
+def test_fit_rejects_a_path_without_the_onnx_extension(tmp_path, monkeypatch):
+  """The working folder is the artifact path minus the suffix, so the suffix cannot be optional."""
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=1)
+
+  r = _run(["fit", "-s", str(soft), "-m", str(tmp_path / "run"), "--num-boost-round", "40"])
+  assert r.exit_code != 0
+  assert "must end in .onnx" in _plain(r)
+
+
+def test_fit_refuses_to_reuse_a_prepared_working_folder(tmp_path, monkeypatch):
+  """Column dirs are bound positionally to the teacher that made them — never mix two runs."""
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=1)
+  assert _run(["prepare", "-s", str(soft), "-m", str(tmp_path / "run")]).exit_code == 0
+
+  r = _run(["fit", "-s", str(soft), "-m", str(tmp_path / "run.onnx"), "--num-boost-round", "40"])
+  assert r.exit_code != 0
+  assert "holds another run" in _plain(r)
+
+
+def test_fit_retries_after_an_early_failure(tmp_path, monkeypatch):
+  """A fit that dies before prepare completes leaves an empty folder; that must not block the retry."""
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=1)
+  art = tmp_path / "run.onnx"
+
+  bad = _run(["fit", "-s", str(tmp_path / "nope.csv"), "-m", str(art), "--num-boost-round", "40"])
+  assert bad.exit_code != 0
+  assert (tmp_path / "run").exists()  # the folder was created before the input was read
+
+  good = _run(["fit", "-s", str(soft), "-m", str(art), "--num-boost-round", "40"])
+  assert good.exit_code == 0, good.output
+  assert art.is_file() and not (tmp_path / "run").exists()
 
 
 def test_clean_refuses_without_a_model_and_removes_nothing(tmp_path, monkeypatch):
@@ -422,7 +466,7 @@ def test_clean_refuses_without_a_model_and_removes_nothing(tmp_path, monkeypatch
   md = tmp_path / "run"
   assert _run(["prepare", "-s", str(soft), "-m", str(md)]).exit_code == 0  # prepared, never fused
 
-  r = _run(["clean", "-m", str(md)])
+  r = _run(["clean", "-m", str(tmp_path / "run.onnx")])
   assert r.exit_code != 0
   assert "no model.onnx" in _plain(r)
   assert (md / "manifest.json").exists() and (md / "targets.h5").exists()
@@ -432,13 +476,13 @@ def test_cleaning_twice_is_harmless(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=1)
-  md = tmp_path / "run"
-  assert _run(["fit", "-s", str(soft), "-m", str(md), "--num-boost-round", "40"]).exit_code == 0
+  art = tmp_path / "run.onnx"
+  assert _run(["fit", "-s", str(soft), "-m", str(art), "--num-boost-round", "40"]).exit_code == 0
 
-  r = _run(["clean", "-m", str(md)])  # fit already cleaned; this one has nothing left to do
+  r = _run(["clean", "-m", str(art)])  # fit already finished it; nothing left to do
   assert r.exit_code == 0, r.output
   assert "already clean" in _plain(r)
-  assert (md / "model.onnx").exists()
+  assert art.is_file()
 
 
 def _fit_with_hard(tmp_path, monkeypatch):

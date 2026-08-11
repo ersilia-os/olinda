@@ -98,13 +98,13 @@ def test_fit_and_predict_on_lightgbm(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=2)
-  md = tmp_path / "run"
+  onnx = tmp_path / "run.onnx"
 
-  r = _run(["fit", "-s", str(soft), "-m", str(md), "--val-frac", "0.2", "--num-boost-round", "40"])
+  r = _run(["fit", "-s", str(soft), "-m", str(onnx), "--val-frac", "0.2", "--num-boost-round", "40"])
   assert r.exit_code == 0, r.output
-  assert [p.name for p in md.iterdir()] == ["model.onnx"]
+  assert onnx.is_file() and not (tmp_path / "run").exists()
 
-  model = OlindaArtifact(md)
+  model = OlindaArtifact(onnx)
   assert model.columns == ["assay0_probability", "assay1_probability"]
   assert model.metadata["backend"] == "lightgbm"
   values = model.run(_SM[:6])[model.columns].to_numpy()
@@ -124,10 +124,10 @@ def test_hard_head_fuses_on_lightgbm(tmp_path, monkeypatch):
     hard, index=False
   )
 
-  md = tmp_path / "run"
-  r = _run(["fit", "-s", str(soft), "-h", str(hard), "-m", str(md), "--num-boost-round", "40"])
+  onnx = tmp_path / "run.onnx"
+  r = _run(["fit", "-s", str(soft), "-h", str(hard), "-m", str(onnx), "--num-boost-round", "40"])
   assert r.exit_code == 0, r.output
 
-  model = OlindaArtifact(md)
+  model = OlindaArtifact(onnx)
   assert model.has_ground_truth is True
   assert np.isfinite(model.run(_SM[:4])[model.columns[0]].to_numpy()).all()
