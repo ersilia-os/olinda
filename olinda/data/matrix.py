@@ -86,8 +86,10 @@ class ReferenceMatrix:
 def index_sequence(matrix: ReferenceMatrix, idx: np.ndarray, batch_rows: int = _BATCH_ROWS):
   """Return an ``lgb.Sequence`` over ``matrix`` restricted to ``idx``.
 
-  LightGBM only ever asks a Sequence for a single row or a contiguous slice, both of which map onto
-  an index gather. Built lazily so importing this module does not pull lightgbm.
+  LightGBM asks a Sequence for a contiguous slice when it streams rows into the Dataset, and for a
+  *single* row — a bare int — when it samples to build the feature bins. The two answers have
+  different shapes: 2-D for a slice, 1-D for a row. Built lazily so importing this module does not
+  pull lightgbm.
   """
   import lightgbm as lgb
 
@@ -99,6 +101,8 @@ def index_sequence(matrix: ReferenceMatrix, idx: np.ndarray, batch_rows: int = _
 
     def __getitem__(self, item):
       # LightGBM samples in double for bin construction, so float64 here (not float32).
+      if np.isscalar(item) or isinstance(item, np.integer):
+        return np.asarray(self.matrix.x[self.idx[item]], dtype=np.float64)
       return self.matrix.gather(self.idx[item], dtype=np.float64)
 
     def __len__(self) -> int:
