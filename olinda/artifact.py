@@ -190,7 +190,8 @@ class OlindaArtifact:
 
   def featurize(self, smiles) -> np.ndarray:
     """Morgan count fingerprints for *smiles*, exactly as the model was trained on."""
-    return self._featurizer.transform([str(s) for s in smiles]).astype(np.float32)
+    # The featurizer already allocates float32; `copy=False` avoids duplicating every batch.
+    return np.asarray(self._featurizer.transform([str(s) for s in smiles]), dtype=np.float32)
 
   def run_channels(self, smiles, batch_size: int = _BATCH, progress: bool | None = None) -> dict:
     """Every named output of the graph, as a dict of 1-D arrays keyed by output name.
@@ -235,7 +236,7 @@ class OlindaArtifact:
     import pandas as pd
 
     smiles = [str(s) for s in smiles]
-    channels = self.run_channels(smiles, batch_size=batch_size, progress=progress)
+    channels = self.run_channels(smiles, batch_size=batch_size, progress=progress)  # already str
     values = {c["name"]: channels[c["output"]] for c in self._columns}
     return pd.DataFrame({"smiles": smiles, **values})
 

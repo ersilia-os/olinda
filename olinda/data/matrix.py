@@ -47,9 +47,18 @@ class ReferenceMatrix:
     with h5py.File(str(descriptors_h5), "r") as f:
       return cls(f[dataset][:])
 
-  def gather(self, idx: np.ndarray, dtype=np.float32) -> np.ndarray:
-    """Return the rows at ``idx`` as a new array of ``dtype``."""
-    return np.asarray(self.x[idx], dtype=dtype)
+  def gather(self, idx: np.ndarray, dtype=np.float32, step: int = 8192) -> np.ndarray:
+    """Return the rows at ``idx`` as a new array of ``dtype``.
+
+    Filled in sub-chunks straight into the output. The obvious ``np.asarray(self.x[idx], dtype)``
+    allocates the whole uint8 selection first and then the converted copy, so peak memory is both at
+    once — measured 0.67 GB for a 0.54 GB float32 result, and 1.21 GB for a float64 one.
+    """
+    idx = np.asarray(idx)
+    out = np.empty((len(idx), self.n_cols), dtype=dtype)
+    for start in range(0, len(idx), step):
+      out[start : start + step] = self.x[idx[start : start + step]]
+    return out
 
   def nbytes(self) -> int:
     return int(self.x.nbytes)

@@ -117,12 +117,13 @@ def _reference_path() -> Path:
   return path
 
 
-def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 200_000):
+def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 50_000):
   """Score G over every reference compound, aligned to erl0_morgan row order.
 
   Reads from the shared in-RAM matrix rather than reopening the library, so a multi-column run pays
   for one load instead of one per scan per column.
   """
+  # 50k rows x 2048 float32 is ~410 MB per chunk; 200k was 1.64 GB for the same throughput.
   n, dim = matrix.n_rows, matrix.n_cols
   if dim != n_features:
     raise ValueError(f"reference library has {dim}-d features but G expects {n_features}-d")
@@ -130,7 +131,7 @@ def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 200
   for start in range(0, n, chunk):
     xb = np.asarray(matrix.x[start : start + chunk], dtype=np.float32)
     g = np.asarray(model.predict_proba(xb))[:, 1] if task == "binary" else np.asarray(model.predict(xb))
-    out.append(g.astype(np.float32).ravel())
+    out.append(np.asarray(g, dtype=np.float32).ravel())
     echo(f"  scored {min(start + chunk, n):,}/{n:,} reference compounds", "info")
   return np.concatenate(out)
 
@@ -174,12 +175,19 @@ def _fit_applicability(gt_bits, n_features, matrix, sim_lo: float, sim_hi: float
   high_on = np.zeros((2, d), dtype=np.float64)
   n_high = n_low = 0
 
-  def _accumulate(bits, y, class_n, feat_on):
-    for c in (0, 1):
-      m = y == c
-      class_n[c] += int(m.sum())
-      if m.any():
-        feat_on[c] += bits[m].sum(axis=0)
+  def _accumulate(bits, y, class_n, feat_on, col_total):
+    """Add one chunk's Bernoulli-NB sufficient statistics for a binary target.
+
+    The per-class feature counts come from a matvec rather than ``bits[mask].sum(0)``: masking
+    materialises a copy of up to the whole chunk, four times per chunk. Both classes are exact —
+    the features are 0/1, so the sums are integers well inside float32's exact range.
+    """
+    n_pos = int(y.sum())
+    on_pos = y.astype(np.float32) @ bits
+    class_n[1] += n_pos
+    class_n[0] += int(len(y) - n_pos)
+    feat_on[1] += on_pos
+    feat_on[0] += col_total - on_pos
 
   gt_prepared = prepare_gt_bits(gt_bits)  # built once, reused for every chunk
   n = matrix.n_rows
@@ -188,8 +196,9 @@ def _fit_applicability(gt_bits, n_features, matrix, sim_lo: float, sim_hi: float
     sim = tanimoto_nn(bits, prepared=gt_prepared)
     y_low = (sim >= sim_lo).astype(np.int64)
     y_high = (sim >= sim_hi).astype(np.int64)
-    _accumulate(bits, y_low, low_n, low_on)
-    _accumulate(bits, y_high, high_n, high_on)
+    col_total = bits.sum(axis=0)  # shared by both targets' class-0 counts
+    _accumulate(bits, y_low, low_n, low_on, col_total)
+    _accumulate(bits, y_high, high_n, high_on, col_total)
     n_low += int(y_low.sum())
     n_high += int(y_high.sum())
     echo(f"  scanned {min(start + chunk, n):,}/{n:,} reference compounds", "info")
