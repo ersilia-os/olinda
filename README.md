@@ -1,12 +1,17 @@
-# Model distillation for chemistry
+# Olinda, model distillation for chemistry
 
 Some models are too slow to run on a million compounds. Olinda makes a fast one that behaves like
 them: score the slow model once over a reference library of ~1.4M molecules, train a compact
 gradient-boosting student to reproduce it, and ship the result as a single ONNX file.
 
-The student predicts in ~40 µs per molecule and needs none of the teacher's dependencies.
+## Installation
 
-## Running a model
+```bash
+pip install olinda                 # inference only: numpy, pandas, rdkit, onnxruntime
+pip install "olinda[train]"        # + the gradient-boosting stack and the CLI
+```
+
+## Running a model at inference time
 
 A distilled model is one self-describing file. The featurizer, the RDKit build it needs, the task
 names — all of it travels inside the `.onnx`, so nothing else is required to run it.
@@ -18,19 +23,7 @@ model = OlindaArtifact("model.onnx")
 model.run(["CCO", "c1ccccc1"])  # DataFrame: smiles + one column per task
 ```
 
-The file describes itself — `model.columns`, `model.trained_at`, `model.rdkit_version`,
-`model.describe()`, or `model.to_json()` for everything at once.
-
-Two things worth knowing. Fingerprints only reproduce bit-for-bit on the RDKit build the model was
-built against, so loading under a different one is **refused** rather than silently wrong. And
-molecules RDKit cannot parse come back as `NaN` with a warning, never as a number.
-
-```bash
-pip install olinda                 # inference only: numpy, pandas, rdkit, onnxruntime
-pip install "olinda[train]"        # + the gradient-boosting stack and the CLI
-```
-
-## Distilling a model
+## Distilling a model (soft labels)
 
 Fetch the reference library once (~2.8 GB), then fit:
 
@@ -50,7 +43,7 @@ Up to **10 teacher columns** in one file. Each becomes an independent student, a
 into one `model.onnx` with one output per task. A single column is just the one-column case; there is
 no separate mode.
 
-### Ground truth
+### Ground truth (hard labels)
 
 If you also have real measurements, pass them with `-h`:
 
@@ -75,11 +68,19 @@ the distilled surrogate. That weighting is already inside the number `run()` ret
 
 ## Commands
 
+The three you normally need:
+
 | | |
 |---|---|
 | `setup` | Download the reference-library fingerprints to `~/.olinda/` |
-| `fit` | Everything below, in order |
+| `fit` | Distil a teacher into one `model.onnx` |
 | `predict` | Run a model over a file of SMILES |
+
+`fit` chains the steps below. Each is also a command in its own right — run them one at a time when you
+want the per-column boosters, metrics and plots that `fit` discards:
+
+| | |
+|---|---|
 | `prepare` | Read the teacher columns and plan each one's split |
 | `tune` | Optional Optuna pass; single-column runs only |
 | `learn-soft` | Train the surrogate for every column |
@@ -91,23 +92,6 @@ the distilled surrogate. That weighting is already inside the number `run()` ret
 take `-m` as the **run folder** they share. The engine is picked from your hardware — XGBoost on a
 CUDA GPU, LightGBM on CPU — and `OLINDA_BACKEND` overrides it.
 
-## What a run directory holds
+## About the Ersilia Open Source Initiative
 
-`fit` ends with `clean`, so all it leaves is `runs/my_model.onnx`. Everything else was scaffolding.
-Run the steps by hand — against the folder, `-m runs/my_model` — and it stays:
-
-```
-runs/my_model/
-  manifest.json      what the run is: columns, splits, hard-label matches
-  targets.h5         one teacher vector per column
-  splits.h5          per-column train/val row indices
-  columns/c0/        that column's model, metrics, calibrator, plots
-  model.onnx         all columns, fused
-```
-
-That is the reason to take the long path — the per-column metrics and plots only exist there. When
-you are done looking, `olinda clean -m runs/my_model.onnx` moves the model out and deletes the folder.
-It is one-way: `export` and `learn-hard` read the manifest, so neither works afterwards.
-
-The descriptor matrix is never copied into a run. Splits are stored as row indices into the shared
-library, which is the difference between ~100 MB and ~1 TB for a ten-column run.
+The [Ersilia Open Source Initiative](https://ersilia.io) is a tech non-profit organization with the mission to equip laboratories, universities, and clinics in the Global South with AI/ML tools for infectious disease research. We work on the principles of open science, decolonized research, and egalitarian access to knowledge and research outputs. You can support Ersilia by clicking [here](https://www.ersilia.io/donate).
