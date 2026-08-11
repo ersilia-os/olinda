@@ -159,3 +159,35 @@ def test_auto_direction_roundtrips_through_save_load(tmp_path):
   reloaded = IsotonicCalibrator.load(p)
   assert reloaded._sign == cal._sign == -1
   assert np.allclose(reloaded.transform(raw), cal.transform(raw))
+
+
+# ── the reported rank correlation must be the one that chose the direction ───
+
+
+def test_rank_correlation_matches_a_direct_computation():
+  """learn-hard reports this value instead of recomputing it, so it must not drift."""
+  from olinda.calibrate import _spearman_sign
+
+  rng = np.random.default_rng(0)
+  raw = rng.random(5000)
+  target = raw * 0.8 + rng.random(5000) * 0.4
+  cal = IsotonicCalibrator().fit(raw, target, increasing="auto")
+  assert cal.rank_correlation == _spearman_sign(raw, target)
+  assert cal.rank_correlation > 0 and cal._sign == 1
+
+
+def test_rank_correlation_is_none_when_the_direction_is_given():
+  """Nothing is computed when the caller fixes the direction — callers must fall back."""
+  rng = np.random.default_rng(1)
+  raw = rng.random(500)
+  cal = IsotonicCalibrator().fit(raw, raw * 2.0, increasing=True)
+  assert cal.rank_correlation is None
+
+
+def test_ordinal_ranks_match_the_nested_argsort_idiom():
+  """The faster ranking must be exactly the ranking it replaced, ties included."""
+  from olinda.calibrate import _ordinal_ranks
+
+  rng = np.random.default_rng(2)
+  for x in (rng.random(1000), rng.integers(0, 5, 1000).astype(float), np.zeros(50)):
+    assert np.array_equal(_ordinal_ranks(x), np.argsort(np.argsort(x)).astype(np.float64))

@@ -476,7 +476,11 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     calibrator = IsotonicCalibrator().fit(gv, sv, increasing="auto")
     calibrator.save(gt_root / CALIBRATOR_NAME)
     direction = "increasing" if calibrator._sign > 0 else "decreasing"
-    spearman = _spearman_sign(gv, sv)  # magnitude+sign of the rank correlation
+    # fit() already ranked both arrays to choose the direction; reuse that rather than paying for a
+    # second full pass over the reference library just to report the magnitude.
+    spearman = calibrator.rank_correlation
+    if spearman is None:  # only when a caller fixed the direction instead of detecting it
+      spearman = _spearman_sign(gv, sv)
     pearson_after = _pearson(calibrator.transform(gv), sv)
     echo(
       f"  calibrated ({direction}) on {len(gv):,} reference compounds · "
