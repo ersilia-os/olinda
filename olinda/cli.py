@@ -62,7 +62,10 @@ _align_command_columns()
 rc.COMMAND_GROUPS = {
   "olinda": [
     {"name": "Main commands", "commands": ["setup", "fit", "predict"]},
-    {"name": "Fit pipeline commands", "commands": ["prepare", "tune", "learn-soft", "learn-hard", "export"]},
+    {
+      "name": "Fit pipeline commands",
+      "commands": ["prepare", "tune", "learn-soft", "learn-hard", "export", "clean"],
+    },
   ]
 }
 
@@ -137,11 +140,12 @@ def setup_cmd(target_dir):
 def fit_cmd(
   soft_labels, hard_labels, model_dir, task, max_samples, val_frac, num_boost_round, do_tune, trials
 ):
-  """Distill a teacher into a student end-to-end: prepare → (tune) → learn-soft → (learn-hard) → one model.onnx.
+  """Distill a teacher into a student end-to-end: prepare → (tune) → learn-soft → (learn-hard) → clean.
 
   Runs the fit-pipeline sub-commands in order, sharing one `--model-dir`. With `--hard-labels`, a hard head is
-  learned and fused in; with `--tune`, an Optuna pass precedes `learn-soft`. The result is a single
-  self-describing `model.onnx` that `olinda predict` runs.
+  learned and fused in; with `--tune`, an Optuna pass precedes `learn-soft`. The closing `clean` deletes the
+  working files, so what you get back is a run directory holding one self-describing `model.onnx` — everything
+  `olinda predict` needs. Run the steps individually if you want the per-column boosters, metrics and plots.
   """
   import time
 
@@ -173,16 +177,23 @@ def fit_cmd(
   learn_soft_cmd.callback(model_dir=model_dir, num_boost_round=num_boost_round)
   if hard_labels is not None:
     learn_hard_cmd.callback(model_dir=model_dir)
+  # The fuse is done, so the working files have no consumer left: `fit` hands back the artifact alone.
+  # Running the steps individually keeps them — that is what the step-by-step path is for.
+  clean_cmd.callback(model_dir=model_dir)
 
   pipeline = (
-    "prepare → " + ("tune → " if do_tune else "") + "learn-soft" + (" → learn-hard" if hard_labels else "")
+    "prepare → "
+    + ("tune → " if do_tune else "")
+    + "learn-soft"
+    + (" → learn-hard" if hard_labels else "")
+    + " → clean"
   )
   summary_panel(
     "olinda · fit",
     [
       ("Pipeline", pipeline),
       ("Head", "soft + hard" if hard_labels else "soft only"),
-      ("Model", f"[dim]{cpath(md / 'model.onnx')}[/]"),
+      ("Model", f"[dim]{cpath(md / 'model.onnx')}[/]  [dim](the only file in the run dir)[/]"),
       ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
     ],
     border_style=STEP_COLORS["fit"],
@@ -371,7 +382,7 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
   "--num-boost-round", default=10000, type=int, show_default=True, help="Upper cap; early stopping decides."
 )
 def learn_soft_cmd(model_dir, num_boost_round):
-  """Learn the surrogate: fast gradient-boosting regression on the prepared split (train.h5 / val.h5).
+  """Learn the surrogate: fast gradient-boosting regression on each column's prepared split.
 
   The engine is auto-selected by device — XGBoost on a CUDA GPU, LightGBM on CPU (``OLINDA_BACKEND``
   overrides). The loss is squared error (well-conditioned, ONNX-safe); skew/imbalance is handled by
@@ -673,6 +684,57 @@ def export_cmd(model_dir):
     build_bundle(md)
   except (ValueError, FileNotFoundError) as exc:
     raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("clean")
+@click.option(
+  "--model-dir",
+  "-m",
+  required=True,
+  help="A run directory with a fused model.onnx; deletes everything else in it.",
+)
+def clean_cmd(model_dir):
+  """Strip a finished run down to its `model.onnx`, deleting the working files.
+
+  The fused artifact is self-describing — column names, metrics, featurizer, RDKit build, reference
+  library and provenance all live inside it — so `manifest.json`, `targets.h5`, `splits.h5` and
+  `columns/` have no consumer once the fuse succeeds. On a real run they are most of the directory.
+
+  This **ends the run**: `learn-hard` and `export` read the manifest, so neither can run afterwards.
+  `predict` is unaffected. `olinda fit` does this for you as its last stage; run it by hand when you
+  drove the steps individually. Doing it twice is harmless.
+  """
+  from olinda.console import (
+    STEP_COLORS,
+    detail,
+    echo,
+    filesize,
+    path as cpath,
+    rule,
+    set_active_color,
+    success,
+  )
+
+  from olinda import run as runlib
+
+  md = Path(model_dir)
+  set_active_color(STEP_COLORS["clean"])
+  rule("olinda · clean", style=STEP_COLORS["clean"], right=cpath(md))
+  try:
+    removed = runlib.clean_run_dir(md)
+  except FileNotFoundError as exc:
+    echo(str(exc), "error")
+    raise click.ClickException(
+      f"{md} has no model.onnx to keep — run `olinda export -m {model_dir}` first"
+    ) from exc
+
+  if not removed:
+    success("already clean · [dim]nothing left to remove[/]")
+    return
+  detail([(name, filesize(nbytes)) for name, nbytes in removed])
+  freed = sum(nbytes for _, nbytes in removed)
+  success(f"reclaimed [bold]{filesize(freed)}[/] · [dim]{cpath(md / 'model.onnx')} is all that remains[/]")
+  echo("this run can no longer be re-exported or given a hard head", "warning")
 
 
 @cli.command("predict", help="Run a model on SMILES via its model.onnx — emits prediction + channels.")

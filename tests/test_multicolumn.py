@@ -73,6 +73,22 @@ def _run(args):
   return CliRunner().invoke(cli, args)
 
 
+def _steps(soft, md, hard=None, *, val_frac="0.2", rounds="40"):
+  """Drive the pipeline step by step, i.e. everything ``fit`` does except the closing ``clean``.
+
+  Tests that inspect the manifest, the splits or a column's artifacts have to take this path: ``fit``
+  hands back the fused model and nothing else.
+  """
+  prepare = ["prepare", "-s", str(soft), "-m", str(md), "--val-frac", val_frac]
+  if hard is not None:
+    prepare += ["-h", str(hard)]
+  assert (r := _run(prepare)).exit_code == 0, r.output
+  assert (r := _run(["learn-soft", "-m", str(md), "--num-boost-round", rounds])).exit_code == 0, r.output
+  if hard is not None:
+    assert (r := _run(["learn-hard", "-m", str(md)])).exit_code == 0, r.output
+  return md
+
+
 def test_three_columns_fit_and_predict(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()
@@ -81,11 +97,8 @@ def test_three_columns_fit_and_predict(tmp_path, monkeypatch):
 
   r = _run(["fit", "-s", str(soft), "-m", str(md), "--val-frac", "0.2", "--num-boost-round", "40"])
   assert r.exit_code == 0, r.output
-  assert (md / "model.onnx").exists()
-
-  # the descriptor matrix must never be copied into the run
-  assert not (md / "train.h5").exists() and not (md / "val.h5").exists()
-  assert not list(md.glob("columns/*/train.h5"))
+  # fit cleans up after itself: the artifact is the whole run directory
+  assert [p.name for p in md.iterdir()] == ["model.onnx"]
 
   model = OlindaArtifact(md)
   expected = [f"assay{i}_probability" for i in range(3)]
@@ -129,22 +142,7 @@ def test_sparse_hard_labels_apply_only_to_matched_columns(tmp_path, monkeypatch)
   hard = tmp_path / "hard.csv"
   pd.DataFrame(frame).to_csv(hard, index=False)
 
-  md = tmp_path / "run"
-  r = _run([
-    "fit",
-    "-s",
-    str(soft),
-    "-h",
-    str(hard),
-    "-m",
-    str(md),
-    "--val-frac",
-    "0.2",
-    "--num-boost-round",
-    "40",
-  ])
-  assert r.exit_code == 0, r.output
-
+  md = _steps(soft, tmp_path / "run", hard)
   manifest = runlib.read_manifest(md)
   by_name = {c["name"]: c for c in manifest["columns"]}
   assert by_name["assay0_probability"]["hard"]["source_column"] == "assay0"
@@ -209,8 +207,7 @@ def test_export_works_standalone_on_a_trained_run(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=2)
-  md = tmp_path / "run"
-  assert _run(["fit", "-s", str(soft), "-m", str(md), "--num-boost-round", "40"]).exit_code == 0
+  md = _steps(soft, tmp_path / "run")
 
   (md / "model.onnx").unlink()
   r = _run(["export", "-m", str(md)])
@@ -251,8 +248,7 @@ def test_reusing_a_run_directory_is_caught_not_silently_wrong(tmp_path, monkeypa
   home = tmp_path / "home"
   home.mkdir()
   soft, smiles, x = _stage(home, tmp_path, monkeypatch, n_columns=2)
-  md = tmp_path / "run"
-  assert _run(["fit", "-s", str(soft), "-m", str(md), "--num-boost-round", "40"]).exit_code == 0
+  md = _steps(soft, tmp_path / "run")
 
   # re-prepare the same directory with differently-named columns; columns/c0 keeps the old model
   frame = {"smiles": smiles}
@@ -304,19 +300,7 @@ def test_an_interrupted_learn_hard_does_not_brick_the_run(tmp_path, monkeypatch)
   pd.DataFrame({"smiles": hard_smiles, "assay0": (score > np.median(score)).astype(int)}).to_csv(
     tmp_path / "hard.csv", index=False
   )
-  md = tmp_path / "run"
-  r = _run([
-    "fit",
-    "-s",
-    str(soft),
-    "-h",
-    str(tmp_path / "hard.csv"),
-    "-m",
-    str(md),
-    "--num-boost-round",
-    "40",
-  ])
-  assert r.exit_code == 0, r.output
+  md = _steps(soft, tmp_path / "run", tmp_path / "hard.csv")
 
   gt_root = md / "columns" / "c0" / GT_DIRNAME
   assert has_hard_head(md / "columns" / "c0")
@@ -366,8 +350,64 @@ def test_parity_refuses_a_mis_built_graph(tmp_path, monkeypatch):
     export_mod.build_bundle(md)
 
 
+def test_the_step_by_step_path_keeps_the_working_files(tmp_path, monkeypatch):
+  """Only `fit` cleans. Driving the steps by hand must leave a run `export` can still act on."""
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=2)
+  md = _steps(soft, tmp_path / "run")
+
+  assert (md / "manifest.json").exists()
+  assert (md / "targets.h5").exists() and (md / "splits.h5").exists()
+  assert (md / "columns" / "c0").is_dir()
+  # ...but the descriptor matrix is still never copied into the run
+  assert not (md / "train.h5").exists() and not (md / "val.h5").exists()
+  assert not list(md.glob("columns/*/train.h5"))
+
+  assert _run(["export", "-m", str(md)]).exit_code == 0
+
+
+def test_cleaning_does_not_change_predictions(tmp_path, monkeypatch):
+  """The claim the whole step rests on: a cleaned run predicts identically."""
+  md = _fit_with_hard(tmp_path, monkeypatch)
+  before = OlindaArtifact(md).run(_SM)
+
+  r = _run(["clean", "-m", str(md)])
+  assert r.exit_code == 0, r.output
+  assert [p.name for p in md.iterdir()] == ["model.onnx"]
+
+  after = OlindaArtifact(md).run(_SM)
+  pd.testing.assert_frame_equal(before, after)
+
+
+def test_clean_refuses_without_a_model_and_removes_nothing(tmp_path, monkeypatch):
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=2)
+  md = tmp_path / "run"
+  assert _run(["prepare", "-s", str(soft), "-m", str(md)]).exit_code == 0  # prepared, never fused
+
+  r = _run(["clean", "-m", str(md)])
+  assert r.exit_code != 0
+  assert "no model.onnx" in r.output
+  assert (md / "manifest.json").exists() and (md / "targets.h5").exists()
+
+
+def test_cleaning_twice_is_harmless(tmp_path, monkeypatch):
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=1)
+  md = tmp_path / "run"
+  assert _run(["fit", "-s", str(soft), "-m", str(md), "--num-boost-round", "40"]).exit_code == 0
+
+  r = _run(["clean", "-m", str(md)])  # fit already cleaned; this one has nothing left to do
+  assert r.exit_code == 0, r.output
+  assert "already clean" in r.output
+  assert (md / "model.onnx").exists()
+
+
 def _fit_with_hard(tmp_path, monkeypatch):
-  """A trained single-column run with a ground-truth head."""
+  """A trained single-column run with a ground-truth head, left uncleaned."""
   home = tmp_path / "home"
   home.mkdir()
   soft, smiles, x = _stage(home, tmp_path, monkeypatch, n_columns=1)
@@ -376,17 +416,4 @@ def _fit_with_hard(tmp_path, monkeypatch):
   pd.DataFrame({"smiles": hard_smiles, "assay0": (score > np.median(score)).astype(int)}).to_csv(
     tmp_path / "hard.csv", index=False
   )
-  md = tmp_path / "run"
-  r = _run([
-    "fit",
-    "-s",
-    str(soft),
-    "-h",
-    str(tmp_path / "hard.csv"),
-    "-m",
-    str(md),
-    "--num-boost-round",
-    "40",
-  ])
-  assert r.exit_code == 0, r.output
-  return md
+  return _steps(soft, tmp_path / "run", tmp_path / "hard.csv")

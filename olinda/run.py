@@ -14,6 +14,10 @@ vectors and one manifest describing the whole run. A single-column run is simply
 
 The descriptor matrix is deliberately absent: it is the same for every column, so it is read from the
 shared reference library rather than copied per run.
+
+Everything above ``model.onnx`` is working state. ``olinda fit`` ends by calling :func:`clean_run_dir`
+to delete it, so a directory it produced holds the artifact alone; running the steps individually
+keeps it.
 """
 
 from __future__ import annotations
@@ -121,6 +125,46 @@ def add_column(manifest: dict, *, name: str, y, train_idx, val_idx, hard: dict |
   entry["dir"] = f"{COLUMNS_DIRNAME}/{entry['id']}"
   manifest["columns"].append(entry)
   return entry
+
+
+def _size_of(path: Path) -> int:
+  if path.is_dir():
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+  return path.stat().st_size
+
+
+def clean_run_dir(model_dir: str | Path) -> list[tuple[str, int]]:
+  """Remove the working files, leaving only ``model.onnx``.
+
+  Everything these files carry is inside the fused artifact by this point — the column names, their
+  training sizes and metrics, the featurizer, the reference library and the run's provenance — so the
+  ``.onnx`` alone is a complete record. This ends the run: ``learn-hard`` and ``export`` both read the
+  manifest, so neither can run afterwards. ``olinda fit`` calls this as its last stage, after the
+  final fuse; driving the steps by hand leaves the run intact.
+
+  Returns
+  -------
+  list of (str, int)
+      What was removed, and how many bytes each entry freed. Empty if there was nothing left to
+      remove, so calling this twice is harmless.
+  """
+  import shutil
+
+  model_dir = Path(model_dir)
+  if not (model_dir / "model.onnx").exists():
+    raise FileNotFoundError(f"refusing to clean {model_dir}: no model.onnx to keep")
+
+  removed = []
+  for name in (MANIFEST_NAME, TARGETS_NAME, SPLITS_NAME):
+    path = model_dir / name
+    if path.exists():
+      removed.append((name, _size_of(path)))
+      path.unlink()
+  columns = model_dir / COLUMNS_DIRNAME
+  if columns.exists():
+    removed.append((f"{COLUMNS_DIRNAME}/", _size_of(columns)))
+    shutil.rmtree(columns)
+  return removed
 
 
 def find_column(manifest: dict, name_or_id: str) -> dict:

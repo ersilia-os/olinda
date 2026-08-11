@@ -82,11 +82,21 @@ the distilled surrogate. That weighting is already inside the number `run()` ret
 | `learn-soft` | Train the surrogate for every column |
 | `learn-hard` | Train and calibrate the ground-truth head |
 | `export` | Rebuild `model.onnx` from a trained run |
+| `clean` | Delete the working files, keeping only `model.onnx` |
 
 Every step shares one `--model-dir`. The engine is picked from your hardware — XGBoost on a CUDA GPU,
 LightGBM on CPU — and `OLINDA_BACKEND` overrides it.
 
 ## What a run directory holds
+
+`fit` ends with `clean`, so it leaves exactly one file:
+
+```
+runs/my_model/
+  model.onnx         all columns, fused — the only file you need to ship
+```
+
+Everything else was scaffolding. Run the steps by hand and it stays:
 
 ```
 runs/my_model/
@@ -94,8 +104,12 @@ runs/my_model/
   targets.h5         one teacher vector per column
   splits.h5          per-column train/val row indices
   columns/c0/        that column's model, metrics, calibrator, plots
-  model.onnx         all columns, fused — the only file you need to ship
+  model.onnx
 ```
 
-The descriptor matrix is never copied here. Splits are stored as row indices into the shared library,
-which is the difference between ~100 MB and ~1 TB for a ten-column run.
+That is the reason to take the long path — the per-column metrics and plots only exist there. When
+you are done looking, `olinda clean -m runs/my_model` collapses it to the artifact. It is one-way:
+`export` and `learn-hard` read the manifest, so neither works afterwards.
+
+The descriptor matrix is never copied into a run. Splits are stored as row indices into the shared
+library, which is the difference between ~100 MB and ~1 TB for a ten-column run.

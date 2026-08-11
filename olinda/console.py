@@ -75,6 +75,7 @@ STEP_COLORS = {
   "learn-soft": "green",
   "learn-hard": "magenta",
   "export": "bright_cyan",
+  "clean": "bright_black",
   "predict": "blue",
   "fit": "bright_green",
 }
@@ -127,6 +128,18 @@ def elapsed(seconds: float) -> str:
   if seconds < 3600:
     return f"{seconds // 60}m {seconds % 60:02d}s"
   return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+
+
+def filesize(nbytes: float) -> str:
+  """Human-readable size: ``812 B``, ``4.3 MB``, ``11.7 GB`` (decimal units, as disk tools report)."""
+  nbytes = float(max(0, nbytes))
+  if nbytes < 1000:
+    return f"{nbytes:.0f} B"
+  for unit in ("KB", "MB"):
+    nbytes /= 1000
+    if nbytes < 1000:
+      return f"{nbytes:.1f} {unit}"
+  return f"{nbytes / 1000:.1f} GB"
 
 
 @contextmanager
