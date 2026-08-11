@@ -16,6 +16,6 @@ def main() -> None:
       f"The olinda CLI needs the training dependencies (missing: {missing}).\n"
       "This looks like an inference-only install. Install the full stack with:\n\n"
       "    pip install 'olinda[train]'\n\n"
-      "Running distilled models needs no extras — see olinda.OnnxArtifact."
+      "Running distilled models needs no extras — see olinda.OlindaArtifact."
     ) from exc
   cli()

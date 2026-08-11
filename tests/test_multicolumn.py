@@ -23,8 +23,22 @@ from click.testing import CliRunner  # noqa: E402
 from olinda import OlindaArtifact  # noqa: E402
 
 _SM = [
-  "CCO", "CCN", "CCC", "c1ccccc1", "CC(=O)O", "CCOC(=O)C", "Clc1ccccc1", "COc1ccccc1", "CCOCC",
-  "OCc1ccccc1", "CCCC", "c1ccncc1", "CCOC", "CC(C)O", "CCCCO", "c1ccsc1",
+  "CCO",
+  "CCN",
+  "CCC",
+  "c1ccccc1",
+  "CC(=O)O",
+  "CCOC(=O)C",
+  "Clc1ccccc1",
+  "COc1ccccc1",
+  "CCOCC",
+  "OCc1ccccc1",
+  "CCCC",
+  "c1ccncc1",
+  "CCOC",
+  "CC(C)O",
+  "CCCCO",
+  "c1ccsc1",
 ]
 
 
@@ -87,7 +101,10 @@ def test_columns_are_independent_models(tmp_path, monkeypatch):
   home.mkdir()
   soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=3)
   md = tmp_path / "run"
-  assert _run(["fit", "-s", str(soft), "-m", str(md), "--val-frac", "0.2", "--num-boost-round", "40"]).exit_code == 0
+  assert (
+    _run(["fit", "-s", str(soft), "-m", str(md), "--val-frac", "0.2", "--num-boost-round", "40"]).exit_code
+    == 0
+  )
 
   model = OlindaArtifact(md)
   values = model.run(_SM[:8])[model.columns].to_numpy()
@@ -113,9 +130,19 @@ def test_sparse_hard_labels_apply_only_to_matched_columns(tmp_path, monkeypatch)
   pd.DataFrame(frame).to_csv(hard, index=False)
 
   md = tmp_path / "run"
-  r = _run(
-    ["fit", "-s", str(soft), "-h", str(hard), "-m", str(md), "--val-frac", "0.2", "--num-boost-round", "40"]
-  )
+  r = _run([
+    "fit",
+    "-s",
+    str(soft),
+    "-h",
+    str(hard),
+    "-m",
+    str(md),
+    "--val-frac",
+    "0.2",
+    "--num-boost-round",
+    "40",
+  ])
   assert r.exit_code == 0, r.output
 
   manifest = runlib.read_manifest(md)
@@ -175,3 +202,43 @@ def test_metadata_is_valid_json_and_self_contained(tmp_path, monkeypatch):
   assert parsed["trained_at"].endswith("+00:00")
   assert [c["name"] for c in parsed["columns"]] == model.columns
   assert parsed["featurizer"]["rdkit_version"]
+
+
+def test_export_works_standalone_on_a_trained_run(tmp_path, monkeypatch):
+  """`olinda export` must accept a run it trained itself — models live per column, not at the root."""
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=2)
+  md = tmp_path / "run"
+  assert _run(["fit", "-s", str(soft), "-m", str(md), "--num-boost-round", "40"]).exit_code == 0
+
+  (md / "model.onnx").unlink()
+  r = _run(["export", "-m", str(md)])
+  assert r.exit_code == 0, r.output
+  assert (md / "model.onnx").exists()
+
+
+def test_export_rejects_an_untrained_run(tmp_path, monkeypatch):
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=2)
+  md = tmp_path / "run"
+  assert _run(["prepare", "-s", str(soft), "-m", str(md)]).exit_code == 0
+
+  r = _run(["export", "-m", str(md)])  # prepared but never trained
+  assert r.exit_code != 0
+  assert "not trained yet" in r.output
+
+
+def test_elapsed_covers_the_whole_command_not_the_last_column(tmp_path, monkeypatch):
+  """The per-column timer must not shadow the command-level one."""
+  import re
+
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=3)
+  r = _run(["fit", "-s", str(soft), "-m", str(tmp_path / "run"), "--num-boost-round", "40"])
+  assert r.exit_code == 0, r.output
+  plain = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", r.output)
+  # learn-soft's summary reports one Elapsed; it must not be a per-column figure of 0s
+  assert "Elapsed" in plain

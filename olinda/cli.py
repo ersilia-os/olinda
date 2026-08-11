@@ -442,7 +442,7 @@ def learn_soft_cmd(model_dir, num_boost_round):
   ) as table:
     for col in columns:
       table.start(col["name"])
-      started = time.time()
+      col_started = time.time()
       result = _train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_boost_round)
       m = result["metrics"]
       table.finish(
@@ -452,7 +452,7 @@ def learn_soft_cmd(model_dir, num_boost_round):
           "ρ": f"{m['spearman']:.4f}",
           "RMSE": f"{m['rmse']:.5f}",
           "Trees": f"{result['n_trees']:,}",
-          "Time": elapsed(time.time() - started),
+          "Time": elapsed(time.time() - col_started),
         },
       )
       results.append(result)
@@ -754,10 +754,24 @@ def export_cmd(model_dir):
   """
   from olinda.export import build_bundle
 
+  from olinda import run as runlib
+
   md = Path(model_dir)
-  if not (md / "train_meta.json").exists() and not (md / "xgb.json").exists():
+  try:
+    manifest = runlib.read_manifest(md)
+  except FileNotFoundError as exc:
+    raise click.ClickException(str(exc)) from exc
+
+  # Models live per column, not at the run root — check every column has one before fusing.
+  missing = [
+    col["name"]
+    for col in manifest["columns"]
+    if not (runlib.column_dir(md, col["id"]) / "train_meta.json").exists()
+  ]
+  if missing:
     raise click.ClickException(
-      f"{model_dir!r} is not a trained model dir — run `olinda learn-soft -m {model_dir}` first"
+      f"{len(missing)} column(s) not trained yet ({', '.join(missing)}) — "
+      f"run `olinda learn-soft -m {model_dir}` first"
     )
   build_bundle(md)
 
