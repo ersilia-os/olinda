@@ -117,17 +117,9 @@ class XGBoostBackend:
     """Full native params = structural translation + squared-error objective."""
     return {**self.translate(canonical), **self.objective_params()}
 
-  # -- full train path (streams H5) --
-  def build_train_val(self, train_h5, val_h5, max_bin, bin_edges, bin_weights):
-    from olinda.train.reference import build_qdmatrix
-
-    dtrain = build_qdmatrix(train_h5, max_bin=max_bin, bin_edges=bin_edges, bin_weights=bin_weights)
-    dval = build_qdmatrix(val_h5, max_bin=max_bin, ref=dtrain, bin_edges=bin_edges, bin_weights=bin_weights)
-    return dtrain, dval
-
   # -- multi-column path (one resident library, per-column indices) --
   def build_train_val_indexed(self, matrix, y, train_idx, val_idx, max_bin, bin_edges, bin_weights):
-    """Same as :meth:`build_train_val` but reading a shared in-RAM matrix by index."""
+    """Build train/val matrices for one column, reading the shared in-RAM library by index."""
     import xgboost as xgb
 
     from olinda.data.dataset import IndexDataIter
@@ -220,26 +212,6 @@ class XGBoostBackend:
 # --------------------------------------------------------------------------------------------------
 # LightGBM
 # --------------------------------------------------------------------------------------------------
-def _lgb_sequence(h5_path, batch_rows=65536):
-  """An ``lgb.Sequence`` over an H5 ``x`` dataset — streams rows so the raw matrix never fully resides."""
-  import h5py
-  import lightgbm as lgb
-
-  class _H5Seq(lgb.Sequence):
-    def __init__(self):
-      self._f = h5py.File(str(h5_path), "r")
-      self._x = self._f["x"]
-      self.batch_size = batch_rows
-
-    def __getitem__(self, idx):
-      return np.asarray(self._x[idx], dtype=np.float64)  # LightGBM samples in double for bin construction
-
-    def __len__(self):
-      return int(self._x.shape[0])
-
-  return _H5Seq()
-
-
 class LightGBMBackend:
   name = "lightgbm"
   model_file = "model.lgb"
@@ -281,33 +253,9 @@ class LightGBMBackend:
     m = native_params.get("metric", "l2")
     return m[-1] if isinstance(m, (list, tuple)) else m
 
-  # -- full train path (streams H5) --
-  def build_train_val(self, train_h5, val_h5, max_bin, bin_edges, bin_weights):
-    import h5py
-    import lightgbm as lgb
-
-    from olinda.data import apply_bin_weights
-
-    def _ds(path, reference=None):
-      with h5py.File(str(path), "r") as f:
-        y = np.asarray(f["y"][:], dtype=np.float32)
-      w = apply_bin_weights(y, bin_edges, bin_weights) if bin_edges is not None else None
-      return lgb.Dataset(
-        _lgb_sequence(path),
-        label=y,
-        weight=w,
-        params={"max_bin": int(max_bin), "verbosity": -1},
-        reference=reference,
-        free_raw_data=False,
-      )
-
-    dtrain = _ds(train_h5)
-    dval = _ds(val_h5, reference=dtrain)
-    return dtrain, dval
-
   # -- multi-column path (one resident library, per-column indices) --
   def build_train_val_indexed(self, matrix, y, train_idx, val_idx, max_bin, bin_edges, bin_weights):
-    """Same as :meth:`build_train_val` but reading a shared in-RAM matrix by index."""
+    """Build train/val matrices for one column, reading the shared in-RAM library by index."""
     import lightgbm as lgb
 
     from olinda.data import apply_bin_weights

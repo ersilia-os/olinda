@@ -383,38 +383,3 @@ class LiveTable:
       self._live = None
       _live_owner = None
       console.print(self._render())  # persist the finished table as the step's record
-
-
-def _bar(frac: float, width: int = 12) -> str:
-  filled = round(frac * width)
-  return f"{'█' * filled}[dim]{'─' * (width - filled)}[/]"
-
-
-class LiveBar:
-  """Minimal single-line progress bar (spinner + block bar) in the zairachem style."""
-
-  def __init__(self, title: str, total: int, *, color: str | None = None) -> None:
-    self.title = title
-    self.total = max(int(total), 1)
-    self.color = color or active_color()
-    self.done = 0
-    self._live = Live(console=console, transient=True, refresh_per_second=8)
-
-  def __enter__(self) -> "LiveBar":
-    self._live.__enter__()
-    self._render()
-    return self
-
-  def update(self, done: int) -> None:
-    self.done = done
-    self._render()
-
-  def _render(self) -> None:
-    frac = min(self.done / self.total, 1.0)
-    head = _SPINNER[int(time.time() * 10) % len(_SPINNER)]
-    self._live.update(
-      f"  [bold {self.color}]{head} {self.title}[/]  {_bar(frac)} [dim]{self.done:,}/{self.total:,}[/]"
-    )
-
-  def __exit__(self, *exc) -> None:
-    self._live.__exit__(*exc)

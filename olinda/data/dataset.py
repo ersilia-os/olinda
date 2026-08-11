@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import suppress
 
 import numpy as np
 import xgboost as xgb
@@ -310,61 +309,3 @@ class IndexDataIter(xgb.DataIter):
 
   def close(self) -> None:
     return None
-
-
-class H5DataIter(xgb.DataIter):
-  """Streams an HDF5 split (`x` float32 (m, dim), `y` float32 (m,)) into XGBoost sequentially.
-
-  The rows are already shuffled on disk (see ``split_reference_to_h5``), so a plain sequential scan
-  feeds XGBoost well-mixed data with fast contiguous reads — no reshuffle needed. Used to build a
-  ``QuantileDMatrix`` without loading the whole matrix into RAM.
-  """
-
-  def __init__(
-    self,
-    h5_path: str,
-    batch_rows: int = 65536,
-    bin_edges: np.ndarray | None = None,
-    bin_weights: np.ndarray | None = None,
-  ) -> None:
-    super().__init__()
-    import h5py
-
-    self.h5_path = str(h5_path)
-    self.batch_rows = int(batch_rows)
-    self.bin_edges = bin_edges
-    self.bin_weights = bin_weights
-    self._f = h5py.File(self.h5_path, "r")
-    self._x = self._f["x"]
-    self._y = self._f["y"]
-    self._n = int(self._x.shape[0])
-    self._dim = int(self._x.shape[1])
-    self._pos = 0
-
-  @property
-  def n_rows(self) -> int:
-    return self._n
-
-  @property
-  def n_cols(self) -> int:
-    return self._dim
-
-  def reset(self) -> None:
-    self._pos = 0
-
-  def next(self, input_data) -> bool:  # type: ignore[override]
-    if self._pos >= self._n:
-      return False
-    j = min(self._pos + self.batch_rows, self._n)
-    x = np.asarray(self._x[self._pos : j], dtype=np.float32)  # contiguous sequential read
-    y = np.asarray(self._y[self._pos : j], dtype=np.float32).reshape(-1)
-    kwargs = {"data": x, "label": y}
-    if self.bin_edges is not None and self.bin_weights is not None:
-      kwargs["weight"] = apply_bin_weights(y, self.bin_edges, self.bin_weights)
-    input_data(**kwargs)
-    self._pos = j
-    return True
-
-  def close(self) -> None:
-    with suppress(Exception):
-      self._f.close()

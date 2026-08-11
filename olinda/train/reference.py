@@ -10,13 +10,11 @@ from __future__ import annotations
 
 import os
 import time
-from pathlib import Path
 
 import numpy as np
 import xgboost as xgb
 
 from olinda.console import console, echo, live_status, spinner
-from olinda.data import H5DataIter
 from olinda.train.xgb import detect_training_device
 
 # Rows read per H5 chunk when streaming into the QuantileDMatrix. Build-time I/O only — it does not
@@ -33,53 +31,6 @@ _BUILD_BATCH_ROWS = 65536
 # `tree_method="hist"` is correct for BOTH CPU and GPU on XGBoost ≥2.0 (GPU via `device="cuda"`, not the
 # deprecated `gpu_hist`).
 _DEFAULT_MAX_BIN = 64
-
-
-def build_qdmatrix(
-  h5_path: str | Path,
-  *,
-  max_bin: int = _DEFAULT_MAX_BIN,
-  batch_rows: int = _BUILD_BATCH_ROWS,
-  ref: xgb.QuantileDMatrix | None = None,
-  bin_edges=None,
-  bin_weights=None,
-) -> xgb.QuantileDMatrix:
-  """Build a ``QuantileDMatrix`` from an HDF5 split via a sequential streaming iterator.
-
-  Data is fed **dense**: CSR/sparse feeding would make XGBoost treat absent fingerprint bits as *missing*
-  (learned default split direction), which then disagrees with every dense prediction path (val metrics,
-  ``StudentModel.predict``, ONNX export) and silently corrupts outputs. Exploit Morgan sparsity via column
-  pruning instead (keeps zeros explicit and dense).
-
-  Parameters
-  ----------
-  h5_path : str or Path
-      HDF5 file with ``x`` (float32 ``(m, dim)``) and ``y`` (float32 ``(m,)``) datasets.
-  max_bin : int, optional
-      Number of histogram bins per feature (lower = faster/coarser). Must match between train and val.
-  batch_rows : int, optional
-      Rows read per streaming batch.
-  ref : xgb.QuantileDMatrix, optional
-      Reference matrix whose bin edges to reuse (pass ``dtrain`` when building the val matrix).
-
-  Returns
-  -------
-  xgb.QuantileDMatrix
-  """
-  h5_path = Path(h5_path)
-  it = H5DataIter(str(h5_path), batch_rows=batch_rows, bin_edges=bin_edges, bin_weights=bin_weights)
-  t0 = time.perf_counter()
-  try:
-    dm = xgb.QuantileDMatrix(it, max_bin=max_bin, ref=ref)
-  finally:
-    it.close()
-  dt = time.perf_counter() - t0
-  echo(
-    f"QuantileDMatrix from {h5_path.name}: {dm.num_row():,} × {dm.num_col()} "
-    f"· max_bin={max_bin}{' · ref=train' if ref is not None else ''} · {dt:.2f}s",
-    "run",
-  )
-  return dm
 
 
 def _val_stats(y: np.ndarray, p: np.ndarray) -> tuple[float, float, float]:
