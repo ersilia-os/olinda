@@ -573,6 +573,18 @@ def learn_hard_cmd(model_dir):
     raise click.ClickException(str(exc)) from exc
 
   with_hard = [c for c in manifest["columns"] if (runlib.column_dir(md, c["id"]) / HARD_H5_NAME).exists()]
+  untrained = [
+    c["name"]
+    for c in manifest["columns"]
+    if not (runlib.column_dir(md, c["id"]) / "train_meta.json").exists()
+  ]
+  if untrained:
+    raise click.ClickException(
+      f"{len(untrained)} column(s) have no surrogate yet ({', '.join(untrained)}) — "
+      f"run `olinda learn-soft -m {model_dir}` first. learn-hard fuses at the end and would "
+      "otherwise fail there, after training every ground-truth head."
+    )
+
   if not with_hard:
     raise click.ClickException(
       f"no column in {model_dir!r} has hard labels — run "

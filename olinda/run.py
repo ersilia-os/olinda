@@ -19,6 +19,7 @@ shared reference library rather than copied per run.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,10 +51,21 @@ def is_run_dir(model_dir: str | Path) -> bool:
 
 
 def write_manifest(model_dir: str | Path, manifest: dict) -> Path:
+  """Write the run manifest, atomically and as strict JSON.
+
+  Metrics carry NaN for a degenerate column, and ``json.dump`` writes that as a bare ``NaN`` token
+  that only Python accepts — so it is nulled first. The write goes via a temporary file because this
+  is rewritten after every column of a run that may last hours; a signal landing mid-write would
+  otherwise truncate the file and make the whole run unreadable.
+  """
+  from olinda.metrics import json_safe
+
   path = Path(model_dir) / MANIFEST_NAME
   path.parent.mkdir(parents=True, exist_ok=True)
-  with open(path, "w") as fp:
-    json.dump(manifest, fp, indent=2)
+  tmp = path.with_suffix(".json.tmp")
+  with open(tmp, "w") as fp:
+    json.dump(json_safe(manifest), fp, indent=2)
+  os.replace(tmp, path)
   return path
 
 

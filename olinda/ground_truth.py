@@ -362,6 +362,13 @@ def prepare_hard_labels_wide(
       raise ValueError(f"unknown task {task!r}")
     n_positive = None
     if resolved == "binary":
+      off_scale = set(np.unique(yc).tolist()) - {0.0, 1.0}
+      if off_scale:
+        raise ValueError(
+          f"hard column '{hard_col}' was forced to --task binary but holds non-binary values "
+          f"(e.g. {sorted(off_scale)[:3]}). Casting them would floor everything below 1.0 to a "
+          "negative. Threshold the column yourself, or drop --task."
+        )
       yc = yc.astype(int).astype(np.float64)
       n_positive = int(yc.sum())
       n_negative = int(len(yc) - n_positive)
