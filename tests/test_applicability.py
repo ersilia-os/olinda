@@ -7,6 +7,7 @@ from olinda.applicability import (
   A_LOW,
   ApplicabilityClassifier,
   BernoulliNB,
+  prepare_gt_bits,
   tanimoto_nn,
 )
 
@@ -112,3 +113,41 @@ def test_applicability_classifier_roundtrips(tmp_path):
   q = np.array([[1, 0], [0, 1]])
   assert np.allclose(reloaded.weight(q), clf.weight(q))
   assert (reloaded.a_low, reloaded.a_high) == (A_LOW, A_HIGH)
+
+
+# ── the blocked nearest-neighbour search must not change any number ───────────
+
+
+def _unblocked_reference(query_bits, prepared):
+  """The pre-optimisation formulation: one full (queries x labelled) pass, explicit 0/0 guard."""
+  q = (np.asarray(query_bits) > 0).astype(np.float32)
+  g, g_card = prepared
+  m = q.shape[0]
+  if g.shape[0] == 0 or m == 0:
+    return np.zeros(m, dtype=np.float64)
+  inter = q @ g.T
+  union = q.sum(axis=1)[:, None] + g_card - inter
+  with np.errstate(divide="ignore", invalid="ignore"):
+    tan = np.where(union > 0, inter / union, 0.0)
+  return tan.max(axis=1).astype(np.float64)
+
+
+def test_blocked_search_matches_the_unblocked_formulation():
+  """Blocking is a memory optimisation, so it must be numerically indistinguishable."""
+  rng = np.random.default_rng(0)
+  queries = (rng.random((300, 256)) < 0.05).astype(np.uint8)
+  labelled = (rng.random((2500, 256)) < 0.05).astype(np.uint8)  # spans several blocks
+  prepared = prepare_gt_bits(labelled)
+  assert np.array_equal(tanimoto_nn(queries, prepared=prepared), _unblocked_reference(queries, prepared))
+
+
+def test_degenerate_fingerprints_score_zero():
+  """Flooring the denominator must behave exactly like the explicit 0/0 guard it replaced."""
+  rng = np.random.default_rng(1)
+  labelled = (rng.random((50, 256)) < 0.05).astype(np.uint8)
+  empty = np.zeros((3, 256), dtype=np.uint8)
+  assert np.array_equal(tanimoto_nn(empty, prepared=prepare_gt_bits(labelled)), np.zeros(3))
+  assert np.array_equal(tanimoto_nn(empty, prepared=prepare_gt_bits(empty)), np.zeros(3))
+  assert np.array_equal(
+    tanimoto_nn(labelled[:4], prepared=prepare_gt_bits(np.zeros((0, 256)))), np.zeros(4)
+  )

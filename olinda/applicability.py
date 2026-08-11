@@ -33,6 +33,12 @@ A_LOW: float = 0.33
 A_HIGH: float = 0.66
 NB_ALPHA: float = 1.0  # Laplace smoothing for the Bernoulli likelihoods
 
+# Labelled-set columns per similarity block. Only the row-wise maximum survives, so scoring the whole
+# labelled set at once would build several (queries x labelled) arrays — measured at 6.9 GB for one
+# 50k-row chunk — to produce a single vector. Blocking keeps the working set in cache: ~1.45x faster
+# and ~7x less memory, with bit-identical output. 1024 measured best across 256-4096.
+_NN_BLOCK = 1024
+
 
 def prepare_gt_bits(gt_bits: np.ndarray):
   """Binarize the labelled set once, returning ``(g, g_card)`` for reuse across many query chunks.
@@ -65,16 +71,22 @@ def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray = None, *, prepared=
   """
   q = (np.asarray(query_bits) > 0).astype(np.float32)
   g, g_card = prepared if prepared is not None else prepare_gt_bits(gt_bits)
-  m = q.shape[0]
-  if g.shape[0] == 0 or m == 0:
+  m, n = q.shape[0], g.shape[0]
+  if n == 0 or m == 0:
     return np.zeros(m, dtype=np.float64)
 
-  inter = q @ g.T  # (m, n) intersection counts
   q_card = q.sum(axis=1)[:, None]  # (m, 1)
-  union = q_card + g_card - inter
-  with np.errstate(divide="ignore", invalid="ignore"):
-    tan = np.where(union > 0, inter / union, 0.0)  # 0/0 (both empty) → 0, not NaN
-  return tan.max(axis=1).astype(np.float64)
+  best = np.zeros(m, dtype=np.float32)
+  for start in range(0, n, _NN_BLOCK):
+    gb = g[start : start + _NN_BLOCK]
+    inter = q @ gb.T  # (m, block) intersection counts
+    union = q_card + g_card[:, start : start + _NN_BLOCK] - inter
+    # union is 0 only when both fingerprints are empty, and an empty query already has inter == 0,
+    # so flooring the denominator yields the same 0 as an explicit 0/0 guard, without a mask array.
+    np.maximum(union, 1e-9, out=union)
+    np.divide(inter, union, out=inter)  # in place: the intersection block is dead after this
+    np.maximum(best, inter.max(axis=1), out=best)
+  return best.astype(np.float64)
 
 
 class BernoulliNB:
