@@ -30,6 +30,7 @@ from olinda.console import STEP_COLORS, echo, path as cpath, rule, success, summ
 from olinda.metrics import json_safe
 from olinda.ground_truth import (
   APPLICABILITY_NAME,
+  HARD_H5_NAME,
   CALIBRATOR_NAME,
   GT_DIRNAME,
   GT_META_NAME,
@@ -46,6 +47,7 @@ _ISOTONIC_TOL = 1e-5  # knot-thinning target — kept below _PARITY_TOL so ONNX 
 _ISOTONIC_MAX_KNOTS = 4096
 _PARITY_TOL = 1e-4  # build_bundle raises if the fused graph drifts from the Python reference beyond this
 _SAMPLE_SMILES = ["CCO", "c1ccccc1", "CC(=O)O", "CCN", "OCc1ccccc1"]
+_PARITY_LABELLED = 8  # labelled compounds per hard column added to the probe, to exercise the blend
 
 
 _PROTOBUF_LIMIT = 2 * 1024**3  # a single serialized ModelProto cannot exceed this
@@ -363,6 +365,7 @@ def _bundle_metadata(manifest: dict, plan: list, featurizer: dict, featurizer_cl
       "output": entry["output"],
       "has_hard": bool(entry["has_hard"]),
       "metrics": entry.get("metrics"),
+      "training": entry.get("training"),
     }
     if entry["has_hard"]:
       gtm_path = entry["dir"] / GT_DIRNAME / GT_META_NAME
@@ -383,13 +386,18 @@ def _bundle_metadata(manifest: dict, plan: list, featurizer: dict, featurizer_cl
     "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     "featurizer": {**featurizer, "rdkit_version": rdkit.__version__},
     "featurizer_class": featurizer_class,
-    "reference_library": {"name": MORGAN_FINGERPRINTS_FILENAME, "url": MORGAN_FINGERPRINTS_URL},
+    "reference_library": {
+      "name": MORGAN_FINGERPRINTS_FILENAME,
+      "url": MORGAN_FINGERPRINTS_URL,
+      **{k: v for k, v in (manifest.get("reference_library") or {}).items() if k in ("n_rows", "dim")},
+    },
     "n_columns": len(columns),
     "columns": columns,
     "outputs": list(outputs),
     "has_hard": any(c["has_hard"] for c in columns),
-    "backend": manifest.get("backend"),
+    "backend": _run_backend(plan, manifest),
     "split": manifest.get("split"),
+    "created": manifest.get("created"),
   }
 
 
@@ -433,6 +441,39 @@ def _toposort(nodes: list, available: set) -> list:
   return order
 
 
+def _parity_probe(plan: list) -> np.ndarray:
+  """Fingerprints to check the fused graph against the Python pipeline.
+
+  A handful of fixed molecules is not enough on its own: the applicability gate may score them all
+  zero, in which case the blend collapses to the surrogate and the hard model, its calibrator and the
+  gate are compared against nothing — a cross-wired column would pass. Each hard column's own
+  labelled compounds are guaranteed to sit in the gate's HIGH bucket, so a few of them are appended
+  to force the whole blend to be exercised.
+  """
+  import h5py
+
+  from olinda.featurizer import MorganCountFeaturizer
+
+  blocks = [MorganCountFeaturizer().transform(_SAMPLE_SMILES).astype(np.float32)]
+  for entry in plan:
+    hard = entry["dir"] / HARD_H5_NAME
+    if not entry["has_hard"] or not hard.exists():
+      continue
+    with h5py.File(hard, "r") as f:
+      blocks.append(np.asarray(f["x"][:_PARITY_LABELLED], dtype=np.float32))
+  return np.concatenate(blocks, axis=0)
+
+
+def _run_backend(plan: list, manifest: dict) -> str | None:
+  """Which engine trained this run — recorded per column, never on the manifest itself."""
+  if manifest.get("backend"):
+    return manifest["backend"]
+  meta_path = plan[0]["dir"] / "train_meta.json" if plan else None
+  if meta_path and meta_path.exists():
+    return json.loads(meta_path.read_text()).get("backend")
+  return None
+
+
 def _assert_model_belongs_to(sm, entry: dict) -> None:
   """Refuse to fuse a model that was trained for a different column.
 
@@ -474,6 +515,12 @@ def _column_plan(model_dir: Path) -> tuple[dict, list]:
       "has_hard": has_hard_head(col_dir),
       "hard_meta": col.get("hard"),
       "metrics": col.get("metrics"),
+      "training": {
+        "n_finite": col.get("n_finite"),
+        "n_train": col.get("n_train"),
+        "n_val": col.get("n_val"),
+        "value_range": col.get("value_range"),
+      },
     })
   if not plan:
     raise ValueError(f"{model_dir} has no columns — run `olinda prepare` first")
@@ -626,11 +673,9 @@ def build_bundle(model_dir: str | Path) -> dict:
 
   echo("checking parity: model.onnx vs Python reference", "run")
   ref: dict = {}
-  fp = None
+  fp = _parity_probe(plan)
   for entry in plan:
     sm = StudentModel.load(entry["dir"], featurizer_factory=featurizer_from_meta)
-    if fp is None:
-      fp = sm.featurizer.transform(_SAMPLE_SMILES).astype(np.float32)
     raw = np.asarray(sm.predict(X=fp, calibrate=False)).ravel()
     surrogate = (
       np.asarray(sm.calibrator.transform(raw)).ravel()
@@ -650,6 +695,12 @@ def build_bundle(model_dir: str | Path) -> dict:
     g = np.asarray(BaseXGBArtifact.load(str(gt_root / GT_MODEL_SUBDIR)).run(fp))[:, 1].astype(np.float64)
     gsoft = np.asarray(IsotonicCalibrator.load(gt_root / CALIBRATOR_NAME).transform(g)).ravel()
     a = np.asarray(ApplicabilityClassifier.load(gt_root / APPLICABILITY_NAME).weight(fp > 0)).ravel()
+    if not (a > 0).any():
+      raise RuntimeError(
+        f"parity probe for column {entry['name']!r} scored zero applicability on every molecule, so "
+        "the blend collapses to the surrogate and the hard head would go unchecked. This should not "
+        "happen — the probe includes that column's own labelled compounds."
+      )
     ref[entry["output"]] = (1.0 - a) * surrogate + a * gsoft
 
   sess = ort.InferenceSession((model_dir / MODEL_NAME).read_bytes(), providers=["CPUExecutionProvider"])

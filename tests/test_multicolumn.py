@@ -290,3 +290,103 @@ def test_a_changed_reference_library_is_refused(tmp_path, monkeypatch):
   r = _run(["learn-soft", "-m", str(md), "--num-boost-round", "40"])
   assert r.exit_code != 0
   assert "library changed" in r.output or "prepared against" in r.output
+
+
+def test_an_interrupted_learn_hard_does_not_brick_the_run(tmp_path, monkeypatch):
+  """learn-hard writes G first and its metadata last; a crash between must read as soft-only."""
+  from olinda.ground_truth import GT_DIRNAME, GT_META_NAME, GT_MODEL_SUBDIR, has_hard_head
+
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, smiles, x = _stage(home, tmp_path, monkeypatch, n_columns=2)
+  hard_smiles = _SM * 4
+  score = x[: len(hard_smiles), :200].sum(1)
+  pd.DataFrame({"smiles": hard_smiles, "assay0": (score > np.median(score)).astype(int)}).to_csv(
+    tmp_path / "hard.csv", index=False
+  )
+  md = tmp_path / "run"
+  r = _run([
+    "fit",
+    "-s",
+    str(soft),
+    "-h",
+    str(tmp_path / "hard.csv"),
+    "-m",
+    str(md),
+    "--num-boost-round",
+    "40",
+  ])
+  assert r.exit_code == 0, r.output
+
+  gt_root = md / "columns" / "c0" / GT_DIRNAME
+  assert has_hard_head(md / "columns" / "c0")
+
+  # simulate a crash after G was saved but before the head completed
+  (gt_root / GT_META_NAME).unlink()
+  assert (gt_root / GT_MODEL_SUBDIR).exists()  # the model is still on disk
+  assert not has_hard_head(md / "columns" / "c0")  # but the head is not complete
+
+  r2 = _run(["export", "-m", str(md)])  # must fuse soft-only, not die on a missing calibrator
+  assert r2.exit_code == 0, r2.output
+  assert OlindaArtifact(md).has_ground_truth is False
+
+
+def test_parity_probe_exercises_the_hard_blend(tmp_path, monkeypatch):
+  """Fixed probe molecules may all score zero applicability, leaving the hard head unchecked."""
+  from olinda.export import _parity_probe
+  from olinda.applicability import ApplicabilityClassifier
+  from olinda.ground_truth import APPLICABILITY_NAME, GT_DIRNAME
+
+  md = _fit_with_hard(tmp_path, monkeypatch)
+  from olinda.export import _column_plan
+
+  _, plan = _column_plan(md)
+  probe = _parity_probe(plan)
+  assert len(probe) > 5, "the probe must add labelled compounds, not just the fixed molecules"
+
+  clf = ApplicabilityClassifier.load(md / "columns" / "c0" / GT_DIRNAME / APPLICABILITY_NAME)
+  assert (np.asarray(clf.weight(probe > 0)) > 0).any(), "blend never exercised — hard head unchecked"
+
+
+def test_parity_refuses_a_mis_built_graph(tmp_path, monkeypatch):
+  """The gate's job is translation fidelity: a graph that disagrees with the sources must fail."""
+  import olinda.export as export_mod
+  from olinda.calibrate import IsotonicCalibrator
+
+  md = _fit_with_hard(tmp_path, monkeypatch)
+  original = export_mod._isotonic_model
+
+  def shifted(cal, in_name, out_name):
+    off = IsotonicCalibrator()
+    off._x, off._y, off._sign = cal._x, cal._y + 0.01, cal._sign
+    return original(off, in_name, out_name)
+
+  monkeypatch.setattr(export_mod, "_isotonic_model", shifted)
+  with pytest.raises(RuntimeError, match="parity failed"):
+    export_mod.build_bundle(md)
+
+
+def _fit_with_hard(tmp_path, monkeypatch):
+  """A trained single-column run with a ground-truth head."""
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, smiles, x = _stage(home, tmp_path, monkeypatch, n_columns=1)
+  hard_smiles = _SM * 4
+  score = x[: len(hard_smiles), :200].sum(1)
+  pd.DataFrame({"smiles": hard_smiles, "assay0": (score > np.median(score)).astype(int)}).to_csv(
+    tmp_path / "hard.csv", index=False
+  )
+  md = tmp_path / "run"
+  r = _run([
+    "fit",
+    "-s",
+    str(soft),
+    "-h",
+    str(tmp_path / "hard.csv"),
+    "-m",
+    str(md),
+    "--num-boost-round",
+    "40",
+  ])
+  assert r.exit_code == 0, r.output
+  return md

@@ -50,8 +50,15 @@ GT_EVAL_NAME = "gt_eval.json"
 
 
 def has_hard_head(model_dir: str | Path) -> bool:
-  """True iff *model_dir* has a hard-label head (``learn-hard`` was run) — i.e. ``_ground_truth/gt/`` exists."""
-  return (Path(model_dir) / GT_DIRNAME / GT_MODEL_SUBDIR / "xgboost.json").exists()
+  """True iff *model_dir* has a **complete** hard-label head.
+
+  ``learn-hard`` writes `G` first and its metadata last, with several minutes of reference scoring in
+  between, so the presence of the model says only that the step *started*. Interrupt it and the
+  column would claim a head with no calibrator and no gate — which then fails the fuse with a missing
+  file rather than simply being treated as soft-only. The metadata is written last, so it is the
+  completion marker.
+  """
+  return (Path(model_dir) / GT_DIRNAME / GT_META_NAME).exists()
 
 
 def _detect_task(y: np.ndarray) -> str:
