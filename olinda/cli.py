@@ -602,6 +602,12 @@ def learn_hard_cmd(model_dir):
       f"`olinda prepare -s <soft> -h <hard> -m {model_dir}` first"
     )
 
+  rule(
+    "olinda · learn-hard",
+    style=STEP_COLORS["learn-hard"],
+    right=f"{len(with_hard)} column(s) with hard labels · {cpath(md)}",
+  )
+
   # One resident copy of the library for the whole run: each column otherwise reopened and streamed
   # it twice (scoring G, then fitting the gate), so a 10-column run read 2.8 GB twenty times over.
   from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
@@ -615,11 +621,10 @@ def learn_hard_cmd(model_dir):
     raise click.ClickException(str(exc)) from exc
 
   for i, col in enumerate(with_hard, start=1):
-    rule(
-      f"STEP {i}/{len(with_hard)} · {col['name']}",
-      style=STEP_COLORS["learn-hard"],
-      right=f"column {i}/{len(with_hard)}",
-    )
+    # The command banner is printed once, above; a per-column rule only earns its line when there is
+    # more than one column to tell apart.
+    if len(with_hard) > 1:
+      rule(f"column {i}/{len(with_hard)} · {col['name']}", style=STEP_COLORS["learn-hard"])
     train_ground_truth(
       runlib.column_dir(md, col["id"]), soft=runlib.read_target(md, col["id"]), matrix=matrix
     )
@@ -735,16 +740,19 @@ def clean_cmd(model_dir):
   detail([(name, filesize(nbytes)) for name, nbytes in removed])
   freed = sum(nbytes for _, nbytes in removed)
   success(f"reclaimed [bold]{filesize(freed)}[/] · [dim]{cpath(md / 'model.onnx')} is all that remains[/]")
-  echo("this run can no longer be re-exported or given a hard head", "warning")
 
 
 @cli.command("predict", help="Run a model on SMILES via its model.onnx — one output column per task.")
 @click.option(
-  "--model-dir", "-m", required=True, help="Model dir containing model.onnx (from learn-soft / learn-hard)."
+  "--model-onnx",
+  "-m",
+  "model_onnx",
+  required=True,
+  help="The distilled model.onnx (a run directory containing one also works).",
 )
 @click.option("--input", "-i", "input_path", required=True, help="CSV/TSV/Parquet with a `smiles` column.")
 @click.option("--output", "-o", "out_path", required=True, help="Output CSV for the predictions.")
-def predict_cmd(model_dir, input_path, out_path):
+def predict_cmd(model_onnx, input_path, out_path):
   """Run the fused `model.onnx`: verify RDKit, featurize the `smiles` column (RDKit Morgan), run the graph.
 
   Writes a `smiles` column followed by one column per task, named after the teacher column it distils.
@@ -752,25 +760,32 @@ def predict_cmd(model_dir, input_path, out_path):
   happens inside the graph. The featurizer and the RDKit build it needs are read from the model's
   embedded metadata, so the `.onnx` is the only input. Unparseable SMILES come back as empty cells.
   """
+  from olinda.artifact import MODEL_NAME
   from olinda.console import STEP_COLORS, echo, path as cpath, rule, set_active_color
 
-  model_dir = Path(model_dir)
+  model_onnx = Path(model_onnx)
   input_path = Path(input_path)
   set_active_color(STEP_COLORS["predict"])
-  rule("olinda · predict", style=STEP_COLORS["predict"], right=cpath(model_dir))
+  rule("olinda · predict", style=STEP_COLORS["predict"], right=cpath(model_onnx))
   if not input_path.exists():
     echo(f"input not found · [dim]{input_path}[/]", "error")
     raise click.ClickException("input file does not exist")
+
+  # A run directory is accepted too: `fit` leaves exactly one artifact in it, so pointing at either
+  # is unambiguous, and it keeps the pipeline commands' `-m <run dir>` habit working here.
+  if model_onnx.is_dir():
+    model_onnx = model_onnx / MODEL_NAME
+  if not model_onnx.exists():
+    echo(f"no artifact at [dim]{model_onnx}[/]", "error")
+    raise click.ClickException(
+      f"{model_onnx} does not exist — run `olinda fit` (or `olinda export -m <run dir>`) first"
+    )
+
   from olinda.artifact import RDKitVersionMismatch
   from olinda.predict import predict_file
 
-  if not (Path(model_dir) / "model.onnx").exists():
-    echo("no model.onnx in the model dir", "error")
-    raise click.ClickException(
-      f"{model_dir} has no model.onnx — run `olinda learn-soft` / `learn-hard` (or `olinda export`) first"
-    )
   try:
-    predict_file(model_dir, input_path, out_path)
+    predict_file(model_onnx, input_path, out_path)
   except (RDKitVersionMismatch, ValueError, FileNotFoundError) as exc:
     raise click.ClickException(str(exc)) from exc
 

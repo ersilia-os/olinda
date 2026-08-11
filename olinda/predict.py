@@ -10,12 +10,13 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def predict_file(model_dir, input_path, out_path):
+def predict_file(model_onnx, input_path, out_path):
   """Predict via the fused ``model.onnx`` and write one column per task.
 
   Goes through the same :class:`~olinda.artifact.OlindaArtifact` the library exposes, so the CLI and a
   Python caller produce identical output. Loading verifies the installed RDKit against the build
-  recorded in the model's metadata.
+  recorded in the model's metadata. ``model_onnx`` may be the artifact itself or a directory holding
+  one.
   """
   import rdkit
 
@@ -23,7 +24,7 @@ def predict_file(model_dir, input_path, out_path):
   from olinda.console import echo, success
 
   try:
-    model = OlindaArtifact(model_dir)
+    model = OlindaArtifact(model_onnx)
   except RDKitVersionMismatch as exc:
     echo(str(exc), "error")
     raise

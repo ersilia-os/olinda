@@ -84,6 +84,23 @@ class TrainResult:
   n_trees: int
 
 
+def _row_values(r2: float, rho: float, val_loss: float, metric: str, rounds: int) -> dict:
+  """The mid-training numbers, keyed to match ``learn-soft``'s live table columns.
+
+  Both engines report the same quantities under different metric names — XGBoost's ``rmse`` is already
+  a root, LightGBM's ``l2`` is not — so the RMSE column is squared-rooted here rather than showing two
+  incomparable scales depending on which engine happened to be picked.
+  """
+  rmse = float(val_loss) ** 0.5 if metric in ("l2", "mse") else float(val_loss)
+  fmt = lambda v, p: "[dim]—[/]" if v != v else f"{v:.{p}f}"  # noqa: E731 - NaN until the first val pass
+  return {
+    "R²": fmt(r2, 4),
+    "ρ": fmt(rho, 4),
+    "RMSE": fmt(rmse, 5),
+    "Trees": f"{rounds:,}",
+  }
+
+
 # --------------------------------------------------------------------------------------------------
 # XGBoost
 # --------------------------------------------------------------------------------------------------
@@ -315,7 +332,8 @@ class LightGBMBackend:
           update(
             f"  [bold cyan]{spinner(it)} training[/] [dim]round[/] [bold]{it}[/][dim]/{num_boost_round}[/]"
             f"  [dim]·[/]  [dim]{metric}[/] val [bold cyan]{va:.4f}[/]  [dim]·[/]  R² [bold]{st['r2']:.4f}[/]"
-            f" · ρ [bold]{st['rho']:.4f}[/]  [dim]· best@{st['best_it']} · {_fmt_secs(_time.perf_counter() - t0)}[/]"
+            f" · ρ [bold]{st['rho']:.4f}[/]  [dim]· best@{st['best_it']} · {_fmt_secs(_time.perf_counter() - t0)}[/]",
+            **_row_values(st["r2"], st["rho"], va, metric, it),
           )
 
       booster = lgb.train(

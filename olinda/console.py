@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager
 
 from rich import box
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.padding import Padding
 from rich.panel import Panel
@@ -265,21 +265,76 @@ def live_region_taken() -> bool:
 
 @contextmanager
 def live_status(*, enabled: bool = True):
-  """Yield an ``update(markup)`` that redraws a single transient status line in place.
+  """Yield an ``update(markup, **values)`` that redraws a single transient status line in place.
 
-  Falls back to a no-op updater when ``enabled`` is False, when the console is not a TTY (e.g.
-  piped/CI output), or when an outer live region already owns the screen — so callers should also
-  emit plain milestone lines.
+  When an outer live region already owns the screen, the updates are *handed to that owner* rather
+  than dropped — a :class:`LiveTable` renders the line under itself and folds ``values`` into the
+  running row. Silencing them instead is what makes a long stage look hung: the inner stage is the
+  only thing that knows how far along it is.
+
+  Falls back to a no-op updater when ``enabled`` is False or the console is not a TTY (piped/CI
+  output), so callers should still emit plain milestone lines for the log.
   """
+  owner = _live_owner
+  if enabled and owner is not None and hasattr(owner, "progress"):
+    yield owner.progress
+    return
   if not enabled or live_region_taken() or not console.is_terminal:
-    yield lambda markup: None
+    yield lambda markup, **values: None
     return
   live = Live(console=console, transient=True, refresh_per_second=12)
   live.__enter__()
   try:
-    yield live.update
+    yield lambda markup, **values: live.update(markup)
   finally:
     live.__exit__(None, None, None)
+
+
+@contextmanager
+def sweep_progress(verb: str, total: int, *, width: int = 24):
+  """Yield a ``tick(done)`` reporting a chunked pass over the reference library on ONE line.
+
+  A full-library sweep runs to ~27 chunks, and echoing each one buries the surrounding steps in a wall
+  of near-identical lines. On a terminal this repaints in place with a bar, rate and ETA; when the
+  output is piped it falls back to a handful of milestones (every ~25%) so a log stays short but a
+  stalled run is still visible.
+  """
+  started = time.time()
+  total = max(1, int(total))
+  state = {"milestone": 0}
+
+  with live_status() as update:
+
+    def tick(done: int) -> None:
+      done = min(int(done), total)
+      frac = done / total
+      took = time.time() - started
+      rate = done / took if took > 0 else 0.0
+      eta = f" · eta {elapsed((total - done) / rate)}" if rate > 0 and done < total else ""
+      if console.is_terminal and not live_region_taken():
+        filled = int(round(frac * width))
+        bar = "━" * filled + "[dim]━[/]" * (width - filled)
+        update(
+          f"  [{active_color()}]{spinner(int(time.time() * 8))} {verb}[/] {bar} "
+          f"[bold]{frac:>4.0%}[/] [dim]·[/] {done:,}/{total:,} "
+          f"[dim]· {rate / 1000:.0f}k/s{eta}[/]"
+        )
+      elif frac >= state["milestone"] + 0.25 or done == total:
+        state["milestone"] = frac
+        echo(f"  {verb} {frac:>4.0%} · {done:,}/{total:,}{eta}", "info")
+
+    yield tick
+  echo(f"  {verb} complete · [bold]{total:,}[/] compounds [dim]· {elapsed(time.time() - started)}[/]", "info")
+
+
+class _Dynamic:
+  """Renderable proxy that re-renders its owner every time Rich asks for a frame."""
+
+  def __init__(self, owner) -> None:
+    self.owner = owner
+
+  def __rich__(self):
+    return self.owner._renderable()
 
 
 class LiveTable:
@@ -292,8 +347,14 @@ class LiveTable:
   Falls back to plain one-line-per-item output when the console is not a TTY, so CI logs stay
   readable and ordered.
 
+  Because it owns the live region, it is also responsible for showing what the silenced inner stage
+  would have said: pass :meth:`progress` as that stage's status updater and its line renders under
+  the table, and feed :meth:`update` the metrics it computes so the row itself ticks. Without that a
+  long single-item run shows a spinner and nothing else, which is indistinguishable from a hang.
+
       with LiveTable(["a", "b"], title="Training", fields=["R²", "Time"]) as table:
           table.start("a")
+          table.update("a", **{"R²": "0.71"})   # while running
           table.finish("a", **{"R²": "0.86", "Time": "42s"})
   """
 
@@ -317,6 +378,7 @@ class LiveTable:
       i: {"status": "queued", "started": None, "elapsed": None, "values": {}} for i in self.items
     }
     self._live = None
+    self._note = ""
 
   # -- rendering ---------------------------------------------------------
 
@@ -324,10 +386,18 @@ class LiveTable:
     if s["status"] == "queued":
       return "[dim]queued[/]"
     if s["status"] == "running":
-      return f"[{self.color}]{spinner(int(time.time() * 10))} {self.running_verb}[/]"
+      # Driven off the clock, not a call counter, so it keeps moving between updates — a stalled
+      # spinner reads as a hung process even when the work underneath is fine.
+      return f"[{self.color}]{spinner(int(time.time() * 8))} {self.running_verb}[/]"
     if s["status"] == "failed":
       return "[red]failed[/]"
     return "[green]✓ done[/]"
+
+  def _elapsed_cell(self, s: dict) -> str | None:
+    """Live elapsed for a running row; ``None`` when the caller supplies its own value."""
+    if s["status"] == "running" and s["started"] is not None:
+      return f"[dim]{elapsed(time.time() - s['started'])}[/]"
+    return None
 
   def _render(self) -> Table:
     done = sum(1 for s in self._state.values() if s["status"] in ("done", "failed"))
@@ -344,16 +414,27 @@ class LiveTable:
     table.add_column("Status", no_wrap=True, width=18)
     for name in self.fields:
       table.add_column(name, justify="right", no_wrap=True)
+    ticking = self._elapsed_cell
     for item in self.items:
       s = self._state[item]
       row = [item, self._status_cell(s)]
-      row += [str(s["values"].get(f, "[dim]—[/]")) for f in self.fields]
+      for f in self.fields:
+        value = s["values"].get(f)
+        if value is None and f == "Time":
+          value = ticking(s)
+        row.append(str(value) if value is not None else "[dim]—[/]")
       table.add_row(*row)
     return table
 
+  def _renderable(self):
+    """The table, plus the running item's status line when there is one."""
+    if not self._note:
+      return self._render()
+    return Group(self._render(), "", self._note)
+
   def _refresh(self) -> None:
     if self._live is not None:
-      self._live.update(self._render(), refresh=True)
+      self._live.refresh()
 
   # -- lifecycle ---------------------------------------------------------
 
@@ -369,6 +450,19 @@ class LiveTable:
     self._state[str(item)]["values"].update(values)
     self._refresh()
 
+  def progress(self, markup: str, **values) -> None:
+    """Show the running item's status line under the table, and tick its row with *values*.
+
+    This is what :func:`live_status` hands to an inner stage while this table owns the live region,
+    so the stage's own progress reporting lands here instead of being dropped.
+    """
+    self._note = markup
+    if values:
+      running = next((i for i, s in self._state.items() if s["status"] == "running"), None)
+      if running is not None:
+        self._state[running]["values"].update(values)
+    self._refresh()
+
   def finish(self, item, ok: bool = True, **values) -> None:
     item = str(item)
     s = self._state[item]
@@ -376,6 +470,7 @@ class LiveTable:
     if s["started"] is not None:
       s["elapsed"] = time.time() - s["started"]
     s["values"].update(values)
+    self._note = ""  # the finished row carries the numbers now
     if self._live is None:
       shown = "  ".join(f"{k} {v}" for k, v in s["values"].items())
       echo(f"{'✓' if ok else '✖'} {item}  [dim]{shown}[/]", "info")
@@ -384,7 +479,10 @@ class LiveTable:
   def __enter__(self) -> LiveTable:
     global _live_owner
     if console.is_terminal and not live_region_taken():
-      self._live = Live(self._render(), console=console, transient=True, refresh_per_second=8)
+      # Live is handed a proxy, not a rendered table: it re-renders on every auto-refresh tick, so
+      # the spinner turns and the clock advances between updates. Handing it a built Table instead
+      # would redraw the same frozen frame 8x/second — which is what a hung run looks like.
+      self._live = Live(_Dynamic(self), console=console, transient=True, refresh_per_second=8)
       self._live.__enter__()
       _live_owner = self
     return self

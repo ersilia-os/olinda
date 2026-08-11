@@ -33,7 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
-from olinda.console import echo, rule, summary_panel
+from olinda.console import echo, summary_panel, sweep_progress
 from olinda.featurizer import MorganCountFeaturizer
 
 # Layout under <model_dir>/
@@ -135,11 +135,12 @@ def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 50_
   if dim != n_features:
     raise ValueError(f"reference library has {dim}-d features but G expects {n_features}-d")
   out = []
-  for start in range(0, n, chunk):
-    xb = np.asarray(matrix.x[start : start + chunk], dtype=np.float32)
-    g = np.asarray(model.predict_proba(xb))[:, 1] if task == "binary" else np.asarray(model.predict(xb))
-    out.append(np.asarray(g, dtype=np.float32).ravel())
-    echo(f"  scored {min(start + chunk, n):,}/{n:,} reference compounds", "info")
+  with sweep_progress("scoring", n) as tick:
+    for start in range(0, n, chunk):
+      xb = np.asarray(matrix.x[start : start + chunk], dtype=np.float32)
+      g = np.asarray(model.predict_proba(xb))[:, 1] if task == "binary" else np.asarray(model.predict(xb))
+      out.append(np.asarray(g, dtype=np.float32).ravel())
+      tick(min(start + chunk, n))
   return np.concatenate(out)
 
 
@@ -198,17 +199,18 @@ def _fit_applicability(gt_bits, n_features, matrix, sim_lo: float, sim_hi: float
 
   gt_prepared = prepare_gt_bits(gt_bits)  # built once, reused for every chunk
   n = matrix.n_rows
-  for start in range(0, n, chunk):
-    bits = (matrix.x[start : start + chunk] > 0).astype(np.float32)
-    sim = tanimoto_nn(bits, prepared=gt_prepared)
-    y_low = (sim >= sim_lo).astype(np.int64)
-    y_high = (sim >= sim_hi).astype(np.int64)
-    col_total = bits.sum(axis=0)  # shared by both targets' class-0 counts
-    _accumulate(bits, y_low, low_n, low_on, col_total)
-    _accumulate(bits, y_high, high_n, high_on, col_total)
-    n_low += int(y_low.sum())
-    n_high += int(y_high.sum())
-    echo(f"  scanned {min(start + chunk, n):,}/{n:,} reference compounds", "info")
+  with sweep_progress("scanning", n) as tick:
+    for start in range(0, n, chunk):
+      bits = (matrix.x[start : start + chunk] > 0).astype(np.float32)
+      sim = tanimoto_nn(bits, prepared=gt_prepared)
+      y_low = (sim >= sim_lo).astype(np.int64)
+      y_high = (sim >= sim_hi).astype(np.int64)
+      col_total = bits.sum(axis=0)  # shared by both targets' class-0 counts
+      _accumulate(bits, y_low, low_n, low_on, col_total)
+      _accumulate(bits, y_high, high_n, high_on, col_total)
+      n_low += int(y_low.sum())
+      n_high += int(y_high.sum())
+      tick(min(start + chunk, n))
 
   # Fold the labeled compounds in as guaranteed positives (HIGH ⇒ also ≥ LOW).
   gb = (np.asarray(gt_bits) > 0).astype(np.float32)
@@ -452,7 +454,6 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
   gt_root = model_dir / GT_DIRNAME
   gt_dir = gt_root / GT_MODEL_SUBDIR
   gt_root.mkdir(parents=True, exist_ok=True)
-  rule("olinda · learn-hard", style="green", right=str(model_dir))
 
   # --- load the prepared hard labels ---------------------------------------
   with h5py.File(hard_path, "r") as f:

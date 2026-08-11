@@ -37,7 +37,7 @@ Fetch the reference library once (~2.8 GB), then fit:
 ```bash
 olinda setup
 olinda fit -s teacher.csv -m runs/my_model
-olinda predict -m runs/my_model -i compounds.csv -o predictions.csv
+olinda predict -m runs/my_model/model.onnx -i compounds.csv -o predictions.csv
 ```
 
 `teacher.csv` holds a `smiles` column plus one or more value columns, covering **exactly the

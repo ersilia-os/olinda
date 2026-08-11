@@ -93,11 +93,14 @@ class _LiveProgress(xgb.callback.TrainingCallback):
           f"· R² {self.r2:.3f} · ρ {self.rho:.3f}",
           "info",
         )
+    from olinda.train.backend import _row_values
+
     self.update(
       f"  [bold cyan]{spinner(epoch)} training[/] [dim]round[/] [bold]{epoch}[/][dim]/{self.total}[/]  "
       f"[dim]·[/]  [dim]{self.metric}[/] train [bold]{tr:.4f}[/] · val [bold cyan]{va:.4f}[/]  "
       f"[dim]·[/]  R² [bold]{self.r2:.3f}[/] · ρ [bold]{self.rho:.3f}[/]  "
-      f"[dim]· best@{self.best_round} · {_fmt_secs(time.perf_counter() - self.t0)}[/]"
+      f"[dim]· best@{self.best_round} · {_fmt_secs(time.perf_counter() - self.t0)}[/]",
+      **_row_values(self.r2, self.rho, va, self.metric, epoch),
     )
     return False
 
