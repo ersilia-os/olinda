@@ -242,3 +242,51 @@ def test_elapsed_covers_the_whole_command_not_the_last_column(tmp_path, monkeypa
   plain = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", r.output)
   # learn-soft's summary reports one Elapsed; it must not be a per-column figure of 0s
   assert "Elapsed" in plain
+
+
+def test_reusing_a_run_directory_is_caught_not_silently_wrong(tmp_path, monkeypatch):
+  """Column dirs are positional, so re-preparing rebinds c0 to a different assay."""
+  from olinda import run as runlib
+
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, smiles, x = _stage(home, tmp_path, monkeypatch, n_columns=2)
+  md = tmp_path / "run"
+  assert _run(["fit", "-s", str(soft), "-m", str(md), "--num-boost-round", "40"]).exit_code == 0
+
+  # re-prepare the same directory with differently-named columns; columns/c0 keeps the old model
+  frame = {"smiles": smiles}
+  for i in range(2):
+    v = x[:, 150 * i : 150 * (i + 1) + 200].sum(1).astype(np.float32)
+    frame[f"renamed{i}_probability"] = (v - v.min()) / (np.ptp(v) + 1e-9)
+  other = tmp_path / "other.csv"
+  pd.DataFrame(frame).to_csv(other, index=False)
+  assert _run(["prepare", "-s", str(other), "-m", str(md)]).exit_code == 0
+
+  names = [c["name"] for c in runlib.read_manifest(md)["columns"]]
+  assert names == ["renamed0_probability", "renamed1_probability"]
+
+  r = _run(["export", "-m", str(md)])  # the stale booster must not be fused under the new name
+  assert r.exit_code != 0
+  assert "stale" in r.output and "trained for column" in r.output
+
+
+def test_a_changed_reference_library_is_refused(tmp_path, monkeypatch):
+  """Splits are positional indices, so a swapped library would silently mispair features."""
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, smiles, _ = _stage(home, tmp_path, monkeypatch, n_columns=2)
+  md = tmp_path / "run"
+  assert _run(["prepare", "-s", str(soft), "-m", str(md)]).exit_code == 0
+
+  # regenerate the library with a different number of rows, as `olinda setup` might
+  from olinda.featurizer import MorganCountFeaturizer
+
+  fewer = smiles[:200]
+  with h5py.File(home / "erl0_morgan.h5", "w") as f:
+    f.create_dataset("data", data=MorganCountFeaturizer().transform(fewer).astype(np.uint8))
+    f.create_dataset("input", data=np.array([s.encode() for s in fewer]))
+
+  r = _run(["learn-soft", "-m", str(md), "--num-boost-round", "40"])
+  assert r.exit_code != 0
+  assert "library changed" in r.output or "prepared against" in r.output

@@ -431,6 +431,10 @@ def learn_soft_cmd(model_dir, num_boost_round):
     raise click.ClickException(f"reference library missing at {descriptors} — run `olinda setup`")
   echo(f"loading reference descriptors · [dim]{descriptors.name}[/]", "run")
   matrix = ReferenceMatrix.load(descriptors)
+  try:
+    matrix.assert_matches(manifest["reference_library"])
+  except ValueError as exc:
+    raise click.ClickException(str(exc)) from exc
 
   results = []
   with LiveTable(
@@ -464,7 +468,10 @@ def learn_soft_cmd(model_dir, num_boost_round):
 
   from olinda.export import build_bundle
 
-  build_bundle(model_dir)
+  try:
+    build_bundle(model_dir)
+  except (ValueError, FileNotFoundError) as exc:
+    raise click.ClickException(str(exc)) from exc
 
   summary_panel(
     "olinda · learn-soft",
@@ -579,6 +586,10 @@ def learn_hard_cmd(model_dir):
 
   echo(f"loading reference descriptors · [dim]{MORGAN_FINGERPRINTS_FILENAME}[/]", "run")
   matrix = ReferenceMatrix.load(OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME)
+  try:
+    matrix.assert_matches(manifest["reference_library"])
+  except ValueError as exc:
+    raise click.ClickException(str(exc)) from exc
 
   for i, col in enumerate(with_hard, start=1):
     rule(
@@ -646,7 +657,10 @@ def export_cmd(model_dir):
       f"{len(missing)} column(s) not trained yet ({', '.join(missing)}) — "
       f"run `olinda learn-soft -m {model_dir}` first"
     )
-  build_bundle(md)
+  try:
+    build_bundle(md)
+  except (ValueError, FileNotFoundError) as exc:
+    raise click.ClickException(str(exc)) from exc
 
 
 @cli.command("predict", help="Run a model on SMILES via its model.onnx — emits prediction + channels.")

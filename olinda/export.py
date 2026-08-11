@@ -433,6 +433,23 @@ def _toposort(nodes: list, available: set) -> list:
   return order
 
 
+def _assert_model_belongs_to(sm, entry: dict) -> None:
+  """Refuse to fuse a model that was trained for a different column.
+
+  Column directories are named positionally (``c0``, ``c1``, …), so re-preparing a run directory with
+  a different teacher file rebinds those names while leaving the previous run's artifacts in place.
+  Without this check the stale booster is fused under the new column's name, and the parity check
+  agrees because it validates against the same stale files.
+  """
+  trained_for = sm.metadata.get("column")
+  if trained_for is not None and trained_for != entry["name"]:
+    raise ValueError(
+      f"{entry['dir']} holds a model trained for column {trained_for!r}, but this run calls "
+      f"{entry['id']} {entry['name']!r}. The directory is stale — re-run `olinda learn-soft`, or "
+      "prepare into a clean directory."
+    )
+
+
 def _column_plan(model_dir: Path) -> tuple[dict, list]:
   """The run manifest plus, per column, where its artifacts live and what its graph output is called.
 
@@ -507,6 +524,7 @@ def _fuse(model_dir: Path):
   for entry in plan:
     p = entry["id"] + "_"  # every node and tensor of this column is namespaced by it
     sm = StudentModel.load(entry["dir"], featurizer_factory=featurizer_from_meta)
+    _assert_model_belongs_to(sm, entry)
     featurizer = sm.metadata.get("featurizer") or featurizer
     featurizer_class = sm.metadata.get("featurizer_class", featurizer_class)
     n_features = int(featurizer.get("fp_size", sm.metadata.get("x_dim", n_features)))

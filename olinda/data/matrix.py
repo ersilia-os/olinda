@@ -63,6 +63,25 @@ class ReferenceMatrix:
   def nbytes(self) -> int:
     return int(self.x.nbytes)
 
+  def assert_matches(self, reference: dict) -> None:
+    """Refuse to proceed if this library is not the one a run's indices were computed against.
+
+    Splits are stored as positional row indices, so a library that has been regenerated or swapped
+    since ``prepare`` pairs each row's features with a different molecule's label. Training would
+    complete and the metrics would look plausible; the model would be meaningless.
+    """
+    want_rows, want_dim = reference.get("n_rows"), reference.get("dim")
+    if want_rows is not None and self.n_rows != want_rows:
+      raise ValueError(
+        f"reference library has {self.n_rows:,} rows but this run was prepared against "
+        f"{want_rows:,} — the library changed. Re-run `olinda prepare`."
+      )
+    if want_dim is not None and self.n_cols != want_dim:
+      raise ValueError(
+        f"reference library has {self.n_cols}-d fingerprints but this run was prepared against "
+        f"{want_dim}-d — the library changed. Re-run `olinda prepare`."
+      )
+
 
 def index_sequence(matrix: ReferenceMatrix, idx: np.ndarray, batch_rows: int = _BATCH_ROWS):
   """Return an ``lgb.Sequence`` over ``matrix`` restricted to ``idx``.
