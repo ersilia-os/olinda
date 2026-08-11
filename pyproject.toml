@@ -49,6 +49,11 @@ olinda = "olinda._entry:main"
 [tool.setuptools.packages.find]
 include = ["olinda*"]
 exclude = ["files*", "tests*", "docs*"]
+# olinda is a regular package, not a namespace one. Left at the default (true), setuptools also
+# registers it as a namespace, and in an editable install the namespace finder can win — which makes
+# `olinda/__init__.py` never execute, so `from olinda import OlindaArtifact` fails from any directory
+# outside the repo root while `import olinda.data` still works.
+namespaces = false
 
 [build-system]
 requires = ["setuptools>=78.1.0", "wheel>=0.45.1"]
