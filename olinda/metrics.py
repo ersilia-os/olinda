@@ -131,3 +131,120 @@ def regression_metrics(y_true, y_pred) -> dict:
     "spearman": _spearmanr(y, p),
     "top_decile_rmse": float(np.sqrt((err[tail] ** 2).mean())) if tail.any() else float("nan"),
   }
+
+
+# ── binary labels ────────────────────────────────────────────────────────────
+#
+# Implemented here rather than pulled from scikit-learn: sklearn reaches olinda only as a transitive
+# dependency of lazy-qsar's [fit] extra, so importing it directly would make a documented dependency
+# out of an accident — and these are a few lines of numpy each.
+
+
+def roc_curve(y_true, score) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+  """``(fpr, tpr, thresholds)`` over the descending-score sweep, ties collapsed into one point.
+
+  Ties matter here: a model that assigns the same score to a positive and a negative must not appear
+  to separate them, which is what stepping through the sorted array one row at a time would imply.
+  """
+  y = np.asarray(y_true).ravel().astype(np.int64)
+  s = np.asarray(score, dtype=np.float64).ravel()
+  order = np.argsort(-s, kind="mergesort")  # stable, so equal scores keep input order
+  s, y = s[order], y[order]
+
+  # One point per distinct score: the last index of each run of equal values.
+  distinct = np.flatnonzero(np.diff(s))
+  idx = np.r_[distinct, len(s) - 1]
+  tp = np.cumsum(y)[idx]
+  fp = 1 + idx - tp
+  n_pos, n_neg = int(y.sum()), int(len(y) - y.sum())
+  if n_pos == 0 or n_neg == 0:  # AUC is undefined with one class present
+    nan = np.array([np.nan])
+    return nan, nan, nan
+  return np.r_[0.0, fp / n_neg], np.r_[0.0, tp / n_pos], np.r_[np.inf, s[idx]]
+
+
+def _auc(x: np.ndarray, y: np.ndarray) -> float:
+  """Area under a curve given by points already sorted along ``x`` (trapezoid)."""
+  if len(x) < 2 or not np.isfinite(x).all():
+    return float("nan")
+  return float(np.trapezoid(y, x))
+
+
+def pr_curve(y_true, score) -> tuple[np.ndarray, np.ndarray]:
+  """``(recall, precision)`` over the same descending-score sweep."""
+  y = np.asarray(y_true).ravel().astype(np.int64)
+  s = np.asarray(score, dtype=np.float64).ravel()
+  order = np.argsort(-s, kind="mergesort")
+  y = y[order]
+  s = s[order]
+  distinct = np.flatnonzero(np.diff(s))
+  idx = np.r_[distinct, len(s) - 1]
+  tp = np.cumsum(y)[idx]
+  n_pos = int(y.sum())
+  if n_pos == 0:
+    nan = np.array([np.nan])
+    return nan, nan
+  return tp / n_pos, tp / (1 + idx)
+
+
+def average_precision(y_true, score) -> float:
+  """AP as the step-wise sum ``Σ (Rₙ − Rₙ₋₁)·Pₙ``.
+
+  Not the trapezoid under the PR curve: interpolating between operating points overstates precision
+  in the region between them, which is why sklearn's ``average_precision_score`` sums steps too.
+  """
+  recall, precision = pr_curve(y_true, score)
+  if not np.isfinite(recall).all():
+    return float("nan")
+  return float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
+
+
+def enrichment_factor(y_true, score, fraction: float = 0.01) -> float:
+  """How many times more actives the top ``fraction`` holds than a random selection of that size.
+
+  1.0 is chance; the ceiling is ``1 / hit_rate``, so read it against that rather than in absolute
+  terms — on a 6%-positive set no model can exceed ~16x.
+  """
+  y = np.asarray(y_true).ravel().astype(np.int64)
+  s = np.asarray(score, dtype=np.float64).ravel()
+  n_pos = int(y.sum())
+  k = max(1, int(round(fraction * len(y))))
+  if n_pos == 0 or len(y) == 0:
+    return float("nan")
+  top = np.argsort(-s, kind="mergesort")[:k]
+  return float((y[top].sum() / k) / (n_pos / len(y)))
+
+
+def binary_metrics(y_true, score, fractions=(0.01, 0.05, 0.10)) -> dict:
+  """Score a ranking against binary labels: AUROC, average precision, and enrichment at top-k.
+
+  Both AUROC and AP are threshold-free, which is what we want — the model emits a continuous value on
+  the teacher's scale, not a calibrated probability, so any fixed cutoff would be arbitrary.
+
+  Parameters
+  ----------
+  y_true : array_like
+      Binary labels (0/1); flattened to 1-D.
+  score : array_like
+      The ranking score — higher means more likely positive.
+  fractions : sequence of float
+      Top-k cuts to report enrichment at, as fractions of the set.
+
+  Returns
+  -------
+  dict
+      ``{"n", "n_positive", "hit_rate", "auroc", "average_precision", "enrichment": {...}}``, all
+      plain Python numbers so the result is directly JSON-serializable.
+  """
+  y = np.asarray(y_true).ravel().astype(np.int64)
+  s = np.asarray(score, dtype=np.float64).ravel()
+  n_pos = int(y.sum())
+  fpr, tpr, _ = roc_curve(y, s)
+  return {
+    "n": int(len(y)),
+    "n_positive": n_pos,
+    "hit_rate": float(n_pos / len(y)) if len(y) else float("nan"),
+    "auroc": _auc(fpr, tpr),
+    "average_precision": average_precision(y, s),
+    "enrichment": {f"top_{f:g}": enrichment_factor(y, s, f) for f in fractions},
+  }
