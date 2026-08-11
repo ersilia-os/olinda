@@ -184,10 +184,12 @@ def test_rank_correlation_is_none_when_the_direction_is_given():
   assert cal.rank_correlation is None
 
 
-def test_ordinal_ranks_match_the_nested_argsort_idiom():
-  """The faster ranking must be exactly the ranking it replaced, ties included."""
-  from olinda.calibrate import _ordinal_ranks
+def test_rank_correlation_is_not_inflated_by_ties():
+  """Ties must share a rank. Breaking them by position reports agreement that is not there."""
+  from olinda.calibrate import _spearman_sign
 
-  rng = np.random.default_rng(2)
-  for x in (rng.random(1000), rng.integers(0, 5, 1000).astype(float), np.zeros(50)):
-    assert np.array_equal(_ordinal_ranks(x), np.argsort(np.argsort(x)).astype(np.float64))
+  y = np.array([0.0] * 8 + [1.0] * 2)
+  p = np.arange(10, dtype=float)
+  rho = _spearman_sign(y, p)
+  assert rho == pytest.approx(0.6963, abs=1e-4)  # ordinal ranks would report 1.0
+  assert rho < 0.999

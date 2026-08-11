@@ -178,3 +178,47 @@ def test_inference_path_does_not_import_training_libraries(tmp_path, monkeypatch
   )
   out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
   assert out.stdout.strip() == "", f"inference imported training-only modules: {out.stdout.strip()}"
+
+
+# ── unparseable molecules must not look like confident predictions ───────────
+
+
+def test_unparseable_smiles_yield_nan_and_a_warning(tmp_path, monkeypatch):
+  """An all-zero fingerprint scores fine and the gate calls it HIGH-confidence — refuse to report it."""
+  import warnings
+
+  model = OlindaArtifact(_build_artifact(tmp_path, monkeypatch))
+  mixed = ["CCO", "not_a_smiles", "", "C1CC", "c1ccccc1"]
+  with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    df = model.run(mixed)
+  values = df[model.columns[0]].to_numpy()
+  assert np.isfinite(values[0]) and np.isfinite(values[4])  # the real molecules still predict
+  assert np.isnan(values[1:4]).all()  # garbage, an empty string, and an unclosed ring
+  assert caught and "could not be parsed" in str(caught[0].message)
+  assert "3 of 5" in str(caught[0].message)
+
+
+def test_valid_input_warns_about_nothing(tmp_path, monkeypatch):
+  import warnings
+
+  model = OlindaArtifact(_build_artifact(tmp_path, monkeypatch))
+  with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    df = model.run(["CCO", "c1ccccc1"])
+  assert np.isfinite(df[model.columns[0]].to_numpy()).all()
+  assert not [w for w in caught if "could not be parsed" in str(w.message)]
+
+
+def test_declared_outputs_are_checked_against_the_graph(tmp_path, monkeypatch):
+  """A metadata/graph mismatch must fail at load, not as a KeyError mid-prediction."""
+  path = _build_artifact(tmp_path, monkeypatch)
+  m = onnx.load(str(path))
+  for prop in m.metadata_props:
+    if prop.key == "olinda":
+      meta = json.loads(prop.value)
+      meta["columns"][0]["output"] = "no_such_output"
+      prop.value = json.dumps(meta)
+  onnx.save(m, str(path))
+  with pytest.raises(ValueError, match="does not produce"):
+    OlindaArtifact(path)

@@ -138,8 +138,3 @@ def resolve_tuned_params(model_dir: Path, col_dir: Path, backend_name: str) -> d
   )
   echo(f"tuned hyperparameters from {path.name} — {shown}", "run")
   return tuned
-
-  # Fuse the served bundle: a single self-describing model.onnx (soft-only here; learn-hard re-fuses).
-  from olinda.export import build_bundle
-
-  build_bundle(model_dir)

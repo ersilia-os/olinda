@@ -24,12 +24,38 @@ def _pearsonr(y, p) -> float:
   return float((y * p).sum() / denom)
 
 
+def average_ranks(x) -> np.ndarray:
+  """Ranks of ``x`` with tied values sharing their average rank.
+
+  This is what Spearman is defined on. The cheaper ``argsort(argsort(x))`` gives *ordinal* ranks,
+  which break ties by array position and so manufacture agreement: on ``y = [0]*8 + [1]*2`` against
+  ``p = 0..9`` it reports a rank correlation of 1.000 where the true value is 0.696. Teacher columns
+  of probabilities routinely carry a mass of identical values, so that error is not hypothetical.
+
+  Vectorised — one sort plus a group-mean — so it costs about 100 ms on the 1.35M-row reference
+  library. Matches ``scipy.stats.rankdata`` exactly (0-based).
+  """
+  x = np.asarray(x)
+  n = len(x)
+  if n == 0:
+    return np.empty(0, dtype=np.float64)
+  order = np.argsort(x, kind="stable")
+  ordered = x[order]
+  is_new = np.empty(n, dtype=bool)
+  is_new[0] = True
+  np.not_equal(ordered[1:], ordered[:-1], out=is_new[1:])
+  group = np.cumsum(is_new) - 1
+  counts = np.bincount(group)
+  starts = np.cumsum(counts) - counts
+  ranks = np.empty(n, dtype=np.float64)
+  ranks[order] = (starts + (counts - 1) / 2.0)[group]
+  return ranks
+
+
 def _spearmanr(y, p) -> float:
   y = np.asarray(y, dtype=np.float64)
   p = np.asarray(p, dtype=np.float64)
-  ry = np.argsort(np.argsort(y))
-  rp = np.argsort(np.argsort(p))
-  return _pearsonr(ry, rp)
+  return _pearsonr(average_ranks(y), average_ranks(p))
 
 
 def _r2(y, p) -> float:

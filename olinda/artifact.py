@@ -154,6 +154,15 @@ class OlindaArtifact:
       }
     ]
 
+    # Fail here rather than with a bare KeyError deep inside run() if the embedded column list and
+    # the graph disagree — which is what a hand-edited or mismatched artifact looks like.
+    missing = [c["output"] for c in self._columns if c["output"] not in self._output_names]
+    if missing:
+      raise ValueError(
+        f"{path} declares output(s) {missing} that the graph does not produce; "
+        f"it exposes {self._output_names}. Rebuild it with `olinda export`."
+      )
+
   # ── what the artifact says about itself ────────────────────────────────────
 
   @property
@@ -213,7 +222,7 @@ class OlindaArtifact:
 
   def featurize(self, smiles) -> np.ndarray:
     """Morgan count fingerprints for *smiles*, exactly as the model was trained on."""
-    # The featurizer already allocates float32; `copy=False` avoids duplicating every batch.
+    # The featurizer already allocates float32, so this is a view rather than a copy.
     return np.asarray(self._featurizer.transform([str(s) for s in smiles]), dtype=np.float32)
 
   def run_channels(self, smiles, batch_size: int = _BATCH, progress: bool | None = None) -> dict:
@@ -224,15 +233,37 @@ class OlindaArtifact:
 
     ``progress`` shows a bar on stderr; the default shows one only for inputs larger than a single
     batch, and only when stderr is a terminal.
+
+    Molecules RDKit cannot parse yield ``NaN`` in every channel rather than a number. Their
+    fingerprint is all-zero, which the graph happily scores — and the applicability gate places an
+    empty fingerprint in its *most*-trusted bucket — so an unparseable input would otherwise come
+    back looking like a confident prediction.
     """
+    import warnings
+
     smiles = [str(s) for s in smiles]
     chunks: list[dict] = []
+    n_invalid = 0
     with _Progress(len(smiles), enabled=progress) as bar:
       for start in range(0, len(smiles), batch_size):
         batch = smiles[start : start + batch_size]
-        outs = self._session.run(None, {self._input_name: self.featurize(batch)})
-        chunks.append({n: np.asarray(v).ravel() for n, v in zip(self._output_names, outs)})
+        fp = self.featurize(batch)
+        invalid = fp.sum(axis=1) == 0
+        n_invalid += int(invalid.sum())
+        outs = self._session.run(None, {self._input_name: fp})
+        block = {n: np.asarray(v, dtype=np.float64).ravel() for n, v in zip(self._output_names, outs)}
+        if invalid.any():
+          for values in block.values():
+            values[invalid] = np.nan
+        chunks.append(block)
         bar.advance(len(batch))
+
+    if n_invalid:
+      warnings.warn(
+        f"{n_invalid} of {len(smiles)} input SMILES could not be parsed; their predictions are NaN",
+        RuntimeWarning,
+        stacklevel=2,
+      )
     if not chunks:
       return {n: np.array([], dtype=np.float64) for n in self._output_names}
     return {n: np.concatenate([c[n] for c in chunks]) for n in self._output_names}

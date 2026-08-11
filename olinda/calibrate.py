@@ -168,26 +168,18 @@ class IsotonicCalibrator:
     return cal
 
 
-def _ordinal_ranks(x: np.ndarray) -> np.ndarray:
-  """Ordinal ranks of ``x`` (ties broken by position), as float64.
-
-  Scattering positions through one argsort gives exactly what ``argsort(argsort(x))`` gives, at half
-  the sorting: on the 1.35M-row reference library that is 399ms of ranking down to 231ms.
-  """
-  order = np.argsort(x)
-  ranks = np.empty(len(x), dtype=np.float64)
-  ranks[order] = np.arange(len(x), dtype=np.float64)
-  return ranks
-
-
 def _spearman_sign(a: np.ndarray, b: np.ndarray) -> float:
   """Rank (Spearman) correlation between ``a`` and ``b`` (0 if degenerate).
 
   Named for its use — :meth:`IsotonicCalibrator.fit` only needs the sign to orient the map — but the
-  full correlation is returned, since ``learn-hard`` also reports its magnitude.
+  full correlation is returned, since ``learn-hard`` also reports its magnitude. Ties share their
+  average rank (see :func:`olinda.metrics.average_ranks`); breaking them by position would inflate the
+  correlation, and here that would be deciding the calibration's *direction* on an inflated number.
   """
-  ra = _ordinal_ranks(a)
-  rb = _ordinal_ranks(b)
+  from olinda.metrics import average_ranks
+
+  ra = average_ranks(a)
+  rb = average_ranks(b)
   ra -= ra.mean()
   rb -= rb.mean()
   denom = float(np.sqrt((ra**2).sum()) * np.sqrt((rb**2).sum()))
