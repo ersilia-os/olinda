@@ -117,21 +117,21 @@ def _reference_path() -> Path:
   return path
 
 
-def _score_reference(model, task: str, n_features: int, ref_path: Path, chunk: int = 200_000):
-  """Stream the reference library and return G's per-compound score (aligned to erl0_morgan row order)."""
-  import h5py
+def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 200_000):
+  """Score G over every reference compound, aligned to erl0_morgan row order.
 
+  Reads from the shared in-RAM matrix rather than reopening the library, so a multi-column run pays
+  for one load instead of one per scan per column.
+  """
+  n, dim = matrix.n_rows, matrix.n_cols
+  if dim != n_features:
+    raise ValueError(f"reference library has {dim}-d features but G expects {n_features}-d")
   out = []
-  with h5py.File(ref_path, "r") as f:
-    key = "data" if "data" in f else next(iter(f.keys()))
-    n, dim = int(f[key].shape[0]), int(f[key].shape[1])
-    if dim != n_features:
-      raise ValueError(f"reference library has {dim}-d features but G expects {n_features}-d")
-    for start in range(0, n, chunk):
-      xb = np.asarray(f[key][start : start + chunk], dtype=np.float32)
-      g = np.asarray(model.predict_proba(xb))[:, 1] if task == "binary" else np.asarray(model.predict(xb))
-      out.append(g.astype(np.float32).ravel())
-      echo(f"  scored {min(start + chunk, n):,}/{n:,} reference compounds", "info")
+  for start in range(0, n, chunk):
+    xb = np.asarray(matrix.x[start : start + chunk], dtype=np.float32)
+    g = np.asarray(model.predict_proba(xb))[:, 1] if task == "binary" else np.asarray(model.predict(xb))
+    out.append(g.astype(np.float32).ravel())
+    echo(f"  scored {min(start + chunk, n):,}/{n:,} reference compounds", "info")
   return np.concatenate(out)
 
 
@@ -142,9 +142,7 @@ def _pearson(a: np.ndarray, b: np.ndarray) -> float:
   return float("nan") if d == 0 else float((ac * bc).sum() / d)
 
 
-def _fit_applicability(
-  gt_bits, n_features, ref_path: Path, sim_lo: float, sim_hi: float, chunk: int = 50_000
-):
+def _fit_applicability(gt_bits, n_features, matrix, sim_lo: float, sim_hi: float, chunk: int = 50_000):
   """Learn the applicability gate: bucket the reference by Tanimoto-NN to the labeled set, fit two NB models.
 
   Streams the reference library once, computing each compound's 1-NN Tanimoto similarity to the labeled set
@@ -158,7 +156,6 @@ def _fit_applicability(
       ``(clf, counts)`` where ``clf`` is an :class:`~olinda.applicability.ApplicabilityClassifier` and
       ``counts`` is ``{"n_ref", "n_high", "n_low", "n_not", "n_gt"}`` for reporting.
   """
-  import h5py
 
   from olinda.applicability import (
     A_HIGH,
@@ -185,20 +182,17 @@ def _fit_applicability(
         feat_on[c] += bits[m].sum(axis=0)
 
   gt_prepared = prepare_gt_bits(gt_bits)  # built once, reused for every chunk
-  with h5py.File(ref_path, "r") as f:
-    key = "data" if "data" in f else next(iter(f.keys()))
-    n = int(f[key].shape[0])
-    for start in range(0, n, chunk):
-      xb = np.asarray(f[key][start : start + chunk])
-      bits = (xb > 0).astype(np.float32)
-      sim = tanimoto_nn(bits, prepared=gt_prepared)
-      y_low = (sim >= sim_lo).astype(np.int64)
-      y_high = (sim >= sim_hi).astype(np.int64)
-      _accumulate(bits, y_low, low_n, low_on)
-      _accumulate(bits, y_high, high_n, high_on)
-      n_low += int(y_low.sum())
-      n_high += int(y_high.sum())
-      echo(f"  scanned {min(start + chunk, n):,}/{n:,} reference compounds", "info")
+  n = matrix.n_rows
+  for start in range(0, n, chunk):
+    bits = (matrix.x[start : start + chunk] > 0).astype(np.float32)
+    sim = tanimoto_nn(bits, prepared=gt_prepared)
+    y_low = (sim >= sim_lo).astype(np.int64)
+    y_high = (sim >= sim_hi).astype(np.int64)
+    _accumulate(bits, y_low, low_n, low_on)
+    _accumulate(bits, y_high, high_n, high_on)
+    n_low += int(y_low.sum())
+    n_high += int(y_high.sum())
+    echo(f"  scanned {min(start + chunk, n):,}/{n:,} reference compounds", "info")
 
   # Fold the labeled compounds in as guaranteed positives (HIGH ⇒ also ≥ LOW).
   gb = (np.asarray(gt_bits) > 0).astype(np.float32)
@@ -388,7 +382,7 @@ def prepare_hard_labels_wide(
   return out
 
 
-def train_ground_truth(model_dir: str | Path, soft=None) -> dict:
+def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
   """Train the hard-label model ``G`` and calibrate it onto the soft-label scale.
 
   Reads ``<model_dir>/hard.h5`` (written by :func:`prepare_hard_labels`) and ``<model_dir>/soft.h5``
@@ -421,7 +415,12 @@ def train_ground_truth(model_dir: str | Path, soft=None) -> dict:
       "from the run's targets.h5"
     )
   soft = np.asarray(soft, dtype=np.float64)
-  ref_path = _reference_path()  # raises a friendly error if erl0_morgan.h5 is missing
+  if matrix is None:
+    # Standalone call: load the library ourselves. `learn-hard` passes one in so a multi-column run
+    # loads it once for the whole run instead of twice per column.
+    from olinda.data.matrix import ReferenceMatrix
+
+    matrix = ReferenceMatrix.load(_reference_path())
 
   gt_root = model_dir / GT_DIRNAME
   gt_dir = gt_root / GT_MODEL_SUBDIR
@@ -452,7 +451,7 @@ def train_ground_truth(model_dir: str | Path, soft=None) -> dict:
 
     # === Step 2/4 — score G across the full reference library ==============
     echo("Step 2/4 · scoring G across the reference library", "run")
-    g_ref = _score_reference(gt_model, "binary", X.shape[1], ref_path)
+    g_ref = _score_reference(gt_model, "binary", X.shape[1], matrix)
     with h5py.File(gt_root / G_REFERENCE_NAME, "w") as f:
       f.create_dataset("g", data=g_ref.astype(np.float32))
     echo(f"  saved G scores for {len(g_ref):,} reference compounds → {G_REFERENCE_NAME}", "run")
@@ -490,7 +489,7 @@ def train_ground_truth(model_dir: str | Path, soft=None) -> dict:
 
     echo("Step 4/4 · learning applicability classifiers (NOT / LOW / HIGH) from the reference", "run")
     gt_bits = (X > 0).astype(np.float32)
-    ad_clf, ad_counts = _fit_applicability(gt_bits, X.shape[1], ref_path, SIM_LO, SIM_HI)
+    ad_clf, ad_counts = _fit_applicability(gt_bits, X.shape[1], matrix, SIM_LO, SIM_HI)
     ad_clf.save(gt_root / APPLICABILITY_NAME)
     echo(
       f"  buckets over {ad_counts['n_ref']:,} reference compounds · "

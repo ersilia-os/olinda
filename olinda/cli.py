@@ -686,6 +686,7 @@ def learn_hard_cmd(model_dir):
   from olinda import run as runlib
   from olinda.console import (
     STEP_COLORS,
+    echo,
     elapsed,
     path as cpath,
     rule,
@@ -709,13 +710,23 @@ def learn_hard_cmd(model_dir):
       f"`olinda prepare -s <soft> -h <hard> -m {model_dir}` first"
     )
 
+  # One resident copy of the library for the whole run: each column otherwise reopened and streamed
+  # it twice (scoring G, then fitting the gate), so a 10-column run read 2.8 GB twenty times over.
+  from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
+  from olinda.data.matrix import ReferenceMatrix
+
+  echo(f"loading reference descriptors · [dim]{MORGAN_FINGERPRINTS_FILENAME}[/]", "run")
+  matrix = ReferenceMatrix.load(OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME)
+
   for i, col in enumerate(with_hard, start=1):
     rule(
       f"STEP {i}/{len(with_hard)} · {col['name']}",
       style=STEP_COLORS["learn-hard"],
       right=f"column {i}/{len(with_hard)}",
     )
-    train_ground_truth(runlib.column_dir(md, col["id"]), soft=runlib.read_target(md, col["id"]))
+    train_ground_truth(
+      runlib.column_dir(md, col["id"]), soft=runlib.read_target(md, col["id"]), matrix=matrix
+    )
     col["status"]["hard_trained"] = True
     runlib.write_manifest(md, manifest)
 
