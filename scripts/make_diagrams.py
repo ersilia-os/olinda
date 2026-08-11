@@ -191,14 +191,15 @@ def draw_pipeline(ax) -> None:
 
   steps = [
     ("setup", "erl0_morgan.h5\nreference fingerprints", False),
-    ("prepare", "train.h5 · val.h5\nsoft.h5 · hard.h5", False),
+    ("prepare", "manifest.json\ntargets.h5 · splits.h5", False),
     ("tune", "best_params.json", True),
-    ("learn-soft", "booster + model.onnx\nval_metrics.json", False),
-    ("learn-hard", "_ground_truth/\nmodel.onnx re-fused", True),
-    ("export", "model.onnx\nrebuilt on demand", False),
+    ("learn-soft", "columns/<id>/\nbooster · metrics · plots", False),
+    ("learn-hard", "columns/<id>/_ground_truth/\ncalibrator · gate", True),
+    ("export", "model.onnx\nrebuilt on demand", True),
+    ("clean", "model.onnx\nand nothing else", False),
   ]
-  xs = [9.5, 25.5, 41.5, 57.5, 73.5, 89.5]
-  w = 14.0
+  xs = [8.0 + i * 14.0 for i in range(len(steps))]
+  w = 12.0
 
   for (name, artifact, optional), x in zip(steps, xs):
     _box(ax, x, 68, w, 11, name, STUDENT if not optional else DATA, dashed=optional)
@@ -208,15 +209,16 @@ def draw_pipeline(ax) -> None:
   for x0, x1 in zip(xs[:-1], xs[1:]):
     _arrow(ax, (x0 + w / 2, 68), (x1 - w / 2, 68))
 
-  _note(ax, 41.5, 78.5, "optional", color=DATA)
-  _note(ax, 73.5, 78.5, "only with hard labels", color=DATA)
+  _note(ax, xs[2], 78.5, "optional", color=DATA)
+  _note(ax, xs[4], 78.5, "only with hard labels", color=DATA)
+  _note(ax, xs[5], 78.5, "implicit: each fuses as it ends", color=DATA)
 
-  # `fit` chains prepare → learn-hard
-  ax.plot([18.5, 80.5], [90, 90], color=OUT, linewidth=1.3, zorder=1)
-  for x in (18.5, 80.5):
+  # `fit` chains prepare → clean, fusing along the way
+  ax.plot([xs[1] - w / 2, xs[-1] + w / 2], [90, 90], color=OUT, linewidth=1.3, zorder=1)
+  for x in (xs[1] - w / 2, xs[-1] + w / 2):
     ax.plot([x, x], [86, 90], color=OUT, linewidth=1.3, zorder=1)
   ax.text(
-    49.5,
+    (xs[1] + xs[-1]) / 2,
     93,
     "olinda fit  — chains these in one command",
     ha="center",
@@ -227,7 +229,7 @@ def draw_pipeline(ax) -> None:
     zorder=3,
   )
 
-  _arrow(ax, (89.5, 38.5), (81, 24), elbow="angle_v", color=BUNDLE)
+  _arrow(ax, (xs[-1], 38.5), (81, 24), elbow="angle_v", color=BUNDLE)
   _box(
     ax,
     46,
@@ -319,7 +321,7 @@ def draw_model_onnx(ax) -> None:
     ax,
     52,
     9,
-    "written to the output CSV:  prediction · surrogate · ground_truth · ground_truth_soft · applicability",
+    "one graph output per teacher column, named after it — the channels above stay inside",
     color=DATA,
   )
   _note(

@@ -380,6 +380,29 @@ def test_cleaning_does_not_change_predictions(tmp_path, monkeypatch):
   pd.testing.assert_frame_equal(before, after)
 
 
+def test_tuning_leaves_nothing_behind_either(tmp_path, monkeypatch):
+  """`tune` writes best_params.json into the run root, so `clean` has to take it too."""
+  pytest.importorskip("optuna")
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=1)
+  md = tmp_path / "run"
+  r = _run([
+    "fit",
+    "-s",
+    str(soft),
+    "-m",
+    str(md),
+    "--num-boost-round",
+    "40",
+    "--tune",
+    "--trials",
+    "2",
+  ])
+  assert r.exit_code == 0, r.output
+  assert [p.name for p in md.iterdir()] == ["model.onnx"]
+
+
 def test_clean_refuses_without_a_model_and_removes_nothing(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()

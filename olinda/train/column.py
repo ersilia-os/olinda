@@ -114,7 +114,7 @@ def train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_boo
 
 def resolve_tuned_params(model_dir: Path, col_dir: Path, backend_name: str) -> dict:
   """Tuned hyperparameters for a column: its own ``best_params.json``, else the run-level one."""
-  path = next((p for p in (col_dir / "best_params.json", model_dir / "best_params.json") if p.exists()), None)
+  path = next((p for p in (col_dir / runlib.PARAMS_NAME, model_dir / runlib.PARAMS_NAME) if p.exists()), None)
   if path is None:
     echo("no best_params.json — using built-in defaults (`olinda tune -m` to tune)", "info")
     return {}

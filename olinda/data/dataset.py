@@ -123,7 +123,7 @@ def density_weights_from_y(
   Implemented on a fine grid (histogram → Gaussian convolution → per-cell weight) so it is numpy-only and
   O(n) for large ``y``. Returns ``(edges, weights)`` in the SAME layout as :func:`regression_weights_from_y`
   (``edges`` length ``n_grid + 1`` with ``±inf`` ends, ``weights`` length ``n_grid``), so it flows through
-  :func:`apply_bin_weights` / :class:`H5DataIter` unchanged.
+  :func:`apply_bin_weights` / :class:`IndexDataIter` unchanged.
 
   Parameters
   ----------
@@ -258,9 +258,9 @@ def resolve_regression_weights(
 class IndexDataIter(xgb.DataIter):
   """Streams rows of an in-RAM :class:`~olinda.data.matrix.ReferenceMatrix` selected by index.
 
-  The multi-column counterpart of :class:`H5DataIter`: instead of reading a per-column HDF5 split
-  contiguously, it gathers this column's rows from the one resident copy of the reference library.
-  Only a single batch is float32 at a time, so peak memory is the library (uint8) plus one batch.
+  Every column of a run trains over the same features, so nothing is copied per column: each addresses
+  the one resident copy of the library through its own index array. Only a single batch is float32 at a
+  time, so peak memory is the library (uint8) plus one batch.
   """
 
   def __init__(

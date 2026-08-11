@@ -408,16 +408,20 @@ def prepare_hard_labels_wide(
 def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
   """Train the hard-label model ``G`` and calibrate it onto the soft-label scale.
 
-  Reads ``<model_dir>/hard.h5`` (written by :func:`prepare_hard_labels`) and ``<model_dir>/soft.h5``
-  (reference-aligned soft labels from ``prepare``), then writes ``G`` (ONNX), its scores over the reference
-  library, the ``G``→soft calibrator, and the applicability gate (two Bernoulli-NB classifiers) under
-  ``<model_dir>/_ground_truth/``. The gate is learned here from the reference but *applied* at predict time
-  (no similarity search) — see :mod:`olinda.applicability`.
+  Reads that column's ``hard.h5`` (written by :func:`prepare_hard_labels_wide`), then writes ``G``
+  (ONNX), its scores over the reference library, the ``G``→soft calibrator, and the applicability gate
+  (two Bernoulli-NB classifiers) under ``<col_dir>/_ground_truth/``. The gate is learned here from the
+  reference but *applied* at predict time (no similarity search) — see :mod:`olinda.applicability`.
 
   Parameters
   ----------
   model_dir : str or Path
-      A run directory containing ``hard.h5`` and ``soft.h5``.
+      The **column** directory (``columns/<id>/``), which holds that column's ``hard.h5``.
+  soft : array-like
+      The column's reference-aligned soft labels, read by the caller from the run's ``targets.h5``.
+  matrix : ReferenceMatrix, optional
+      The shared library. Passed in by ``learn-hard`` so a multi-column run loads it once; loaded here
+      if absent.
 
   Returns
   -------

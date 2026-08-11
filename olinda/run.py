@@ -9,6 +9,7 @@ vectors and one manifest describing the whole run. A single-column run is simply
       manifest.json      the authoritative description of the run
       targets.h5         one reference-aligned y per column, keyed by column id
       splits.h5          per-column train/val row indices
+      best_params.json   tuned hyperparameters, if `olinda tune` ran
       columns/<id>/      that column's model, metrics, plots and ground-truth head
       model.onnx         all columns fused into one artifact
 
@@ -34,6 +35,7 @@ RUN_SCHEMA = "olinda.run.v1"
 COLUMNS_DIRNAME = "columns"
 TARGETS_NAME = "targets.h5"
 SPLITS_NAME = "splits.h5"
+PARAMS_NAME = "best_params.json"
 
 
 def column_id(index: int) -> str:
@@ -74,16 +76,14 @@ def write_manifest(model_dir: str | Path, manifest: dict) -> Path:
 
 
 def read_manifest(model_dir: str | Path) -> dict:
-  """Load the run manifest, with a clear error for directories from before multi-column support."""
+  """Load the run manifest.
+
+  A missing manifest means the directory was never prepared, or that ``clean`` has already collapsed
+  it to the artifact — in which case only ``predict`` still applies.
+  """
   path = Path(model_dir) / MANIFEST_NAME
   if not path.exists():
-    legacy = (Path(model_dir) / "train_meta.json").exists() or (Path(model_dir) / "train.h5").exists()
-    hint = (
-      " This run directory predates multi-column support — re-run `olinda prepare` to rebuild it."
-      if legacy
-      else ""
-    )
-    raise FileNotFoundError(f"no {MANIFEST_NAME} in {model_dir}.{hint}")
+    raise FileNotFoundError(f"no {MANIFEST_NAME} in {model_dir}")
   with open(path) as fp:
     return json.load(fp)
 
@@ -155,7 +155,7 @@ def clean_run_dir(model_dir: str | Path) -> list[tuple[str, int]]:
     raise FileNotFoundError(f"refusing to clean {model_dir}: no model.onnx to keep")
 
   removed = []
-  for name in (MANIFEST_NAME, TARGETS_NAME, SPLITS_NAME):
+  for name in (MANIFEST_NAME, TARGETS_NAME, SPLITS_NAME, PARAMS_NAME):
     path = model_dir / name
     if path.exists():
       removed.append((name, _size_of(path)))

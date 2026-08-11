@@ -7,7 +7,7 @@ the best hyperparameters (learning-rate sensitivity breakdown), writes a backend
 
 Time-bounded and blazing fast: a hard ``time_budget`` (checked every round), study-level ``patience``
 (stop once converged), warm-started from known-good configs, Hyperband pruning, live progress, graceful
-Ctrl-C. Used by both the ``olinda tune`` CLI command and ``scripts/tune_xgb.py``.
+Ctrl-C. Driven by the ``olinda tune`` CLI command.
 """
 
 from __future__ import annotations

@@ -322,24 +322,6 @@ def _soft_model_proto(sm, x_dim: int):
 # ── fusion ────────────────────────────────────────────────────────────────────
 
 
-def _fit_soft_calibration(sm, model_dir: Path):
-  """Fit the surrogate isotonic correction on ``val.h5`` (raw S → soft labels); ``None`` if unavailable."""
-  import h5py
-
-  from olinda.calibrate import IsotonicCalibrator
-
-  val = model_dir / "val.h5"
-  if not val.exists():
-    return None
-  with h5py.File(val, "r") as f:
-    vx = np.asarray(f["x"][:], dtype=np.float32)
-    vy = np.asarray(f["y"][:], dtype=np.float64)
-  if len(vy) < 4 or not np.isfinite(vy).any():
-    return None
-  raw = np.asarray(sm.predict(X=vx, calibrate=False)).ravel()
-  return IsotonicCalibrator().fit(raw=raw, target=vy)  # increasing (S already predicts the soft target)
-
-
 def _bundle_metadata(manifest: dict, plan: list, featurizer: dict, featurizer_class: str, outputs) -> dict:
   """Everything a consumer needs, embedded in ``model.onnx`` so the file is the only input required.
 

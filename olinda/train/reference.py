@@ -1,9 +1,10 @@
-"""Fast XGBoost regression from the reference-library HDF5 splits.
+"""Fast XGBoost regression over the reference library.
 
-Builds an ``xgb.QuantileDMatrix`` (the fast ``hist`` path) by streaming a pre-shuffled ``train.h5`` /
-``val.h5`` sequentially through :class:`olinda.data.H5DataIter`. QuantileDMatrix bins each feature
-once into a compact histogram held in RAM, so training is fast and low-memory; the validation matrix
-is built with ``ref=dtrain`` to share the exact bin edges.
+The training loop for the XGBoost backend: a boosting run against the ``xgb.QuantileDMatrix`` pair
+that :meth:`olinda.train.backend.Backend.build_train_val_indexed` gathers from the shared
+:class:`~olinda.data.matrix.ReferenceMatrix`, with live progress and early stopping. QuantileDMatrix
+bins each feature once into a compact histogram held in RAM, so training is fast and low-memory; the
+validation matrix shares the training matrix's exact bin edges.
 """
 
 from __future__ import annotations

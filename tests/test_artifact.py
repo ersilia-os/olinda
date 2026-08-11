@@ -144,6 +144,38 @@ def test_rdkit_mismatch_is_refused(tmp_path, monkeypatch):
     OlindaArtifact(path)
 
 
+def test_importing_olinda_does_not_check_rdkit(tmp_path, monkeypatch):
+  """The version gate belongs to the model, not the package.
+
+  An import-time gate would fire before ``OlindaArtifact`` could be reached at all — making
+  ``check_rdkit=False`` unusable and locking every artifact to one global build, however new the
+  RDKit its own metadata asks for.
+  """
+  import subprocess
+  import sys
+
+  code = (
+    "import rdkit; rdkit.__version__ = '0.0.0-not-real';"
+    "import olinda; print(olinda.OlindaArtifact.__name__)"
+  )
+  out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+  assert out.returncode == 0, out.stderr
+  assert out.stdout.strip() == "OlindaArtifact"
+
+
+def test_rdkit_mismatch_can_be_waived_deliberately(tmp_path, monkeypatch):
+  """`check_rdkit=False` is the documented escape hatch — it has to actually be reachable."""
+  path = _build_artifact(tmp_path, monkeypatch)
+  m = onnx.load(str(path))
+  for prop in m.metadata_props:
+    if prop.key == "olinda":
+      meta = json.loads(prop.value)
+      meta["featurizer"]["rdkit_version"] = "0.0.0-not-real"
+      prop.value = json.dumps(meta)
+  onnx.save(m, str(path))
+  assert len(OlindaArtifact(path, check_rdkit=False).run(_SM[:2])) == 2
+
+
 def test_non_olinda_onnx_is_rejected_clearly(tmp_path, monkeypatch):
   path = _build_artifact(tmp_path, monkeypatch)
   m = onnx.load(str(path))

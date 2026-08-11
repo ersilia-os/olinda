@@ -375,9 +375,7 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
 
 
 @cli.command("learn-soft")
-@click.option(
-  "--model-dir", "-m", required=True, help="Run directory with train.h5 / val.h5 (from `prepare`)."
-)
+@click.option("--model-dir", "-m", required=True, help="A prepared run directory (from `prepare`).")
 @click.option(
   "--num-boost-round", default=10000, type=int, show_default=True, help="Upper cap; early stopping decides."
 )
@@ -508,7 +506,7 @@ def learn_soft_cmd(model_dir, num_boost_round):
   "--model-dir",
   "-m",
   required=True,
-  help="Run directory with train.h5 / val.h5; best_params.json is written here.",
+  help="A prepared run directory; best_params.json is written here.",
 )
 @click.option("--trials", default=100, type=int, show_default=True, help="How many Optuna trials to run.")
 @click.option(
@@ -529,16 +527,18 @@ def tune_cmd(model_dir, trials, max_rows):
   the learning rate transfers reasonably (full training re-fits the round count with its own early
   stopping), so `tune` is optional — the built-in defaults are already good. Everything else (per-trial
   rounds, early-stopping, study patience, reweighting = auto like `learn-soft`, seed, a safety time cap)
-  uses good internal defaults — see ``olinda.train.tune.run_tuning`` / ``scripts/tune_xgb.py`` to override.
+  uses good internal defaults — call ``olinda.train.tune.run_tuning`` directly to override them.
   Requires the ``[train]`` extra (Optuna).
   """
   from olinda.train.tune import run_tuning
+
+  from olinda.run import PARAMS_NAME
 
   run_tuning(
     model_dir,
     trials=trials,
     max_rows=max_rows,
-    out=Path(model_dir) / "best_params.json",
+    out=Path(model_dir) / PARAMS_NAME,
   )
 
 
@@ -547,18 +547,18 @@ def tune_cmd(model_dir, trials, max_rows):
   "--model-dir",
   "-m",
   required=True,
-  help="Run directory holding hard.h5 (from `prepare --hard-labels`); artifacts go under <dir>/_ground_truth/.",
+  help="A run prepared with --hard-labels; artifacts go under columns/<id>/_ground_truth/.",
 )
 def learn_hard_cmd(model_dir):
   """Learn from hard (binary) labels and calibrate them onto the soft-label scale — four clear steps.
 
-  Reads `hard.h5` (from `prepare --hard-labels`) and: (1) trains the hard-label classifier `G`; (2) scores
-  `G` across the full reference library (`erl0_morgan.h5`, required); (3) calibrates `G`'s output onto the
-  teacher's soft-label scale using the reference-aligned soft labels (`prepare` saved `soft.h5`), with a
-  monotonic map whose direction is learned from the data; (4) learns an applicability gate — two Bernoulli
-  Naive-Bayes classifiers bucketing queries as NOT SIMILAR / LOW / HIGH by proximity to the labeled set.
-  Artifacts land under `<model-dir>/_ground_truth/`; `predict` then emits a blended `prediction` plus the
-  surrogate / ground_truth_soft / ground_truth / applicability channels (the gate needs no similarity search
+  Runs once per matched column, reading that column's `hard.h5` (from `prepare --hard-labels`): (1) trains
+  the hard-label classifier `G`; (2) scores `G` across the full reference library (`erl0_morgan.h5`,
+  required); (3) calibrates `G`'s output onto the teacher's soft-label scale against the column's
+  reference-aligned targets, with a monotonic map whose direction is learned from the data; (4) learns an
+  applicability gate — two Bernoulli Naive-Bayes classifiers bucketing queries as NOT SIMILAR / LOW / HIGH
+  by proximity to the labeled set. Artifacts land under `columns/<id>/_ground_truth/`, and the model is
+  re-fused so each blended column stays one output (the gate needs no similarity search at predict time,
   and the blend favours the surrogate away from the labeled set).
   """
   import time
@@ -653,11 +653,12 @@ def learn_hard_cmd(model_dir):
 def export_cmd(model_dir):
   """(Re)build the single self-describing `model.onnx` for a trained model dir.
 
-  Fuses every pipeline stage into ONE ONNX graph — soft-only (`fp → prediction`) or, when a hard head is
-  present, the full blend (`fp → prediction` + `surrogate`/`ground_truth`/`ground_truth_soft`/`applicability`).
-  The Morgan featurizer config + provenance (RDKit version, reference library, hard-head summary) are embedded
-  in the file's metadata, so it is self-describing. Gated on a numeric parity check. Featurization (RDKit)
-  stays in Python — the graph consumes a 2048-count Morgan fingerprint.
+  Fuses every column and every stage into ONE graph with one output per task — the surrogate alone, or,
+  where a hard head exists, the applicability-weighted blend of surrogate and calibrated ground truth.
+  The intermediate channels stay internal to the graph. The Morgan featurizer config + provenance (RDKit
+  version, reference library, hard-head summary) are embedded in the file's metadata, so it is
+  self-describing. Gated on a numeric parity check. Featurization (RDKit) stays in Python — the graph
+  consumes a 2048-count Morgan fingerprint.
   """
   from olinda.export import build_bundle
 
@@ -737,7 +738,7 @@ def clean_cmd(model_dir):
   echo("this run can no longer be re-exported or given a hard head", "warning")
 
 
-@cli.command("predict", help="Run a model on SMILES via its model.onnx — emits prediction + channels.")
+@cli.command("predict", help="Run a model on SMILES via its model.onnx — one output column per task.")
 @click.option(
   "--model-dir", "-m", required=True, help="Model dir containing model.onnx (from learn-soft / learn-hard)."
 )
@@ -746,9 +747,10 @@ def clean_cmd(model_dir):
 def predict_cmd(model_dir, input_path, out_path):
   """Run the fused `model.onnx`: verify RDKit, featurize the `smiles` column (RDKit Morgan), run the graph.
 
-  Emits a `prediction` column plus the model's channels — `surrogate`, and for hard-label models also
-  `ground_truth_soft` / `ground_truth` / `applicability`. The featurizer + RDKit version are read from the
-  model's embedded metadata (the file is self-describing).
+  Writes a `smiles` column followed by one column per task, named after the teacher column it distils.
+  For a model with a ground-truth head that number is already the blend — the applicability weighting
+  happens inside the graph. The featurizer and the RDKit build it needs are read from the model's
+  embedded metadata, so the `.onnx` is the only input. Unparseable SMILES come back as empty cells.
   """
   from olinda.console import STEP_COLORS, echo, path as cpath, rule, set_active_color
 
