@@ -401,6 +401,7 @@ def learn_soft_cmd(model_dir, num_boost_round):
   from olinda.data import OLINDA_HOME, MORGAN_FINGERPRINTS_FILENAME
   from olinda.data.matrix import ReferenceMatrix
   from olinda.train.backend import get_backend, select_backend
+  from olinda.train.column import train_one_column
 
   model_dir = Path(model_dir)
   try:
@@ -443,7 +444,7 @@ def learn_soft_cmd(model_dir, num_boost_round):
     for col in columns:
       table.start(col["name"])
       col_started = time.time()
-      result = _train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_boost_round)
+      result = train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_boost_round)
       m = result["metrics"]
       table.finish(
         col["name"],
@@ -482,145 +483,6 @@ def learn_soft_cmd(model_dir, num_boost_round):
     border_style=STEP_COLORS["learn-soft"],
     icon="✓",
   )
-
-
-def _train_one_column(model_dir, manifest, col, matrix, be, backend_name, num_boost_round) -> dict:
-  """Train one column's surrogate into ``columns/<id>/``; returns its name, metrics and tree count."""
-  import json
-
-  import numpy as np
-
-  from olinda import run as runlib
-  from olinda.calibrate import IsotonicCalibrator
-  from olinda.console import echo, live_region_taken, strategy_banner
-  from olinda.data import resolve_regression_weights
-  from olinda.featurizer import MorganCountFeaturizer
-  from olinda.metrics import regression_metrics
-  from olinda.models import StudentModel
-  from olinda.train.backend import CANONICAL_DEFAULTS
-  from olinda.train.plots import save_true_vs_pred
-
-  col_dir = runlib.column_dir(model_dir, col["id"])
-  col_dir.mkdir(parents=True, exist_ok=True)
-  # Early-stopping patience scales with the round budget (1%, floored at 50) — not a user knob.
-  early_stopping = max(50, num_boost_round // 100)
-
-  y = runlib.read_target(model_dir, col["id"])
-  train_idx, val_idx = runlib.read_split(model_dir, col["id"])
-  ytr = np.asarray(y[train_idx], dtype=np.float64)
-
-  # Automatic target reweighting, decided independently per column from that column's own shape.
-  bin_edges, bin_weights, reweight_info = resolve_regression_weights(ytr, mode="auto")
-  weighted = bin_weights is not None
-  reweight_info["used_in"] = {"training": weighted, "evaluation": weighted, "early_stopping": weighted}
-  quiet = live_region_taken()  # a live table already reports this column's status
-  if not quiet:
-    strategy_banner(
-      reweight_info["strategy"],
-      reweight_info["reason"],
-      weight_range=reweight_info.get("weight_range") if weighted else None,
-    )
-
-  tuned_params = _resolve_tuned_params(model_dir, col_dir, backend_name)
-  canonical = {**CANONICAL_DEFAULTS, **tuned_params}
-  native_params = {**be.translate(canonical), **be.objective_params()}
-
-  xval = matrix.gather(val_idx)
-  yval = np.asarray(y[val_idx], dtype=np.float32)
-  dtrain, dval = be.build_train_val_indexed(
-    matrix, y, train_idx, val_idx, canonical["max_bin"], bin_edges, bin_weights
-  )
-  res = be.train(
-    dtrain,
-    dval,
-    native_params,
-    num_boost_round=num_boost_round,
-    early_stopping=early_stopping,
-    train_weighted=weighted,
-    val_eval=(xval, yval),
-  )
-
-  x_dim = int(matrix.n_cols)
-  featurizer = MorganCountFeaturizer(radius=int(manifest["features"].get("radius", 3)), fp_size=x_dim)
-  student = StudentModel(
-    model=res.model,
-    backend=backend_name,
-    featurizer=featurizer,
-    metadata={
-      "task": "regression",
-      "column": col["name"],
-      "x_dim": x_dim,
-      "features": manifest["features"].get("features", "morgan"),
-      "backend": backend_name,
-      "objective": "squarederror",
-      "reweight": reweight_info,
-      "hyperparams": {"source": "tuned" if tuned_params else "defaults", "tuned": tuned_params or None},
-    },
-  )
-  student.save(col_dir)
-
-  pval = be.predict(res.model, xval)
-  metrics = regression_metrics(yval, pval)
-  with open(col_dir / "val_metrics.json", "w") as fp:
-    json.dump(metrics, fp, indent=2)
-  col["metrics"] = metrics
-
-  # Fit the surrogate's isotonic correction here, where the validation predictions already exist.
-  # Export then only loads calibrator.json instead of re-reading and re-predicting the whole split.
-  if len(yval) >= 4 and np.isfinite(yval).any():
-    IsotonicCalibrator().fit(raw=pval, target=np.asarray(yval, dtype=np.float64)).save(
-      col_dir / "calibrator.json"
-    )
-
-  save_true_vs_pred(
-    yval, pval, col_dir / "val_true_pred.png", title=f"{col['name']}  (R²={metrics['r2']:.3f})"
-  )
-  if not quiet:
-    echo(
-      f"R² [bold]{metrics['r2']:.4f}[/] · ρ {metrics['spearman']:.4f} · RMSE {metrics['rmse']:.5f} "
-      f"· {res.n_trees:,} trees",
-      "success",
-    )
-  del xval
-  return {"name": col["name"], "metrics": metrics, "n_trees": res.n_trees}
-
-
-def _resolve_tuned_params(model_dir: Path, col_dir: Path, backend_name: str) -> dict:
-  """Tuned hyperparameters for a column: its own ``best_params.json``, else the run-level one."""
-  import json
-
-  from olinda.console import echo
-  from olinda.train.backend import CANONICAL_DEFAULTS
-
-  path = next((p for p in (col_dir / "best_params.json", model_dir / "best_params.json") if p.exists()), None)
-  if path is None:
-    echo("no best_params.json — using built-in defaults (`olinda tune -m` to tune)", "info")
-    return {}
-
-  with open(path) as fp:
-    tuned = json.load(fp)
-  tag = tuned.pop("backend", None)  # a tag, not a hyperparameter
-  if tag and tag != backend_name:
-    echo(
-      f"best_params.json was tuned on {tag}; its canonical params still apply to {backend_name}", "warning"
-    )
-  unknown = [k for k in tuned if k not in CANONICAL_DEFAULTS]
-  if unknown:
-    echo(f"ignoring unrecognized best_params.json keys {unknown} — re-run `olinda tune`", "warning")
-    for k in unknown:
-      tuned.pop(k)
-  shown = " · ".join(
-    f"{k}={v}"
-    for k, v in tuned.items()
-    if k in ("learning_rate", "max_depth", "min_split_gain", "min_child_weight")
-  )
-  echo(f"tuned hyperparameters from {path.name} — {shown}", "run")
-  return tuned
-
-  # Fuse the served bundle: a single self-describing model.onnx (soft-only here; learn-hard re-fuses).
-  from olinda.export import build_bundle
-
-  build_bundle(model_dir)
 
 
 @cli.command("tune")
@@ -801,7 +663,6 @@ def predict_cmd(model_dir, input_path, out_path):
   model's embedded metadata (the file is self-describing).
   """
   from olinda.console import STEP_COLORS, echo, path as cpath, rule, set_active_color
-  from olinda.onnx_pipeline import OnnxPipeline
 
   model_dir = Path(model_dir)
   input_path = Path(input_path)
@@ -810,60 +671,18 @@ def predict_cmd(model_dir, input_path, out_path):
   if not input_path.exists():
     echo(f"input not found · [dim]{input_path}[/]", "error")
     raise click.ClickException("input file does not exist")
-  if not OnnxPipeline.is_bundle(model_dir):
+  from olinda.artifact import RDKitVersionMismatch
+  from olinda.predict import predict_file
+
+  if not (Path(model_dir) / "model.onnx").exists():
     echo("no model.onnx in the model dir", "error")
     raise click.ClickException(
       f"{model_dir} has no model.onnx — run `olinda learn-soft` / `learn-hard` (or `olinda export`) first"
     )
-  _predict_onnx(model_dir, input_path, out_path)
-
-
-def _predict_onnx(model_dir, input_path, out_path):
-  """Predict via the fused ``model.onnx`` and write one column per task.
-
-  Goes through the same :class:`~olinda.artifact.OlindaArtifact` the library exposes, so the CLI and a
-  Python caller produce identical output. Loading verifies the installed RDKit against the build
-  recorded in the model's metadata.
-  """
-  import rdkit
-
-  from olinda.artifact import OlindaArtifact, RDKitVersionMismatch
-  from olinda.console import echo, success
-
   try:
-    model = OlindaArtifact(model_dir)
-  except RDKitVersionMismatch as exc:
-    echo(str(exc), "error")
+    predict_file(model_dir, input_path, out_path)
+  except (RDKitVersionMismatch, ValueError, FileNotFoundError) as exc:
     raise click.ClickException(str(exc)) from exc
-  echo(f"rdkit [bold]{rdkit.__version__}[/] · matches model ({model.rdkit_version})", "info")
-
-  smiles = _read_smiles(input_path)
-  head = "blend" if model.has_ground_truth else "soft"
-  echo(f"model.onnx · [bold]{model.n_columns}[/] column(s) · {head} · {len(smiles):,} SMILES", "run")
-  df = model.run(smiles)
-  out_path = Path(out_path)
-  df.to_csv(out_path, index=False)
-  success(f"predictions ({' · '.join(model.columns)}) → [dim]{out_path}[/]")
-
-
-def _read_smiles(input_path: Path, smiles_col: str = "smiles") -> list[str]:
-  """Read the ``smiles`` column from a CSV/TSV/Parquet input for prediction."""
-  import pandas as pd
-
-  from olinda.console import echo
-
-  suffix = input_path.suffix.lower()
-  if suffix in (".parquet", ".pq"):
-    df = pd.read_parquet(str(input_path))
-  elif suffix in (".csv", ".tsv"):
-    df = pd.read_csv(str(input_path), sep="\t" if suffix == ".tsv" else ",")
-  else:
-    echo(f"unsupported input format · {suffix} (use .csv / .tsv / .parquet)", "error")
-    raise click.ClickException("unsupported input format")
-  if smiles_col not in df.columns:
-    echo(f"no '{smiles_col}' column in [dim]{input_path.name}[/]", "error")
-    raise click.ClickException(f"input needs a '{smiles_col}' column with SMILES")
-  return df[smiles_col].astype(str).tolist()
 
 
 if __name__ == "__main__":

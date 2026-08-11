@@ -22,7 +22,7 @@ The end goal is to predict the soft-label distribution informed by the hard labe
 ``<model_dir>/_ground_truth/``. The gate decides *where* to trust ``G``: the blend
 ``prediction = (1-a)·S + a·G_soft`` leans on the hard signal only near the labeled chemistry. All stages are
 fused into a single ``model.onnx`` (see :mod:`olinda.export`) and served by
-:class:`~olinda.onnx_pipeline.OnnxPipeline`.
+:class:`~olinda.artifact.OlindaArtifact`.
 """
 
 from __future__ import annotations

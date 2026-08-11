@@ -2,7 +2,7 @@
 
 ``learn-hard`` calibrates a hard-label model ``G`` onto the teacher's soft-label scale
 (:mod:`olinda.ground_truth`). The hard signal is only trustworthy for queries close to the labeled
-training set, so at predict time the fused ``model.onnx`` (:class:`~olinda.onnx_pipeline.OnnxPipeline`) blends the surrogate ``S``
+training set, so at predict time the fused ``model.onnx`` blends the surrogate ``S``
 with the calibrated hard signal ``G_soft`` using a weight ``a`` that is 0 by default and rises only near the
 labeled chemistry:
 

@@ -20,8 +20,31 @@ from pathlib import Path
 
 import numpy as np
 
-from olinda.onnx_pipeline import MODEL_NAME, RDKitVersionMismatch as RDKitVersionMismatch
-from olinda.onnx_pipeline import _check_rdkit_version
+MODEL_NAME = "model.onnx"
+
+
+class RDKitVersionMismatch(RuntimeError):
+  """Raised when the installed RDKit differs from the build that produced ``model.onnx``."""
+
+
+def _check_rdkit_version(meta: dict) -> None:
+  """Verify the installed RDKit matches the one recorded in ``model.onnx`` metadata.
+
+  Morgan fingerprints are only bit-for-bit reproducible with the exact RDKit build the model was fused
+  against, so a mismatch would silently corrupt every prediction — we refuse rather than guess.
+  """
+  want = (meta.get("featurizer") or {}).get("rdkit_version")
+  if not want:
+    return
+  import rdkit
+
+  have = rdkit.__version__
+  if have != want:
+    raise RDKitVersionMismatch(
+      f"model.onnx was built with RDKit {want}, but {have} is installed — Morgan fingerprints are only "
+      f"reproducible with the exact build. Install rdkit=={want} (e.g. `pip install rdkit=={want}`)."
+    )
+
 
 _BATCH = 4096
 
