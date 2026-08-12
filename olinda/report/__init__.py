@@ -111,6 +111,11 @@ def _library_overlap(smiles) -> float | None:
 
   Validating on the library the model was distilled from is a legitimate question ("how well did it
   fit?") but not a measure of generalisation, so the report says which one you asked.
+
+  Every failure to answer is "no answer", including a missing h5py. That one is not hypothetical:
+  h5py belongs to the [train] extra, so on a machine with only [report] installed — the tier whose
+  entire purpose is scoring a model someone handed you — an unguarded import takes down the whole
+  report over an optional note, but only when the library happens to be downloaded.
   """
   from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
 
@@ -122,7 +127,7 @@ def _library_overlap(smiles) -> float | None:
 
     with h5py.File(path, "r") as f:
       raw = f["input"][:]
-  except (OSError, KeyError):
+  except (ImportError, OSError, KeyError):
     return None
   library = {s.decode() if isinstance(s, bytes) else str(s) for s in raw}
   return float(np.mean([s in library for s in smiles])) if smiles else 0.0
@@ -159,45 +164,16 @@ def _hard_head_warning(kind: str, artifact, n_rows: int) -> list[str]:
   return notes
 
 
-def _hard_head_figures(artifact, task, channels, ok, y) -> list:
-  """The hard-label-head figure for *task*, or nothing when the column has no hard head.
-
-  Returned as ``(name, draw)`` pairs so the caller's figure loop stays one list. A soft-only column,
-  or an artifact fused before the channels were declared as graph outputs, simply contributes none.
-  """
-  from olinda.metrics import _pearsonr
-  from olinda.report import plots
-
-  name = (artifact.channels_for(task) or {}).get("h_s")
-  if name is None or name not in channels:
-    return []
-  g_soft = np.asarray(channels[name], dtype=np.float64)[ok]
-  if len(g_soft) < 3 or not np.isfinite(g_soft).all():
-    return []
-  r = _pearsonr(g_soft, y)
-  return [
-    (
-      "h_s_vs_teacher",
-      lambda ax, st, y=y, g=g_soft, r=r: plots.h_s_vs_teacher(ax, st, y, g, pearson=r),
-    )
-  ]
-
-
-def _predict(artifact, smiles, echo=None) -> "tuple[dict[str, np.ndarray], dict[str, np.ndarray]]":
-  """``(prediction per task, every graph channel by output name)``.
-
-  Runs the graph once and keeps everything it emits, rather than calling it again when a figure wants
-  the hard-label head — scoring is the expensive part of validating a large file.
-  """
+def _predict(artifact, smiles, echo=None) -> "dict[str, np.ndarray]":
+  """The model's prediction per task, which is everything the artifact exposes."""
   import warnings
 
   with warnings.catch_warnings():
     warnings.simplefilter("ignore", RuntimeWarning)  # unparseable SMILES are counted, not warned twice
-    channels = artifact.run_channels(smiles, progress=False)
+    frame = artifact.run(smiles, progress=False)
   if echo:
     echo(f"scored [bold]{len(smiles):,}[/] compounds", "run")
-  outputs = {c["name"]: c["output"] for c in artifact._columns}
-  return {name: channels[out] for name, out in outputs.items()}, channels
+  return {c: frame[c].to_numpy() for c in artifact.columns}
 
 
 def validate_model(
@@ -275,7 +251,7 @@ def validate_model(
       report["notes"].append(
         f"{kind} labels: ignored {', '.join(map(str, ignored))} — no task of this model is named that"
       )
-    predicted, all_channels = _predict(artifact, smiles, echo)
+    predicted = _predict(artifact, smiles, echo)
 
     overlap = _library_overlap(smiles)
     if overlap is not None and overlap > 0.5:
@@ -310,7 +286,6 @@ def validate_model(
           ("calibration", lambda ax, st, y=y, p=p: plots.calibration_bins(ax, st, y, p)),
           ("residual_qq", lambda ax, st, y=y, p=p: plots.qq_residuals(ax, st, y, p)),
           ("score_distributions", lambda ax, st, y=y, p=p: plots.score_distributions(ax, st, y, p)),
-          *_hard_head_figures(artifact, task, all_channels, ok, y),
         ):
           fig = plots.render(draw, out_dir, f"{task}_{name}", cells=plots.CELLS.get(name))
           if fig:
