@@ -221,15 +221,13 @@ def _fit_applicability(
       and ``stats`` reports the target distribution and the fit's held-out quality.
   """
   from olinda.applicability import (
-    GATE_MAX_BIN,
-    GATE_MAX_DEPTH,
-    GATE_ROUNDS,
+    GATE_BATCH,
     SimilarityRegressor,
     prepare_gt_bits,
+    ramp,
     tanimoto_nn,
   )
   from olinda.metrics import regression_metrics
-  from olinda.train.backend import get_backend, select_backend
 
   gt_prepared = prepare_gt_bits(gt_bits)  # built once, reused for every chunk
   n = matrix.n_rows
@@ -242,54 +240,58 @@ def _fit_applicability(
       tick(stop)
 
   n_gt = int(np.asarray(gt_bits).shape[0])
-  backend_name, device, _ = select_backend()
-  be = get_backend(backend_name, device)
 
-  # Hold out a slice of the library to report honest quality; the labelled compounds go in training,
-  # where they anchor the top of the similarity range.
+  # Hold a slice out for early stopping and for the reported numbers; the net trains on everything
+  # else, streamed a batch at a time straight off the resident uint8 library.
   rng = np.random.default_rng(42)
   order = rng.permutation(n)
   n_val = min(50_000, max(1, n // 10))
-  val_idx, train_idx = np.sort(order[:n_val]), np.sort(order[n_val:])
+  val_idx, train_idx = np.sort(order[:n_val]), order[n_val:]
 
-  params = {
-    **be.translate({"max_bin": GATE_MAX_BIN, "max_depth": GATE_MAX_DEPTH, "learning_rate": 0.1}),
-    **be.objective_params(),
-  }
-  dtrain, dval = be.build_train_val_indexed(matrix, sim, train_idx, val_idx, GATE_MAX_BIN, None, None)
-  xval = matrix.gather(val_idx)
-  res = be.train(
-    dtrain,
-    dval,
-    params,
-    num_boost_round=GATE_ROUNDS,
-    early_stopping=max(20, GATE_ROUNDS // 10),
-    train_weighted=False,
-    val_eval=(xval, sim[val_idx].astype(np.float32)),
-  )
-  metrics = regression_metrics(sim[val_idx], be.predict(res.model, xval))
-  del xval
+  def batches(shuffler):
+    idx = train_idx.copy()
+    shuffler.shuffle(idx)
+    for start in range(0, len(idx), GATE_BATCH):
+      take = np.sort(idx[start : start + GATE_BATCH])
+      yield matrix.gather(take), sim[take]
 
-  a_max = _blend_ceiling(alignment_r2)
-  regressor = SimilarityRegressor(
-    res.model,
-    backend_name,
-    a_max=a_max,
+  regressor = SimilarityRegressor.fit(
+    batches,
+    matrix.n_cols,
+    (matrix.gather(val_idx), sim[val_idx]),
+    echo=echo,
+    a_max=_blend_ceiling(alignment_r2),
     sim_lo=sim_lo,
     sim_hi=sim_hi,
-    metrics={k: metrics[k] for k in ("n", "r2", "spearman", "rmse")},
   )
+
+  xval = matrix.gather(val_idx)
+  predicted = regressor.predict_similarity(xval)
+  del xval
+  truth = sim[val_idx].astype(np.float64)
+  metrics = regression_metrics(truth, predicted)
+  # R² on the similarity says how well the net learned its target; what the blend actually depends on
+  # is whether the gate *opens* for the compounds that deserve weight, which R² can hide entirely — a
+  # gate that is simply always shut still scores respectably. So report the reach as well.
+  deserved, opened = ramp(truth) > 0, ramp(predicted) > 0
+  hit = int((deserved & opened).sum())
+  regressor.metrics = {
+    **{k: metrics[k] for k in ("n", "r2", "spearman", "rmse")},
+    "recall": float(hit / deserved.sum()) if deserved.any() else float("nan"),
+    "precision": float(hit / opened.sum()) if opened.any() else float("nan"),
+  }
+
   stats = {
-    "a_max": a_max,
+    "a_max": regressor.a_max,
     "alignment_r2": float(alignment_r2),
     "n_ref": int(n),
     "n_gt": n_gt,
+    "n_train": int(len(train_idx)),
     "sim_median": float(np.median(sim)),
     "sim_p99": float(np.quantile(sim, 0.99)),
     "sim_max": float(sim.max()),
     "frac_above_lo": float((sim >= sim_lo).mean()),
     "frac_above_hi": float((sim >= sim_hi).mean()),
-    "n_trees": int(res.n_trees),
     **{f"fit_{k}": v for k, v in regressor.metrics.items()},
   }
   return regressor, stats
@@ -615,9 +617,9 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
       "run",
     )
     echo(
-      f"  regressor R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} "
-      f"on {ad_counts['fit_n']:,} held-out compounds · {ad_counts['n_trees']:,} trees "
-      f"→ {APPLICABILITY_DIRNAME}/",
+      f"  gate R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} on "
+      f"{ad_counts['fit_n']:,} held-out compounds · opens for [bold]{ad_counts['fit_recall']:.0%}[/] "
+      f"of those that qualify (precision {ad_counts['fit_precision']:.0%}) → {APPLICABILITY_DIRNAME}/",
       "run",
     )
     if ad_counts["a_max"] <= 0.0:

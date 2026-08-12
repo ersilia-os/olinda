@@ -37,6 +37,69 @@ def test_tanimoto_nn_empty_gt_and_counts_binarized():
   assert np.isclose(tanimoto_nn(np.array([[2, 0, 0, 0]]), np.array([[5, 0, 0, 0]]))[0], 1.0)
 
 
+# ── the exported gate must binarize exactly like the Python one ───────────────
+
+
+def test_the_gate_scores_counts_the_same_way_in_python_and_onnx():
+  """Both paths must treat the count fingerprint identically.
+
+  Regression test for a parity failure that only showed up on real molecules: Python binarized the
+  fingerprint before the model while the exported graph passed counts straight through, so any
+  compound with a repeated substructure got a different blend weight (0.23 on a real gate — 2000x the
+  parity tolerance, and a 1.6e-2 shift in the published prediction).
+
+  The resolution is that the gate binarizes on *both* sides: the net is trained and served on
+  ``bits > 0``, and the exported graph thresholds its own input before the first MatMul. So the two
+  assertions below are the contract — Python agrees with ONNX, and a count fingerprint scores exactly
+  as its indicator does. Note this is true of the gate branch alone: the surrogate and the hard head
+  are trained on counts and must keep receiving them.
+  """
+  onnx = pytest.importorskip("onnx")
+  ort = pytest.importorskip("onnxruntime")
+  pytest.importorskip("skl2onnx")
+
+  import tempfile
+  from pathlib import Path
+
+  from olinda.applicability import SimilarityRegressor
+  from olinda.export import _applicability_model, _save
+
+  rng = np.random.default_rng(0)
+  n_features = 64
+  counts = ((rng.random((3000, n_features)) < 0.2) * rng.integers(1, 6, (3000, n_features))).astype(
+    np.float32
+  )
+  sim = tanimoto_nn(counts, counts[:32])
+
+  def batches(shuffler):
+    idx = np.arange(2500)
+    shuffler.shuffle(idx)
+    for start in range(0, len(idx), 256):
+      take = idx[start : start + 256]
+      yield counts[take], sim[take]
+
+  gate = SimilarityRegressor.fit(batches, n_features, (counts[2500:], sim[2500:]), a_max=0.6)
+
+  query = ((rng.random((32, n_features)) < 0.2) * rng.integers(1, 6, (32, n_features))).astype(np.float32)
+  # Magnitude must not matter to this model — that is what binarizing on both sides buys.
+  np.testing.assert_allclose(
+    gate.predict_similarity(query),
+    gate.predict_similarity((query > 0).astype(np.float32)),
+    atol=1e-12,
+  )
+
+  with tempfile.TemporaryDirectory() as td:
+    path = Path(td) / "gate.onnx"
+    _save(_applicability_model(gate, n_features, "input", "applicability"), path)
+    onnx.checker.check_model(onnx.load(str(path)))
+    sess = ort.InferenceSession(path.read_bytes(), providers=["CPUExecutionProvider"])
+    got = np.asarray(sess.run(None, {"input": query})[0]).ravel()
+    on_bits = np.asarray(sess.run(None, {"input": (query > 0).astype(np.float32)})[0]).ravel()
+
+  assert np.allclose(got, np.asarray(gate.weight(query)).ravel(), atol=1e-6)
+  assert np.allclose(got, on_bits, atol=1e-12), "the graph must threshold its own input"
+
+
 # ── BernoulliNB ───────────────────────────────────────────────────────────────
 
 

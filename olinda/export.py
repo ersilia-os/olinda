@@ -211,57 +211,65 @@ def isotonic_to_onnx(cal, out_path: Path, *, in_name: str = "input", out_name: s
 def _applicability_model(clf, n_features: int, in_name: str, out_name: str):
   """ONNX ``ModelProto``: fp(float32) → blend weight ``a`` (double).
 
-  The gate is a similarity regressor followed by a linear ramp, so the graph is the booster's own tree
-  ensemble plus five element-wise ops. The regressor's output is clipped to [0, 1] first — trees can
-  extrapolate past the target's range, and a similarity above 1 would otherwise push ``a`` past its
-  ceiling.
+  Three parts spliced into one graph: binarise the incoming count fingerprint, run the gate network,
+  ramp its output into a weight.
+
+  The binarisation is not optional. The net is trained and evaluated on ``bits > 0``
+  (:meth:`SimilarityRegressor.predict_similarity`), while the fused graph carries the shared *count*
+  fingerprint, so without it the graph would feed counts to a net that has only ever seen indicators
+  and quietly disagree with its own Python reference on any molecule with a repeated substructure.
+
+  The ramp clips to [0, 1] before scaling: a net can extrapolate past the target's range, and a
+  similarity above 1 would otherwise push ``a`` past its ceiling.
   """
   import onnx
   from onnx import TensorProto, helper
 
-  from olinda.train.backend import get_backend
+  net = onnx.load_from_string(clf.onnx_bytes)
 
-  with tempfile.TemporaryDirectory() as td:
-    path = Path(td) / "gate.onnx"
-    get_backend(clf.backend, "cpu").to_onnx(clf.model, path, n_features)
-    tree = onnx.load(str(path))
+  # Rewire the net's own input so the binarisation can sit in front of it.
+  inner = "ap_bits"
+  _rename_input(net, inner)
+  del net.graph.input[:]
+  net.graph.input.append(helper.make_tensor_value_info(in_name, TensorProto.FLOAT, ["B", int(n_features)]))
 
-  # Splice the ramp onto the booster's own graph rather than composing two models: one output tensor,
-  # one place for the arithmetic, and no prefix juggling for a five-node tail.
-  tree_out = tree.graph.output[0].name
+  net_out = net.graph.output[0].name
   span = max(float(clf.sim_hi) - float(clf.sim_lo), 1e-9)
   ct = helper.make_tensor
-  tree.graph.initializer.extend([
+  net.graph.initializer.extend([
+    ct("ap_thr", TensorProto.FLOAT, [1], [0.0]),
     ct("ap_zero", TensorProto.DOUBLE, [1], [0.0]),
     ct("ap_one", TensorProto.DOUBLE, [1], [1.0]),
     ct("ap_lo", TensorProto.DOUBLE, [1], [float(clf.sim_lo)]),
     ct("ap_span", TensorProto.DOUBLE, [1], [span]),
     ct("ap_max", TensorProto.DOUBLE, [1], [float(clf.a_max)]),
+    ct("ap_flat", TensorProto.INT64, [1], [-1]),
   ])
-  tree.graph.node.extend([
-    helper.make_node("Cast", [tree_out], ["ap_simd"], to=TensorProto.DOUBLE),
+  head = [
+    helper.make_node("Greater", [in_name, "ap_thr"], ["ap_on"]),
+    helper.make_node("Cast", ["ap_on"], [inner], to=TensorProto.FLOAT),
+  ]
+  tail = [
+    helper.make_node("Cast", [net_out], ["ap_simd"], to=TensorProto.DOUBLE),
     helper.make_node("Reshape", ["ap_simd", "ap_flat"], ["ap_sim1"]),
     helper.make_node("Clip", ["ap_sim1", "ap_zero", "ap_one"], ["ap_sim"]),
     helper.make_node("Sub", ["ap_sim", "ap_lo"], ["ap_shift"]),
     helper.make_node("Div", ["ap_shift", "ap_span"], ["ap_frac0"]),
     helper.make_node("Clip", ["ap_frac0", "ap_zero", "ap_one"], ["ap_frac"]),
     helper.make_node("Mul", ["ap_frac", "ap_max"], [out_name]),
-  ])
-  tree.graph.initializer.append(ct("ap_flat", TensorProto.INT64, [1], [-1]))
-  del tree.graph.output[:]
-  tree.graph.output.append(helper.make_tensor_value_info(out_name, TensorProto.DOUBLE, ["B"]))
-  if tree.graph.input[0].name != in_name:
-    _rename_input(tree, in_name)
-  # Raise ONLY the default domain: the converter emits it at 8, and Clip takes its bounds as inputs
-  # from 11 onward. ai.onnx.ml carries TreeEnsembleRegressor and tops out far below _OPSET — setting
-  # that one to 16 is what makes onnxruntime reject the node as deprecated.
-  default = next((o for o in tree.opset_import if o.domain in ("", "ai.onnx")), None)
-  if default is None:
-    default = tree.opset_import.add()
-    default.domain = ""
-  default.version = _OPSET
-  tree.ir_version = _IR_VERSION
-  return tree
+  ]
+  existing = list(net.graph.node)
+  del net.graph.node[:]
+  net.graph.node.extend(head + existing + tail)
+
+  del net.graph.output[:]
+  net.graph.output.append(helper.make_tensor_value_info(out_name, TensorProto.DOUBLE, ["B"]))
+  # skl2onnx emits a newer opset than the rest of the bundle; every op used here (MatMul, Relu, Add,
+  # Cast, Reshape, Clip, Greater) exists at _OPSET, and there is no ai.onnx.ml domain to preserve.
+  del net.opset_import[:]
+  net.opset_import.append(helper.make_opsetid("", _OPSET))
+  net.ir_version = _IR_VERSION
+  return net
 
 
 def _rename_input(model, new_name: str) -> None:
@@ -278,10 +286,13 @@ def applicability_to_onnx(clf, n_features: int, out_path: Path, *, in_name: str 
 
   _save(_applicability_model(clf, n_features, in_name, "applicability"), out_path)
   rng = np.random.default_rng(0)
-  fp = (rng.random((64, n_features)) < 0.1).astype(np.float32)
+  # Morgan *counts*, not bits: a 0/1 probe cannot tell "the graph binarises" from "the graph forgot
+  # to", because the two agree exactly on such input. Real fingerprints reach well past 1.
+  fp = (rng.random((64, n_features)) < 0.1) * rng.integers(1, 5, (64, n_features))
+  fp = fp.astype(np.float32)
   sess = ort.InferenceSession(out_path.read_bytes(), providers=["CPUExecutionProvider"])
   got = sess.run(None, {in_name: fp})[0]
-  return {"max_abs_diff": float(np.max(np.abs(got - clf.weight(fp > 0))))}
+  return {"max_abs_diff": float(np.max(np.abs(got - clf.weight(fp))))}
 
 
 # ── small structural graphs (blender, prob→G) ─────────────────────────────────
@@ -693,7 +704,7 @@ def build_bundle(model_dir: str | Path) -> dict:
     g = np.asarray(BaseXGBArtifact.load(str(gt_root / GT_MODEL_SUBDIR)).run(fp))[:, 1].astype(np.float64)
     gsoft = np.asarray(IsotonicCalibrator.load(gt_root / CALIBRATOR_NAME).transform(g)).ravel()
     gate = SimilarityRegressor.load(gt_root / APPLICABILITY_DIRNAME)
-    a = np.asarray(gate.weight(fp > 0)).ravel()
+    a = np.asarray(gate.weight(fp)).ravel()
     # a == 0 everywhere has two very different causes. If the ceiling itself is zero the hard head did
     # not earn any weight, the blend is off by design, and the fused output simply *is* the surrogate —
     # there is nothing left to cross-check. If the ceiling is positive and the gate still never fires,

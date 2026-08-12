@@ -181,6 +181,82 @@ def test_more_than_ten_columns_is_rejected(tmp_path, monkeypatch):
   assert "11 value columns" in _plain(r) and "10" in _plain(r)
 
 
+def test_selecting_soft_columns_trains_only_those(tmp_path, monkeypatch):
+  """--soft-label-columns is the contract: what you name is what the artifact ends up predicting."""
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=3)
+  art = tmp_path / "run.onnx"
+
+  r = _run(
+    # deliberately out of file order — the selection decides the order too
+    ["fit", "-s", str(soft), "-m", str(art), "--val-frac", "0.2", "--num-boost-round", "40"]
+    + ["--soft-label-columns", "assay2_probability,assay0_probability"]
+  )
+  assert r.exit_code == 0, r.output
+  assert OlindaArtifact(art).columns == ["assay2_probability", "assay0_probability"]
+
+
+def test_selecting_columns_lifts_the_budget_off_the_unused_ones(tmp_path, monkeypatch):
+  """An 11-column file is fine as long as you distil at most MAX_COLUMNS of it."""
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=11)
+  md = tmp_path / "run"
+  r = _run(["prepare", "-s", str(soft), "-m", str(md), "--soft-label-columns", "assay3_probability"])
+  assert r.exit_code == 0, r.output
+  manifest = json.loads((md / "manifest.json").read_text())
+  assert [c["name"] for c in manifest["columns"]] == ["assay3_probability"]
+
+
+def test_naming_a_column_that_is_not_there_fails_before_any_training(tmp_path, monkeypatch):
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=3)
+  md = tmp_path / "run"
+  r = _run(["prepare", "-s", str(soft), "-m", str(md), "--soft-label-columns", "nope"])
+  assert r.exit_code != 0
+  assert "nope" in _plain(r)
+  assert not (md / "manifest.json").exists()
+
+
+def test_the_ersilia_key_input_layout_works_untouched(tmp_path, monkeypatch):
+  """key,input,<value> is what ersilia writes — it must fit and predict with no flags at all."""
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, smiles, _ = _stage(home, tmp_path, monkeypatch, n_columns=1)
+  frame = pd.read_csv(soft)
+  ersilia = tmp_path / "ersilia_style.csv"
+  pd.DataFrame({
+    "key": [f"k{i}" for i in range(len(frame))],
+    "input": frame["smiles"],
+    "assay0_probability": frame["assay0_probability"],
+  }).to_csv(ersilia, index=False)
+
+  art = tmp_path / "run.onnx"
+  r = _run(["fit", "-s", str(ersilia), "-m", str(art), "--val-frac", "0.2", "--num-boost-round", "40"])
+  assert r.exit_code == 0, r.output
+  # `key` must not have been mistaken for a value column
+  assert OlindaArtifact(art).columns == ["assay0_probability"]
+
+  # and predict reads the same layout, with --smiles-column as the explicit escape hatch
+  query = tmp_path / "query.csv"
+  pd.DataFrame({"key": ["a", "b"], "input": _SM[:2]}).to_csv(query, index=False)
+  out = tmp_path / "pred.csv"
+  assert (r := _run(["predict", "-m", str(art), "-i", str(query), "-o", str(out)])).exit_code == 0, r.output
+  assert len(pd.read_csv(out)) == 2
+
+  named = tmp_path / "named.csv"
+  pd.DataFrame({"mol": _SM[:2]}).to_csv(named, index=False)
+  r = _run(["predict", "-m", str(art), "-i", str(named), "-o", str(out), "--smiles-column", "mol"])
+  assert r.exit_code == 0, r.output
+  assert len(pd.read_csv(out)) == 2
+  # ...and without it, an unrecognisable column is refused rather than guessed at
+  r = _run(["predict", "-m", str(art), "-i", str(named), "-o", str(out)])
+  assert r.exit_code != 0
+  assert "smiles" in _plain(r) and "input" in _plain(r)
+
+
 def test_fused_graph_has_no_duplicate_names(tmp_path, monkeypatch):
   """Per-column prefixes must make every node and initializer unique — the fusion blocker."""
   home = tmp_path / "home"
@@ -584,3 +660,25 @@ def test_a_near_constant_teacher_column_disables_the_blend(tmp_path, monkeypatch
   meta = json.loads((md / "columns" / "c0" / "_ground_truth" / "ground_truth_meta.json").read_text())
   assert meta["applicability"]["a_max"] == 0.0, "no variance to explain ⇒ no weight earned"
   assert OlindaArtifact(md).run(_SM[:4])[["assay0_probability"]].notna().all().all()
+
+
+def test_only_the_gate_branch_binarises_the_fingerprint(tmp_path, monkeypatch):
+  """The gate net is trained on `bits > 0`; the surrogate and the hard head are trained on counts.
+
+  So exactly one branch of the fused graph may threshold its input. If the binarisation leaked onto
+  the shared input every stage would silently lose count information, and nothing else in the graph
+  would complain — the numbers would just be wrong for any molecule with a repeated substructure.
+  """
+  md = _fit_with_hard(tmp_path, monkeypatch)
+  m = onnx.load(str(md / "model.onnx"), load_external_data=False)
+
+  greaters = [n for n in m.graph.node if n.op_type == "Greater"]
+  assert greaters, "the gate must threshold its input somewhere"
+  for node in greaters:
+    assert "ap" in node.name or "ap" in node.output[0], f"{node.name} thresholds outside the gate"
+
+  # And the surrogate must still be fed the raw input, not a thresholded copy.
+  produced_by = {out: n for n in m.graph.node for out in n.output}
+  soft_feed = next(n for n in m.graph.node if n.output and n.output[0].endswith("sm__input"))
+  assert soft_feed.input[0] == "input", "the surrogate must read the shared count fingerprint directly"
+  assert produced_by.get(soft_feed.input[0]) is None, "nothing may transform the input before the surrogate"

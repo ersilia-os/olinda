@@ -120,22 +120,29 @@ def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray = None, *, prepared=
   return best.astype(np.float64)
 
 
-# Capacity of the similarity regressor — an upper bound, not a fixed cost. These are the point where
-# accuracy stops paying for size on a full-library run: measured there, 300 rounds at this depth gave
-# R² 0.46 for 1.4 MB and 2.6 µs/molecule, where doubling the leaves bought R² 0.51 for twice the size.
+# Capacity of the similarity gate. A small MLP rather than a gradient-boosted tree, because Tanimoto is
+# (x·g)/(|x|+|g|−x·g) maximised over the labelled set — a ratio of inner products. A dense layer computes
+# exactly those weighted overlaps; axis-aligned tree splits have to reconstruct a 2048-term sum out of
+# thresholds on single bits, and measurably cannot. On a real run, against the 9.2% of the library that
+# genuinely deserves weight:
 #
-# The *proportion* of the artifact this represents is not general — it was a few percent beside a
-# 42.5 MB surrogate, but a small run (`--max-samples`, or a small library) produces a small surrogate
-# and the gate would loom much larger against it. What keeps that in hand is early stopping rather
-# than these constants: with little data the fit converges in a handful of rounds, and a toy fixture
-# produces a single-tree gate. So read these as "no larger than", and check the fitted tree count in
-# the run's metadata if size matters.
+#   tree, tuned and loss-weighted   R² 0.08   recall 0.38   precision 0.64   0.6 MB
+#   MLP (64,)                       R² 0.48   recall 0.44   precision 0.62   0.5 MB
+#   MLP (256, 64)                   R² 0.61   recall 0.52   precision 0.71   2.2 MB
 #
-# Depth rather than a leaf count because that is the canonical knob both backends translate — LightGBM
-# derives num_leaves = min(2**max_depth - 1, 255), so 6 gives 63.
-GATE_ROUNDS: int = 300
-GATE_MAX_DEPTH: int = 6
-GATE_MAX_BIN: int = 64
+# The tree could buy recall only by giving up precision and R²; the MLP improves all three at once.
+#
+# Size scales with the layer widths alone, not with the library — 2048x256 + 256x64 + biases as float32.
+# Predicting is two MatMuls, so it stays cheap next to the surrogate's tree traversal.
+GATE_HIDDEN: tuple[int, ...] = (256, 64)
+# Trained by streaming mini-batches off the resident uint8 library, so the whole reference set is used
+# without ever materialising it as float32 (which would be ~11 GB). One batch is ~34 MB.
+GATE_MAX_EPOCHS: int = 15
+GATE_PATIENCE: int = 3
+GATE_BATCH: int = 4096
+GATE_LEARNING_RATE: float = 1e-3
+
+_MODEL_NAME = "gate.onnx"
 
 _META_NAME = "gate_meta.json"
 
@@ -154,45 +161,113 @@ def ramp(similarity, *, a_max: float = A_CEILING, sim_lo: float = SIM_LO, sim_hi
 class SimilarityRegressor:
   """Predicts a compound's 1-NN Tanimoto to the labelled set, and turns it into a blend weight.
 
-  The model is a small gradient-boosted regressor over the same binarised Morgan features everything
-  else uses, trained on the reference library with :func:`tanimoto_nn` as the target. It is a *stand-in*
-  for a nearest-neighbour search: approximate by construction, but it keeps the labelled fingerprints
-  out of the shipped artifact and costs one tree ensemble per query instead of a scan.
+  A small MLP over the same binarised Morgan features everything else uses, trained on the reference
+  library with :func:`tanimoto_nn` as the target. It stands in for a nearest-neighbour search: an
+  approximation by construction, but it keeps the labelled fingerprints out of the shipped artifact —
+  which is a hard requirement, since the artifact is what gets distributed — and costs two matrix
+  multiplies per query instead of a scan over the labelled set.
+
+  The trained net is held **as ONNX**, not as a pickled estimator: it is destined for the fused graph
+  anyway, onnxruntime is already a base dependency, and it avoids persisting a pickle whose validity
+  depends on the scikit-learn version that happens to be installed later.
 
   Attributes
   ----------
-  model : object
-      The trained booster, in the backend's native form.
-  backend : str
-      Which engine trained it, so it can be reloaded and converted to ONNX.
+  onnx_bytes : bytes
+      The serialised network, input ``"input"`` (float32, ``[B, d]``), output ``"variable"``.
   a_max : float
-      Ceiling on the blend weight — earned from the hard head's out-of-fold margin over the surrogate,
-      so a head that does not beat the surrogate yields 0 and disables the blend entirely.
+      Ceiling on the blend weight, earned from how well the calibrated hard head reproduces the
+      teacher's scale (:func:`olinda.ground_truth._blend_ceiling`). Zero disables the blend entirely.
   """
 
   def __init__(
     self,
-    model,
-    backend: str,
+    onnx_bytes: bytes,
     *,
     a_max: float = A_CEILING,
     sim_lo: float = SIM_LO,
     sim_hi: float = SIM_HI,
     metrics: dict | None = None,
   ) -> None:
-    self.model = model
-    self.backend = str(backend)
+    self.onnx_bytes = bytes(onnx_bytes)
     self.a_max = float(a_max)
     self.sim_lo = float(sim_lo)
     self.sim_hi = float(sim_hi)
     self.metrics = dict(metrics or {})
+    self._session = None
+
+  @classmethod
+  def fit(cls, batches, n_features: int, validation, *, seed: int = 0, echo=None, **kwargs):
+    """Train the gate by streaming mini-batches, and keep the result as ONNX.
+
+    Parameters
+    ----------
+    batches : callable
+        ``batches(rng)`` yields ``(bits, similarity)`` pairs for one shuffled epoch. Taking a factory
+        rather than an array is what lets the caller stream from the resident uint8 library — dense
+        float32 for the whole reference set would be ~11 GB, and there is no reason to hold it.
+    n_features : int
+        Fingerprint width, needed to declare the ONNX input.
+    validation : tuple
+        ``(bits, similarity)`` held out for early stopping. Materialised, so keep it modest.
+
+    The target is the similarity itself, not the ramp applied to it. Regressing the ramp output looks
+    tempting — it is what the gate actually needs — but it is zero for ~91% of the library, so the net
+    emits small positive values everywhere and *any* positive value opens the gate: measured, 84% of
+    the library at 0.11 precision. Regressing similarity and ramping afterwards keeps the signal.
+    """
+    from skl2onnx import convert_sklearn
+    from skl2onnx.common.data_types import FloatTensorType
+    from sklearn.neural_network import MLPRegressor
+
+    val_x = (np.asarray(validation[0]) > 0).astype(np.float32)
+    val_y = np.asarray(validation[1], dtype=np.float64).ravel()
+
+    net = MLPRegressor(
+      hidden_layer_sizes=GATE_HIDDEN,
+      activation="relu",
+      solver="adam",
+      learning_rate_init=GATE_LEARNING_RATE,
+      random_state=seed,
+    )
+    rng = np.random.default_rng(seed)
+    best, best_state, waited = np.inf, None, 0
+    for epoch in range(GATE_MAX_EPOCHS):
+      for bits, target in batches(rng):
+        net.partial_fit((np.asarray(bits) > 0).astype(np.float32), np.asarray(target, dtype=np.float64))
+      loss = float(np.mean((net.predict(val_x) - val_y) ** 2))
+      if echo:
+        echo(f"    epoch {epoch + 1}/{GATE_MAX_EPOCHS} · val MSE {loss:.6f}", "info")
+      # Early stopping is hand-rolled because sklearn's own only applies to `fit`, which would need the
+      # whole library in memory. Keep the best weights rather than the last: Adam can step past a good
+      # solution, and the epoch that stops the run is by definition not the best one.
+      if loss < best - 1e-7:
+        best, waited = loss, 0
+        best_state = ([c.copy() for c in net.coefs_], [b.copy() for b in net.intercepts_])
+      else:
+        waited += 1
+        if waited >= GATE_PATIENCE:
+          break
+    if best_state is not None:
+      net.coefs_, net.intercepts_ = best_state
+
+    onx = convert_sklearn(net, initial_types=[("input", FloatTensorType([None, int(n_features)]))])
+    return cls(onx.SerializeToString(), **kwargs)
+
+  def _run(self):
+    import onnxruntime as ort
+
+    if self._session is None:
+      options = ort.SessionOptions()
+      options.log_severity_level = 3
+      self._session = ort.InferenceSession(self.onnx_bytes, options, providers=["CPUExecutionProvider"])
+    return self._session
 
   def predict_similarity(self, bits: np.ndarray) -> np.ndarray:
     """Estimated 1-NN Tanimoto per row, clipped to [0, 1] — the target's own range."""
-    from olinda.train.backend import get_backend
-
+    sess = self._run()
     x = (np.asarray(bits) > 0).astype(np.float32)
-    raw = get_backend(self.backend, "cpu").predict(self.model, x)
+    raw = sess.run(None, {sess.get_inputs()[0].name: x})[0]
     return np.clip(np.asarray(raw, dtype=np.float64).ravel(), 0.0, 1.0)
 
   def weight(self, bits: np.ndarray) -> np.ndarray:
@@ -200,17 +275,15 @@ class SimilarityRegressor:
     return ramp(self.predict_similarity(bits), a_max=self.a_max, sim_lo=self.sim_lo, sim_hi=self.sim_hi)
 
   def save(self, directory: str | Path) -> None:
-    """Write the booster plus the ramp parameters into *directory*."""
-    from olinda.train.backend import get_backend
-
+    """Write the network and the ramp parameters into *directory*."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    get_backend(self.backend, "cpu").save(self.model, directory)
+    (directory / _MODEL_NAME).write_bytes(self.onnx_bytes)
     with open(directory / _META_NAME, "w") as fp:
       json.dump(
         {
-          "type": "similarity_regressor",
-          "backend": self.backend,
+          "type": "similarity_mlp",
+          "hidden": list(GATE_HIDDEN),
           "a_max": self.a_max,
           "sim_lo": self.sim_lo,
           "sim_hi": self.sim_hi,
@@ -222,15 +295,11 @@ class SimilarityRegressor:
 
   @classmethod
   def load(cls, directory: str | Path) -> "SimilarityRegressor":
-    from olinda.train.backend import get_backend
-
     directory = Path(directory)
     with open(directory / _META_NAME) as fp:
       meta = json.load(fp)
-    backend = meta.get("backend", "lightgbm")
     return cls(
-      get_backend(backend, "cpu").load(directory),
-      backend,
+      (directory / _MODEL_NAME).read_bytes(),
       a_max=meta.get("a_max", A_CEILING),
       sim_lo=meta.get("sim_lo", SIM_LO),
       sim_hi=meta.get("sim_hi", SIM_HI),

@@ -29,28 +29,36 @@ def test_isotonic_onnx_matches_transform(tmp_path, relation):
   assert np.max(np.abs(got - cal.transform(raw))) <= 1e-4
 
 
-def _fitted_gate(d=64, n=800, seed=1):
-  """A similarity regressor trained on a synthetic target, through the real backend."""
-  import lightgbm as lgb
-
+def _fitted_gate(d=64, n=3000, seed=1):
+  """A similarity gate trained on a synthetic target, through the real fit path."""
   rng = np.random.default_rng(seed)
   bits = (rng.random((n, d)) < 0.15).astype(np.float32)
   # A target with real structure across the whole [0, 1] range, so the ramp is exercised end to end
   # rather than saturating at one end.
   sim = np.clip(bits[:, :12].sum(1) / 12.0 + rng.normal(0, 0.03, n), 0, 1)
-  booster = lgb.train(
-    {
-      "objective": "regression",
-      "metric": "l2",
-      "num_leaves": 15,
-      "learning_rate": 0.2,
-      "verbosity": -1,
-      "max_bin": 32,
-    },
-    lgb.Dataset(bits, label=sim, params={"max_bin": 32, "verbosity": -1}),
-    num_boost_round=40,
-  )
-  return SimilarityRegressor(booster, "lightgbm"), bits, d
+
+  def batches(shuffler):
+    idx = np.arange(n - 500)
+    shuffler.shuffle(idx)
+    for start in range(0, len(idx), 256):
+      take = idx[start : start + 256]
+      yield bits[take], sim[take]
+
+  gate = SimilarityRegressor.fit(batches, d, (bits[-500:], sim[-500:]), seed=seed)
+  return gate, bits, d
+
+
+def test_the_gate_graph_binarises_its_input(tmp_path):
+  """The net sees ``bits > 0``; the fused graph carries counts. Without that they quietly diverge."""
+  clf, bits, d = _fitted_gate()
+  applicability_to_onnx(clf, d, tmp_path / "ad.onnx")
+  sess = ort.InferenceSession((tmp_path / "ad.onnx").read_bytes(), providers=["CPUExecutionProvider"])
+
+  counts = bits[:64].copy()
+  counts[counts > 0] = 3.0  # the same substructures, each seen three times
+  as_counts = np.asarray(sess.run(None, {"input": counts})[0]).ravel()
+  as_bits = np.asarray(sess.run(None, {"input": bits[:64]})[0]).ravel()
+  np.testing.assert_allclose(as_counts, as_bits, atol=1e-9)
 
 
 def test_applicability_onnx_matches_weight(tmp_path):
