@@ -3,111 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 import rich_click as click
-import rich_click.rich_click as rc
+
+from olinda.cli import options
+from olinda.cli.guards import require_train
+from olinda.cli.options import parse_label_columns
+from olinda.cli.rendering import configure_help
 
 # NOTE: heavy dependencies (numpy, pandas, xgboost, rdkit, matplotlib, ...) are imported
 # lazily inside the command bodies below, not at module scope. This keeps CLI startup fast
 # (e.g. `olinda --help`, `olinda setup`) — importing them all eagerly cost ~12 s per call.
 
 
-click.rich_click.TEXT_MARKUP = "rich"
-click.rich_click.SHOW_ARGUMENTS = True
-
-rc.TEXT_MARKUP = "rich"
-rc.SHOW_ARGUMENTS = True
-rc.COLOR_SYSTEM = "truecolor"
-rc.STYLE_OPTION = "bold magenta"
-rc.STYLE_COMMAND = "bold green"
-rc.STYLE_METAVAR = "italic yellow"
-rc.STYLE_SWITCH = "underline cyan"
-rc.STYLE_USAGE = "bold blue"
-rc.STYLE_OPTION_DEFAULT = "dim italic"
-
-
-def _align_command_columns(name_width: int = 11) -> None:
-    """Pin the command-name column to a fixed width across every help panel.
-
-    rich-click sizes each group's name column to *that group's* longest command, so the help text in the
-    "Main commands" and "Fit pipeline commands" panels doesn't line up; its only knob is a *proportional*
-    ratio, which either leaves a big gap or truncates names. A fixed width (just past the longest command,
-    "learn-soft"/"learn-hard") keeps the help text tight to the names AND aligned across panels. rich-click exposes no
-    config for this, so we defensively wrap the internal command-table builder — on any API drift it silently
-    falls back to the default rendering rather than breaking the CLI.
-    """
-    try:
-        from rich_click.rich_panel import RichCommandPanel
-    except Exception:
-        return
-
-    _orig_get_table = RichCommandPanel.get_table
-
-    def _get_table(self, *args, **kwargs):
-        table = _orig_get_table(self, *args, **kwargs)
-        try:
-            # Fix the name column and make the help column absorb ALL slack, so the name column stays exactly
-            # `name_width` even on a wide terminal (otherwise `expand` inflates both columns, per panel).
-            name_col, help_col = table.columns[0], table.columns[1]
-            name_col.width, name_col.ratio, name_col.no_wrap = name_width, None, True
-            help_col.ratio, help_col.width = 1, None
-        except Exception:
-            pass
-        return table
-
-    RichCommandPanel.get_table = _get_table
-
-
-_align_command_columns()
-
-# Two-level help grouping (à la zairachem): top-level user commands, then the lower-level pipeline steps.
-rc.COMMAND_GROUPS = {
-    "olinda": [
-        {"name": "Main commands", "commands": ["setup", "fit", "predict", "validate"]},
-        {
-            "name": "Fit pipeline commands",
-            "commands": [
-                "prepare",
-                "tune",
-                "learn-soft",
-                "learn-hard",
-                "export",
-                "clean",
-            ],
-        },
-    ]
-}
-
-
 @click.group()
 def cli():
     pass
-
-
-def _require_train() -> None:
-    """Refuse a distilling command with guidance when the training extra is absent.
-
-    The CLI ships with the base install, so these commands are reachable on an inference-only one and
-    would otherwise die on whichever heavy ``import`` came first — a traceback naming ``h5py``, which
-    says nothing about what to install. Raised as a ClickException so it prints in the error panel like
-    any other user-facing refusal. `validate` does the same through ``require_report_extra``.
-    """
-    from olinda.train import require_train_extra
-
-    try:
-        require_train_extra()
-    except RuntimeError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-
-def _columns(value: str | None):
-    """Parse a comma-separated ``--*-label-columns`` value into a list of names, or ``None``.
-
-    An unset — or empty, or all-whitespace — flag means "work it out from the file", which is the
-    behaviour every one of these commands had before the flags existed.
-    """
-    if value is None:
-        return None
-    names = [part.strip() for part in value.split(",") if part.strip()]
-    return names or None
 
 
 @cli.command("setup")
@@ -151,28 +60,14 @@ def setup_cmd(target_dir):
     help="Where to write the distilled model (must end in .onnx). Working files go in a folder of the "
     "same name beside it, and are deleted when the run finishes.",
 )
-@click.option(
-    "--task",
-    type=click.Choice(["auto", "binary", "regression"]),
-    default="auto",
-    show_default=True,
-    help="Hard-label type (auto-detected by default); only used with --hard-labels.",
-)
+@options.task()
 @click.option(
     "--max-samples",
     default=None,
     type=int,
     help="Use only the first N reference compounds (dev subsampling).",
 )
-@click.option(
-    "--val-frac",
-    default=0.1,
-    type=float,
-    show_default=True,
-    help="Fraction of each teacher column held back for validation — early stopping and the reported "
-    "metrics both read it. Split per column and stratified by value, so the held-back rows span the "
-    "whole range rather than landing in one part of it.",
-)
+@options.val_frac()
 @click.option(
     "--num-boost-round",
     default=10000,
@@ -194,21 +89,13 @@ def setup_cmd(target_dir):
     show_default=True,
     help="Optuna trials (only with --tune).",
 )
-@click.option(
-    "--soft-smiles-column",
-    default=None,
-    help="Name of the SMILES column in --soft-labels (default: `smiles`/`input`, else the first column).",
-)
+@options.soft_smiles_column()
 @click.option(
     "--soft-label-columns",
     default=None,
     help="Comma-separated teacher columns to distil (default: every value column in the file).",
 )
-@click.option(
-    "--hard-smiles-column",
-    default=None,
-    help="Name of the SMILES column in --hard-labels (default: `smiles`/`input`, else the first column).",
-)
+@options.hard_smiles_column()
 @click.option(
     "--hard-label-columns",
     default=None,
@@ -239,7 +126,7 @@ def fit_cmd(
     Drive the steps individually against `-m runs/foo` if you want to keep the per-column boosters, metrics
     and plots.
     """
-    _require_train()
+    require_train()
     import time
 
     from olinda import run as runlib
@@ -338,43 +225,21 @@ def fit_cmd(
     required=True,
     help="Run directory — all prepared data + models live here.",
 )
-@click.option(
-    "--task",
-    type=click.Choice(["auto", "binary", "regression"]),
-    default="auto",
-    show_default=True,
-    help="Hard-label type (auto-detected by default); only used with --hard-labels.",
-)
+@options.task()
 @click.option(
     "--max-samples",
     default=None,
     type=int,
     help="Use only the first N reference compounds (development subsampling).",
 )
-@click.option(
-    "--val-frac",
-    default=0.1,
-    type=float,
-    show_default=True,
-    help="Fraction of each teacher column held back for validation — early stopping and the reported "
-    "metrics both read it. Split per column and stratified by value, so the held-back rows span the "
-    "whole range rather than landing in one part of it.",
-)
-@click.option(
-    "--soft-smiles-column",
-    default=None,
-    help="Name of the SMILES column in --soft-labels (default: `smiles`/`input`, else the first column).",
-)
+@options.val_frac()
+@options.soft_smiles_column()
 @click.option(
     "--soft-label-columns",
     default=None,
     help="Comma-separated teacher columns to distil (default: every value column in the file).",
 )
-@click.option(
-    "--hard-smiles-column",
-    default=None,
-    help="Name of the SMILES column in --hard-labels (default: `smiles`/`input`, else the first column).",
-)
+@options.hard_smiles_column()
 @click.option(
     "--hard-label-columns",
     default=None,
@@ -403,7 +268,7 @@ def prepare_cmd(
     the four `--*-column(s)` flags are only needed for files that don't follow it, or to distil a
     subset of a wide teacher file. Naming a column that isn't in the file is an error.
     """
-    _require_train()
+    require_train()
     import time
 
     import h5py
@@ -455,7 +320,7 @@ def prepare_cmd(
 
     # --- soft labels: the selected value columns, verified against the library once -----------
     step(1, n_steps, "reading teacher columns")
-    wanted_soft = _columns(soft_label_columns)
+    wanted_soft = parse_label_columns(soft_label_columns)
     try:
         all_cols, targets = load_reference_calcs_frame(
             soft_labels,
@@ -488,7 +353,7 @@ def prepare_cmd(
             _, hard_values = resolve_smiles_frame(
                 _read_table(hard_labels),
                 smiles_column=hard_smiles_column,
-                label_columns=_columns(hard_label_columns),
+                label_columns=parse_label_columns(hard_label_columns),
             )
             hard_map = match_hard_columns(
                 selected_cols, [str(c) for c in hard_values.columns]
@@ -613,7 +478,7 @@ def learn_soft_cmd(model_dir, num_boost_round):
     reported, and a single self-describing `model.onnx` bundle is fused at the end (soft-only here;
     `learn-hard` re-fuses it with the hard head).
     """
-    _require_train()
+    require_train()
     import time
 
     from olinda import run as runlib
@@ -765,7 +630,7 @@ def tune_cmd(model_dir, trials, max_rows):
     uses good internal defaults — call ``olinda.train.tune.run_tuning`` directly to override them.
     Requires the ``[train]`` extra (Optuna).
     """
-    _require_train()
+    require_train()
     from olinda.run import PARAMS_NAME
     from olinda.train.tune import run_tuning
 
@@ -796,7 +661,7 @@ def learn_hard_cmd(model_dir):
     the named output (`T` needs no similarity search at predict time, and the blend favours `S` away from
     the labeled set).
     """
-    _require_train()
+    require_train()
     import time
 
     from olinda import run as runlib
@@ -928,7 +793,7 @@ def export_cmd(model_dir):
     self-describing. Gated on a numeric parity check. Featurization (RDKit) stays in Python — the graph
     consumes a 2048-count Morgan fingerprint.
     """
-    _require_train()
+    require_train()
     from olinda import run as runlib
     from olinda.export import build_bundle
 
@@ -1114,21 +979,13 @@ def predict_cmd(model_onnx, input_path, out_path, smiles_column):
     show_default=True,
     help="Report directory.",
 )
-@click.option(
-    "--soft-smiles-column",
-    default=None,
-    help="Name of the SMILES column in --soft-labels (default: `smiles`/`input`, else the first column).",
-)
+@options.soft_smiles_column()
 @click.option(
     "--soft-label-columns",
     default=None,
     help="Comma-separated columns of --soft-labels to score (default: every column matching a task).",
 )
-@click.option(
-    "--hard-smiles-column",
-    default=None,
-    help="Name of the SMILES column in --hard-labels (default: `smiles`/`input`, else the first column).",
-)
+@options.hard_smiles_column()
 @click.option(
     "--hard-label-columns",
     default=None,
@@ -1183,9 +1040,9 @@ def validate_cmd(
             hard_labels=hard_labels,
             out_dir=out_dir,
             soft_smiles_column=soft_smiles_column,
-            soft_label_columns=_columns(soft_label_columns),
+            soft_label_columns=parse_label_columns(soft_label_columns),
             hard_smiles_column=hard_smiles_column,
-            hard_label_columns=_columns(hard_label_columns),
+            hard_label_columns=parse_label_columns(hard_label_columns),
         )
     except (RDKitVersionMismatch, RuntimeError, ValueError, FileNotFoundError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1212,3 +1069,15 @@ def validate_cmd(
         border_style=STEP_COLORS["validate"],
         icon="✓",
     )
+
+
+def create_olinda_cli():
+    """Configure the help rendering, register every command, and return the group.
+
+    Commands are attached with ``add_command`` rather than the ``@cli.command`` decorator so that no
+    command module has to import this one. That keeps the import graph a DAG which cannot be made
+    cyclic by a plausible edit — which matters because `fit` imports five of its siblings to drive
+    them directly.
+    """
+    configure_help()
+    return cli

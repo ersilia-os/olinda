@@ -6,4 +6,6 @@ click's ``CliRunner``, and by ``python -m olinda.cli``.
 
 from __future__ import annotations
 
-from olinda.cli.create_cli import cli as cli
+from olinda.cli.create_cli import create_olinda_cli
+
+cli = create_olinda_cli()
