@@ -320,15 +320,15 @@ def draw_model_onnx(ax) -> None:
 
   # three heads, fed from the same fingerprint
   _box(ax, 36, 66, 17, 13, "S · surrogate\nGBM", STUDENT, bold_first=True)
-  _box(ax, 36, 44, 17, 13, "hard model\nG", TEACHER, bold_first=True)
+  _box(ax, 36, 44, 17, 13, "H · hard model\nGBM", TEACHER, bold_first=True)
   _box(ax, 36, 24, 17, 13, "T · Tanimoto\nMLP", TANIMOTO, bold_first=True)
   for y in (66, 44, 24):
     _arrow(ax, (21.5, 46), (27, y), color=DATA)
 
   _box(ax, 57, 66, 15, 12, "isotonic\ncorrection", STUDENT, fill=0.09)
-  _box(ax, 57, 44, 15, 12, "isotonic\nto soft scale", TEACHER, fill=0.09)
+  _box(ax, 57, 44, 15, 12, "isotonic\nH → H_S", TEACHER, fill=0.09)
   _arrow(ax, (44.5, 66), (49.5, 66), color=STUDENT)
-  _arrow(ax, (44.5, 44), (49.5, 44), color=TEACHER, label="hard", label_dy=1.8)
+  _arrow(ax, (44.5, 44), (49.5, 44), color=TEACHER, label="H", label_dy=1.8)
 
   # everything converges on the blend
   _box(ax, 73, 44, 12, 20, "blend", OUT, bold_first=False)
