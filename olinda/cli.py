@@ -61,7 +61,7 @@ _align_command_columns()
 # Two-level help grouping (à la zairachem): top-level user commands, then the lower-level pipeline steps.
 rc.COMMAND_GROUPS = {
   "olinda": [
-    {"name": "Main commands", "commands": ["setup", "fit", "predict"]},
+    {"name": "Main commands", "commands": ["setup", "fit", "predict", "validate"]},
     {
       "name": "Fit pipeline commands",
       "commands": ["prepare", "tune", "learn-soft", "learn-hard", "export", "clean"],
@@ -823,6 +823,73 @@ def predict_cmd(model_onnx, input_path, out_path):
     predict_file(model_onnx, input_path, out_path)
   except (RDKitVersionMismatch, ValueError, FileNotFoundError) as exc:
     raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("validate", help="Score a model against labelled data — correlation, AUROC, a report.")
+@click.option(
+  "--model-onnx", "-m", "model_onnx", required=True, help="The model to score (a run directory works too)."
+)
+@click.option(
+  "--soft-labels",
+  "-s",
+  default=None,
+  help="Held-out teacher values (SMILES + value columns). Any size, any order.",
+)
+@click.option("--hard-labels", "-h", default=None, help="Held-out measurements (SMILES + binary columns).")
+@click.option("--out-dir", "-o", "out_dir", default="report", show_default=True, help="Report directory.")
+def validate_cmd(model_onnx, soft_labels, hard_labels, out_dir):
+  """Measure a finished `model.onnx` on data of your choosing and write a report.
+
+  Unlike the teacher file `prepare` takes, these labels have **no size or ordering restriction** — any
+  SMILES with values, matched to the model's tasks by name (allowing a suffix). Held-out data is the
+  point: the surrogate's isotonic correction was fitted on the run's own validation rows, so only new
+  data measures the calibrated model honestly.
+
+  `--soft-labels` gives correlation and residual diagnostics; `--hard-labels` gives ROC, precision–recall
+  and enrichment — of the model's **blended** output, which is what `predict` emits, not the ground-truth
+  head alone. With neither, you still get the artifact's own calibration curves, read straight from the
+  graph. Requires the reporting extra: `pip install "olinda[report]"`.
+  """
+  from olinda.artifact import MODEL_NAME, RDKitVersionMismatch
+  from olinda.console import STEP_COLORS, echo, path as cpath, rule, set_active_color, summary_panel
+
+  model_onnx = Path(model_onnx)
+  if model_onnx.is_dir():
+    model_onnx = model_onnx / MODEL_NAME
+  set_active_color(STEP_COLORS["validate"])
+  rule("olinda · validate", style=STEP_COLORS["validate"], right=cpath(model_onnx))
+  if not model_onnx.exists():
+    echo(f"no artifact at [dim]{model_onnx}[/]", "error")
+    raise click.ClickException(f"{model_onnx} does not exist")
+  if soft_labels is None and hard_labels is None:
+    echo("no labels given — reporting the model's internals only", "warning")
+
+  from olinda.report import validate_model
+
+  try:
+    report = validate_model(model_onnx, soft_labels=soft_labels, hard_labels=hard_labels, out_dir=out_dir)
+  except (RDKitVersionMismatch, RuntimeError, ValueError, FileNotFoundError) as exc:
+    raise click.ClickException(str(exc)) from exc
+
+  for note in report.get("notes", []):
+    echo(note, "warning")
+  n_figures = sum(len(v) for v in report["figures"].values())
+  summary_panel(
+    "olinda · validate",
+    [
+      ("Model", f"[dim]{cpath(model_onnx)}[/]"),
+      ("Tasks", ", ".join(report["model"]["columns"])),
+      *[
+        (f"{kind} labels", f"{report[kind]['n']:,} compounds · {', '.join(report[kind]['metrics'])}")
+        for kind in ("soft", "hard")
+        if report.get(kind)
+      ],
+      ("Figures", f"[bold]{n_figures}[/] written"),
+      ("Report", f"[dim]{cpath(Path(out_dir) / 'report.html')}[/]"),
+    ],
+    border_style=STEP_COLORS["validate"],
+    icon="✓",
+  )
 
 
 if __name__ == "__main__":

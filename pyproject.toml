@@ -14,16 +14,27 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Everything needed to distil a model and to use the `olinda` CLI.
+# Reading a model and reporting on it: `olinda validate`, and the figures training writes along the
+# way. Enough to inspect a model.onnx you were handed, without any of the training stack — onnx to
+# read the graph's own calibration curves, stylia/matplotlib to draw. Plots go through stylia;
+# matplotlib is pinned rather than left to stylia's floor because it is what actually renders the
+# figures, and a drifting version changes them.
+report = [
+    "matplotlib==3.11.0",
+    "onnx==1.22.0",
+    "stylia==1.0.1",
+]
+# Everything needed to distil a model and to use the `olinda` CLI. Includes [report], since a
+# training run draws its own validation figures.
 # NOTE: lazyqsar[fit]==3.4.2 hard-pins numpy, onnxruntime, pandas, h5py, psutil, loguru, onnxmltools
 # and xgboost — the versions here match what it forces, so changing one means checking lazyqsar first.
 train = [
+    "olinda[report]",
     "click==8.4.2",
     "h5py==3.14.0",
     "lazyqsar[fit]==3.4.2",
     "lightgbm==4.6.0",
     "loguru==0.7.3",
-    "onnx==1.22.0",
     "onnxmltools==1.16.0",
     "optuna==4.9.0",
     "psutil==7.0.0",
@@ -36,12 +47,6 @@ train = [
 dev = [
     "pytest==9.1.1",
     "ruff==0.15.20",
-]
-# Plots go through stylia; matplotlib is pinned rather than left to stylia's floor because it is what
-# actually renders the figures, and a drifting version changes them.
-viz = [
-    "matplotlib==3.11.0",
-    "stylia==1.0.1",
 ]
 [project.scripts]
 olinda = "olinda._entry:main"

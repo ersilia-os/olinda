@@ -8,8 +8,12 @@ gradient-boosting student to reproduce it, and ship the result as a single ONNX 
 
 ```bash
 pip install olinda                 # inference only: numpy, pandas, rdkit, onnxruntime
-pip install "olinda[train]"        # + the gradient-boosting stack and the CLI
+pip install "olinda[report]"       # + validate a model you were given (onnx, stylia, matplotlib)
+pip install "olinda[train]"        # + distil your own (the boosting stack and the CLI)
 ```
+
+Running a model should never drag in a plotting stack, so the tiers are separate. `[train]` includes
+`[report]`, since a training run draws its own figures.
 
 ## Running a model at inference time
 
@@ -66,15 +70,36 @@ labelled set, and the final prediction is
 with `a` rising only near chemistry you have actually measured. Far from it, the model falls back to
 the distilled surrogate. That weighting is already inside the number `run()` returns.
 
+## Is it any good?
+
+`validate` scores a finished model against data of your choosing and writes a report — figures, a
+`metrics.json`, and a `performance_table.csv`:
+
+```bash
+olinda validate -m runs/my_model.onnx -s heldout_teacher.csv -h measured.csv -o report/
+```
+
+Unlike the teacher file `fit` takes, these labels have **no size or ordering restriction** — any
+SMILES with values, matched to the model's tasks by name. Held-out data is the point: the surrogate's
+isotonic correction is fitted on the run's own validation rows, so only new data measures the
+calibrated model honestly. If the compounds turn out to be the training library, the report says so
+rather than letting you read fit as generalisation.
+
+`-s` gives correlation, residual and calibration diagnostics; `-h` gives ROC, precision–recall and
+enrichment — of the **blended** output, which is what `predict` emits, not the ground-truth head on
+its own. With neither, you still get the model's own calibration curves, read straight out of the
+graph.
+
 ## Commands
 
-The three you normally need:
+The four you normally need:
 
 | | |
 |---|---|
 | `setup` | Download the reference-library fingerprints to `~/.olinda/` |
 | `fit` | Distil a teacher into one `model.onnx` |
 | `predict` | Run a model over a file of SMILES |
+| `validate` | Score a model against labelled data and write a report |
 
 `fit` chains the steps below. Each is also a command in its own right — run them one at a time when you
 want the per-column boosters, metrics and plots that `fit` discards:

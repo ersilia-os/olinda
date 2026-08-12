@@ -77,6 +77,7 @@ STEP_COLORS = {
   "export": "bright_cyan",
   "clean": "bright_black",
   "predict": "blue",
+  "validate": "bright_magenta",
   "fit": "bright_green",
 }
 

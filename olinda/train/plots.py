@@ -79,10 +79,23 @@ def save_true_vs_pred(
   fig, axs = stylia.create_figure(1, 1, width=0.5, height=0.5)
   _plot_true_pred(axs.next(), stylia, y, p, title or f"Validation  (R²={r2:.3f}, RMSE={rmse:.4f})")
   stylia.save_figure(str(out_path))
+  _close(fig)
   return out_path
 
 
-def _density_scatter(
+def _close(fig) -> None:
+  """Release a figure once it is written.
+
+  ``stylia.save_figure`` only calls ``savefig``, so pyplot keeps every figure — and its data — alive
+  until told otherwise. One per column from ``learn-soft`` plus three from ``learn-hard`` adds up over
+  a multi-column run, which is also what raises matplotlib's "More than 20 figures" warning.
+  """
+  import matplotlib.pyplot as plt
+
+  plt.close(fig)
+
+
+def density_scatter(
   ax, stylia, x: np.ndarray, y: np.ndarray, *, xlabel: str, ylabel: str, title: str
 ) -> None:
   """Scatter of ``x`` vs ``y`` coloured by local 2D-histogram density (densest drawn last)."""
@@ -98,7 +111,7 @@ def _density_scatter(
   stylia.label(ax, xlabel=xlabel, ylabel=ylabel, title=title)
 
 
-def _subsample(arrays: list[np.ndarray], max_points: int, seed: int) -> list[np.ndarray]:
+def subsample(arrays: list[np.ndarray], max_points: int, seed: int) -> list[np.ndarray]:
   """Jointly subsample a list of equal-length arrays down to ``max_points`` rows."""
   n = len(arrays[0])
   if n <= max_points:
@@ -157,18 +170,19 @@ def save_ground_truth_plots(
   out_dir.mkdir(parents=True, exist_ok=True)
   written: list[Path] = []
 
-  gs, ss = _subsample([g, soft], max_points, seed)
+  gs, ss = subsample([g, soft], max_points, seed)
 
   # 1) Calibration map: G vs soft density with the fitted isotonic curve overlaid ----------
   p1 = out_dir / "calibration_map.png"
   fig, axs = stylia.create_figure(1, 1, width=0.5, height=0.5)
   ax = axs.next()
-  _density_scatter(
+  density_scatter(
     ax, stylia, gs, ss, xlabel="G score", ylabel="Soft label", title=f"Calibration map ({direction})"
   )
   x_curve = np.linspace(float(g.min()), float(g.max()), 200)
   ax.plot(x_curve, calibrator.transform(x_curve), color=nc.blue)
   stylia.save_figure(str(p1))
+  _close(fig)
   written.append(p1)
 
   # 2) Score distributions: G scores and soft labels over the reference --------------------
@@ -181,6 +195,7 @@ def save_ground_truth_plots(
   ax.hist(soft, bins=60, color=nc.mint)
   stylia.label(ax, xlabel="Soft label", ylabel="Reference compounds", title="Soft labels over reference")
   stylia.save_figure(str(p2))
+  _close(fig)
   written.append(p2)
 
   # 3) Calibrated vs soft: calibrator(G) against the soft labels, with a y=x line ----------
@@ -188,7 +203,7 @@ def save_ground_truth_plots(
   cal = np.asarray(calibrator.transform(gs), dtype=np.float64)
   fig, axs = stylia.create_figure(1, 1, width=0.5, height=0.5)
   ax = axs.next()
-  _density_scatter(
+  density_scatter(
     ax,
     stylia,
     cal,
@@ -201,6 +216,7 @@ def save_ground_truth_plots(
   hi = float(max(cal.max(), ss.max()))
   ax.plot([lo, hi], [lo, hi], color=nc.gray, linestyle="--")
   stylia.save_figure(str(p3))
+  _close(fig)
   written.append(p3)
 
   return written
