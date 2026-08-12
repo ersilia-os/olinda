@@ -96,7 +96,7 @@ def _load_subset(run_dir: Path, max_rows: int | None, seed: int):
     return np.sort(rng.choice(idx, size=n, replace=False)) if n < len(idx) else idx
 
   sub_train, sub_val = pick(train_idx), pick(val_idx)
-  matrix = ReferenceMatrix.load(OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME)
+  matrix = ReferenceMatrix.load(OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME, limit=runlib.row_limit(manifest))
   return (
     matrix.gather(sub_train),
     np.asarray(y[sub_train], dtype=np.float32),

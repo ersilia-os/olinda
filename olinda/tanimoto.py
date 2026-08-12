@@ -1,16 +1,16 @@
-"""Learned applicability gate for the hard-label signal.
+"""``T`` — the learned stand-in for a Tanimoto search against the labelled set.
 
-``learn-hard`` calibrates a hard-label model ``G`` onto the teacher's soft-label scale
-(:mod:`olinda.ground_truth`). The hard signal is only trustworthy for queries close to the labeled
+``learn-hard`` calibrates a hard-label model ``H`` onto the teacher's soft-label scale
+(:mod:`olinda.hard`). The hard signal is only trustworthy for queries close to the labeled
 training set, so at predict time the fused ``model.onnx`` blends the surrogate ``S``
 with the calibrated hard signal ``G_soft`` using a weight ``a`` that is 0 by default and rises only near the
 labeled chemistry:
 
-    prediction = (1 - a) * surrogate + a * ground_truth_soft
+    prediction = (1 - a) * surrogate + a * h_s
 
 Rather than search the labeled set for each query at predict time, the gate is **learned once** at
 ``learn-hard`` time: :func:`tanimoto_nn` gives every reference-library compound its exact 1-NN Tanimoto
-to the labeled set, and a small :class:`SimilarityRegressor` — an MLP over the same fingerprint —
+to the labeled set, and a small :class:`TanimotoRegressor` — an MLP over the same fingerprint —
 learns to predict that number from the fingerprint alone. At predict time two matrix multiplies estimate
 the similarity and a linear ramp turns it into ``a`` — no fingerprint comparison, and the labeled set
 never leaves the run.
@@ -20,7 +20,7 @@ never leaves the run.
     a = a_max * ramp(predicted similarity)
 
 The ramp says *where* the hard signal may speak; ``a_max`` says *how loudly*, and is earned by the hard
-head beating the surrogate out-of-fold on the labelled compounds (:mod:`olinda.ground_truth`). A head
+head beating the surrogate out-of-fold on the labelled compounds (:mod:`olinda.hard`). A head
 that loses gets ``a_max = 0`` and the model ships soft-only.
 
 This replaced a pair of Bernoulli Naive-Bayes classifiers over similarity *buckets*. Measured on a real
@@ -38,8 +38,8 @@ from pathlib import Path
 
 import numpy as np
 
-# Knees of the ramp, in **raw** 1-NN Tanimoto to the labelled set: a = 0 below SIM_LO, rising linearly
-# to a_max at SIM_HI. Same constants the bucket edges used, so the intent is unchanged — what goes is
+# Knees of the ramp, in **raw** 1-NN Tanimoto to the labelled set: a = 0 below T_LO, rising linearly
+# to a_max at T_HI. Same constants the bucket edges used, so the intent is unchanged — what goes is
 # the cliff between them.
 #
 # Raw, deliberately, though the case for transforming is real and worth restating before anyone
@@ -54,8 +54,8 @@ import numpy as np
 # top of whatever is present, so a labelled set with no relationship to the query chemistry would still
 # hand full weight to its least-unrelated tail. Absolute Tanimoto fails the safe way — it simply stays
 # quiet — and keeps the knees legible to a chemist reading the metadata.
-SIM_LO: float = 0.4
-SIM_HI: float = 0.7
+T_LO: float = 0.4
+T_HI: float = 0.7
 
 # Ceiling on the blend weight. Even an exact match keeps a third of the surrogate, because the hard head
 # is trained on far less data and the surrogate carries the teacher's whole view of the library.
@@ -73,18 +73,18 @@ A_MIN: float = 0.1
 _NN_BLOCK = 1024
 
 
-def prepare_gt_bits(gt_bits: np.ndarray):
+def prepare_hard_bits(hard_bits: np.ndarray):
   """Binarize the labelled set once, returning ``(g, g_card)`` for reuse across many query chunks.
 
   The reference library is scanned in chunks, so without this the labelled-set matrix and its
   cardinalities are rebuilt for every chunk — tens of megabytes of identical work per pass.
   """
-  g = (np.asarray(gt_bits) > 0).astype(np.float32)
+  g = (np.asarray(hard_bits) > 0).astype(np.float32)
   return g, g.sum(axis=1)[None, :]
 
 
-def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray = None, *, prepared=None) -> np.ndarray:
-  """Max Tanimoto similarity of each query to the labeled (ground-truth) set.
+def tanimoto_nn(query_bits: np.ndarray, hard_bits: np.ndarray = None, *, prepared=None) -> np.ndarray:
+  """Max Tanimoto similarity of each query to the labeled (hard-label) set.
 
   Brute-force and exact — used at ``learn-hard`` time to label the reference library. Operates on binary
   fingerprints; ``|A ∩ B| = A·Bᵀ`` and ``|A ∪ B| = |A| + |B| - |A ∩ B|``.
@@ -93,7 +93,7 @@ def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray = None, *, prepared=
   ----------
   query_bits : np.ndarray
       ``(m, d)`` fingerprints of the queries (binarized: nonzero ⇒ on).
-  gt_bits : np.ndarray
+  hard_bits : np.ndarray
       ``(n, d)`` fingerprints of the labeled set (binarized).
 
   Returns
@@ -103,7 +103,7 @@ def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray = None, *, prepared=
       (e.g. an unparseable SMILES) and ``0`` when the labeled set is empty.
   """
   q = (np.asarray(query_bits) > 0).astype(np.float32)
-  g, g_card = prepared if prepared is not None else prepare_gt_bits(gt_bits)
+  g, g_card = prepared if prepared is not None else prepare_hard_bits(hard_bits)
   m, n = q.shape[0], g.shape[0]
   if n == 0 or m == 0:
     return np.zeros(m, dtype=np.float64)
@@ -136,13 +136,13 @@ def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray = None, *, prepared=
 #
 # Size scales with the layer widths alone, not with the library — 2048x256 + 256x64 + biases as float32.
 # Predicting is two MatMuls, so it stays cheap next to the surrogate's tree traversal.
-GATE_HIDDEN: tuple[int, ...] = (256, 64)
+T_HIDDEN: tuple[int, ...] = (256, 64)
 # Trained by streaming mini-batches off the resident uint8 library, so the whole reference set is used
 # without ever materialising it as float32 (which would be ~11 GB). One batch is ~34 MB.
-GATE_MAX_EPOCHS: int = 15
-GATE_PATIENCE: int = 3
-GATE_BATCH: int = 4096
-# How many rows one Adam step sees. Deliberately *not* GATE_BATCH: that one sizes the read off the
+T_MAX_EPOCHS: int = 15
+T_PATIENCE: int = 3
+T_BATCH: int = 4096
+# How many rows one Adam step sees. Deliberately *not* T_BATCH: that one sizes the read off the
 # library and wants to be large, while this one sets how often the optimiser steps and wants to be
 # small. Fitting quality here is governed by the number of steps, not by how many rows are seen —
 # at one step per 4096-row read the gate plateaus 14 points of recall short no matter how many
@@ -157,16 +157,16 @@ GATE_BATCH: int = 4096
 # 512 with the learning rate scaled to match is the knee: recall within a point of the smallest step
 # tested, at a third of the time. The lr moves with the batch because a larger batch averages more
 # samples per step, so it can afford a proportionally bigger one.
-GATE_SGD_BATCH: int = 512
-GATE_LEARNING_RATE: float = 2e-3
+T_SGD_BATCH: int = 512
+T_LEARNING_RATE: float = 2e-3
 # L2 penalty on the weights, matching what scikit-learn's MLPRegressor applies by default. Not
 # decoration: dropping it was measured to cost real accuracy on a near-constant target, where an
 # undamped net keeps enough prediction noise to swamp a target whose whole spread is 0.01.
-GATE_L2: float = 1e-4
+T_L2: float = 1e-4
 
-_MODEL_NAME = "gate.onnx"
+_MODEL_NAME = "t.onnx"
 
-_META_NAME = "gate_meta.json"
+_META_NAME = "t_meta.json"
 
 # Adam, standard values. Exposed as constants only so the update rule below reads like the paper.
 _BETA1, _BETA2, _EPS = 0.9, 0.999, 1e-8
@@ -174,8 +174,8 @@ _BETA1, _BETA2, _EPS = 0.9, 0.999, 1e-8
 # The gate emits its own ONNX rather than going through a converter, so it pins its own opset. Every op
 # it uses (MatMul, Add, Relu) is ancient; the fuse re-stamps this to the bundle's opset anyway. The IR
 # version is pinned for the same reason it is elsewhere: onnxruntime refuses a graph newer than itself.
-_GATE_OPSET = 16
-_GATE_IR_VERSION = 10
+_T_OPSET = 16
+_T_IR_VERSION = 10
 
 
 class _MLP:
@@ -191,7 +191,7 @@ class _MLP:
   Matched quality is the load-bearing part of that claim. Handing sklearn a 4096-row batch does not
   perform one update: it splits the array into its own 200-row minibatches and steps ~21 times. Taking
   a single step per batch instead looks 12x faster and quietly fits a worse net, so this class steps
-  every :data:`GATE_SGD_BATCH` rows to keep the step count comparable.
+  every :data:`T_SGD_BATCH` rows to keep the step count comparable.
 
   Nothing here is novel and it is deliberately minimal: Adam, ReLU, and an L2 penalty, matching what
   the scikit-learn defaults gave. If the gate ever needs a schedule or dropout, take the dependency
@@ -201,10 +201,10 @@ class _MLP:
   def __init__(
     self,
     n_features: int,
-    hidden=GATE_HIDDEN,
+    hidden=T_HIDDEN,
     *,
-    lr: float = GATE_LEARNING_RATE,
-    l2: float = GATE_L2,
+    lr: float = T_LEARNING_RATE,
+    l2: float = T_L2,
     seed: int = 0,
   ):
     rng = np.random.default_rng(seed)
@@ -277,31 +277,29 @@ class _MLP:
     nodes, initializers = [], []
     current = input_name
     for i, (w, b) in enumerate(zip(self.weights, self.biases)):
-      initializers.append(numpy_helper.from_array(w, f"gate_w{i}"))
-      initializers.append(numpy_helper.from_array(b, f"gate_b{i}"))
+      initializers.append(numpy_helper.from_array(w, f"t_w{i}"))
+      initializers.append(numpy_helper.from_array(b, f"t_b{i}"))
       last = i == len(self.weights) - 1
-      nodes.append(helper.make_node("MatMul", [current, f"gate_w{i}"], [f"gate_z{i}"]))
+      nodes.append(helper.make_node("MatMul", [current, f"t_w{i}"], [f"t_z{i}"]))
       # Add broadcasts [B, out] + [out] natively; the final Add writes straight to the graph output.
-      nodes.append(
-        helper.make_node("Add", [f"gate_z{i}", f"gate_b{i}"], [output_name if last else f"gate_a{i}"])
-      )
+      nodes.append(helper.make_node("Add", [f"t_z{i}", f"t_b{i}"], [output_name if last else f"t_a{i}"]))
       if not last:
-        nodes.append(helper.make_node("Relu", [f"gate_a{i}"], [f"gate_h{i}"]))
-        current = f"gate_h{i}"
+        nodes.append(helper.make_node("Relu", [f"t_a{i}"], [f"t_h{i}"]))
+        current = f"t_h{i}"
 
     graph = helper.make_graph(
       nodes,
-      "similarity_gate",
+      "tanimoto_regressor",
       [helper.make_tensor_value_info(input_name, TensorProto.FLOAT, ["B", int(n_features)])],
       [helper.make_tensor_value_info(output_name, TensorProto.FLOAT, ["B", 1])],
       initializers,
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _GATE_OPSET)])
-    model.ir_version = _GATE_IR_VERSION
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", _T_OPSET)])
+    model.ir_version = _T_IR_VERSION
     return model
 
 
-def ramp(similarity, *, a_max: float = A_CEILING, sim_lo: float = SIM_LO, sim_hi: float = SIM_HI):
+def ramp(similarity, *, a_max: float = A_CEILING, sim_lo: float = T_LO, sim_hi: float = T_HI):
   """Map predicted similarity onto a blend weight: 0 below ``sim_lo``, ``a_max`` at ``sim_hi``.
 
   Linear in between, so two compounds either side of a knee no longer receive very different weights —
@@ -312,7 +310,7 @@ def ramp(similarity, *, a_max: float = A_CEILING, sim_lo: float = SIM_LO, sim_hi
   return float(a_max) * np.clip((s - float(sim_lo)) / span, 0.0, 1.0)
 
 
-class SimilarityRegressor:
+class TanimotoRegressor:
   """Predicts a compound's 1-NN Tanimoto to the labelled set, and turns it into a blend weight.
 
   A small MLP over the same binarised Morgan features everything else uses, trained on the reference
@@ -331,7 +329,7 @@ class SimilarityRegressor:
       The serialised network, input ``"input"`` (float32, ``[B, d]``), output ``"variable"``.
   a_max : float
       Ceiling on the blend weight, earned from how well the calibrated hard head reproduces the
-      teacher's scale (:func:`olinda.ground_truth._blend_ceiling`). Zero disables the blend entirely.
+      teacher's scale (:func:`olinda.hard._blend_ceiling`). Zero disables the blend entirely.
   """
 
   def __init__(
@@ -339,8 +337,8 @@ class SimilarityRegressor:
     onnx_bytes: bytes,
     *,
     a_max: float = A_CEILING,
-    sim_lo: float = SIM_LO,
-    sim_hi: float = SIM_HI,
+    sim_lo: float = T_LO,
+    sim_hi: float = T_HI,
     metrics: dict | None = None,
   ) -> None:
     self.onnx_bytes = bytes(onnx_bytes)
@@ -373,18 +371,18 @@ class SimilarityRegressor:
     val_x = (np.asarray(validation[0]) > 0).astype(np.float32)
     val_y = np.asarray(validation[1], dtype=np.float32).ravel()
 
-    net = _MLP(int(n_features), GATE_HIDDEN, lr=GATE_LEARNING_RATE, seed=seed)
+    net = _MLP(int(n_features), T_HIDDEN, lr=T_LEARNING_RATE, seed=seed)
     rng = np.random.default_rng(seed)
     best, best_state, waited = np.inf, None, 0
     started = time.time()
-    for epoch in range(GATE_MAX_EPOCHS):
+    for epoch in range(T_MAX_EPOCHS):
       for bits, target in batches(rng):
-        # One read off the library, several optimiser steps: see GATE_SGD_BATCH for why the two sizes
+        # One read off the library, several optimiser steps: see T_SGD_BATCH for why the two sizes
         # are decoupled. The rows arrive already shuffled, so slicing them in order is a fair sample.
         x = (np.asarray(bits) > 0).astype(np.float32)
         y = np.asarray(target, dtype=np.float32)
-        for start in range(0, len(x), GATE_SGD_BATCH):
-          net.partial_fit(x[start : start + GATE_SGD_BATCH], y[start : start + GATE_SGD_BATCH])
+        for start in range(0, len(x), T_SGD_BATCH):
+          net.partial_fit(x[start : start + T_SGD_BATCH], y[start : start + T_SGD_BATCH])
       loss = float(np.mean((net.predict(val_x) - val_y) ** 2))
       # Early stopping is hand-rolled because sklearn's own only applies to `fit`, which would need the
       # whole library in memory. Keep the best weights rather than the last: Adam can step past a good
@@ -393,8 +391,8 @@ class SimilarityRegressor:
       if echo:
         rmse = np.sqrt(loss)  # in similarity units, which is the number a reader can actually judge
         echo(
-          f"  epoch {epoch + 1:>2}/{GATE_MAX_EPOCHS} · val MSE {loss:.6f} · ±{rmse:.3f} similarity"
-          f"{' · best' if improved else f' · no gain ({waited + 1}/{GATE_PATIENCE})'}"
+          f"  epoch {epoch + 1:>2}/{T_MAX_EPOCHS} · val MSE {loss:.6f} · ±{rmse:.3f} similarity"
+          f"{' · best' if improved else f' · no gain ({waited + 1}/{T_PATIENCE})'}"
           f" [dim]· {time.time() - started:.0f}s[/]",
           "info",
         )
@@ -403,9 +401,9 @@ class SimilarityRegressor:
         best_state = net.state()
       else:
         waited += 1
-        if waited >= GATE_PATIENCE:
+        if waited >= T_PATIENCE:
           if echo:
-            echo(f"  stopped early · no improvement for {GATE_PATIENCE} epochs", "info")
+            echo(f"  stopped early · no improvement for {T_PATIENCE} epochs", "info")
           break
     if best_state is not None:
       net.restore(best_state)
@@ -421,7 +419,7 @@ class SimilarityRegressor:
       self._session = ort.InferenceSession(self.onnx_bytes, options, providers=["CPUExecutionProvider"])
     return self._session
 
-  def predict_similarity(self, bits: np.ndarray) -> np.ndarray:
+  def predict_tanimoto(self, bits: np.ndarray) -> np.ndarray:
     """Estimated 1-NN Tanimoto per row, clipped to [0, 1] — the target's own range."""
     sess = self._run()
     x = (np.asarray(bits) > 0).astype(np.float32)
@@ -430,7 +428,7 @@ class SimilarityRegressor:
 
   def weight(self, bits: np.ndarray) -> np.ndarray:
     """Blend weight ``a`` per row (float64)."""
-    return ramp(self.predict_similarity(bits), a_max=self.a_max, sim_lo=self.sim_lo, sim_hi=self.sim_hi)
+    return ramp(self.predict_tanimoto(bits), a_max=self.a_max, sim_lo=self.sim_lo, sim_hi=self.sim_hi)
 
   def save(self, directory: str | Path) -> None:
     """Write the network and the ramp parameters into *directory*."""
@@ -440,8 +438,8 @@ class SimilarityRegressor:
     with open(directory / _META_NAME, "w") as fp:
       json.dump(
         {
-          "type": "similarity_mlp",
-          "hidden": list(GATE_HIDDEN),
+          "type": "tanimoto_mlp",
+          "hidden": list(T_HIDDEN),
           "a_max": self.a_max,
           "sim_lo": self.sim_lo,
           "sim_hi": self.sim_hi,
@@ -452,14 +450,14 @@ class SimilarityRegressor:
       )
 
   @classmethod
-  def load(cls, directory: str | Path) -> "SimilarityRegressor":
+  def load(cls, directory: str | Path) -> "TanimotoRegressor":
     directory = Path(directory)
     with open(directory / _META_NAME) as fp:
       meta = json.load(fp)
     return cls(
       (directory / _MODEL_NAME).read_bytes(),
       a_max=meta.get("a_max", A_CEILING),
-      sim_lo=meta.get("sim_lo", SIM_LO),
-      sim_hi=meta.get("sim_hi", SIM_HI),
+      sim_lo=meta.get("sim_lo", T_LO),
+      sim_hi=meta.get("sim_hi", T_HI),
       metrics=meta.get("metrics"),
     )

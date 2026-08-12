@@ -31,7 +31,7 @@ def predict_file(model_onnx, input_path, out_path, *, smiles_column: str | None 
   echo(f"rdkit [bold]{rdkit.__version__}[/] · matches model ({model.rdkit_version})", "info")
 
   smiles = read_smiles(input_path, smiles_column)
-  head = "blend" if model.has_ground_truth else "soft"
+  head = "blend" if model.has_hard else "soft"
   echo(f"model.onnx · [bold]{model.n_columns}[/] column(s) · {head} · {len(smiles):,} SMILES", "run")
   df = model.run(smiles)
   out_path = Path(out_path)

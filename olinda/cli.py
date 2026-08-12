@@ -458,7 +458,7 @@ def prepare_cmd(
   # --- hard labels: featurize once, then slice per matched column ---------------------------
   hard_info: dict = {}
   if hard_map:
-    from olinda.ground_truth import prepare_hard_labels_wide
+    from olinda.hard import prepare_hard_labels_wide
 
     step(3, n_steps, "featurizing hard labels")
     try:
@@ -563,8 +563,10 @@ def learn_soft_cmd(model_dir, num_boost_round):
   descriptors = OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME
   if not descriptors.exists():
     raise click.ClickException(f"reference library missing at {descriptors} — run `olinda setup`")
-  echo(f"loading reference descriptors · [dim]{descriptors.name}[/]", "run")
-  matrix = ReferenceMatrix.load(descriptors)
+  limit = runlib.row_limit(manifest)
+  scope = f" · [dim]first {limit:,} rows[/]" if limit else ""
+  echo(f"loading reference descriptors · [dim]{descriptors.name}[/]{scope}", "run")
+  matrix = ReferenceMatrix.load(descriptors, limit=limit)
   try:
     matrix.assert_matches(manifest["reference_library"])
   except ValueError as exc:
@@ -672,19 +674,19 @@ def tune_cmd(model_dir, trials, max_rows):
   "--model-dir",
   "-m",
   required=True,
-  help="A run prepared with --hard-labels; artifacts go under columns/<id>/_ground_truth/.",
+  help="A run prepared with --hard-labels; artifacts go under columns/<id>/_hard/.",
 )
 def learn_hard_cmd(model_dir):
   """Learn from hard (binary) labels and calibrate them onto the soft-label scale — four clear steps.
 
   Runs once per matched column, reading that column's `hard.h5` (from `prepare --hard-labels`): (1) trains
-  the hard-label classifier `G`; (2) scores `G` across the full reference library (`erl0_morgan.h5`,
-  required); (3) calibrates `G`'s output onto the teacher's soft-label scale against the column's
-  reference-aligned targets, with a monotonic map whose direction is learned from the data; (4) learns an
-  applicability gate — two Bernoulli Naive-Bayes classifiers bucketing queries as NOT SIMILAR / LOW / HIGH
-  by proximity to the labeled set. Artifacts land under `columns/<id>/_ground_truth/`, and the model is
-  re-fused so each blended column stays one output (the gate needs no similarity search at predict time,
-  and the blend favours the surrogate away from the labeled set).
+  `H`, the hard-label model; (2) scores `H` across the full reference library (`erl0_morgan.h5`,
+  required); (3) calibrates `H` onto `S`'s scale — that is `H_S` — against the column's reference-aligned
+  targets, with a monotonic map whose direction is learned from the data; (4) trains `T`, a small MLP
+  predicting a compound's 1-NN Tanimoto to the labeled set from its fingerprint alone. Artifacts land
+  under `columns/<id>/_hard/`, and the model is re-fused so each blended column keeps its prediction as
+  the named output (`T` needs no similarity search at predict time, and the blend favours `S` away from
+  the labeled set).
   """
   import time
 
@@ -698,7 +700,7 @@ def learn_hard_cmd(model_dir):
     set_active_color,
     summary_panel,
   )
-  from olinda.ground_truth import HARD_H5_NAME, train_ground_truth
+  from olinda.hard import HARD_H5_NAME, train_hard
 
   md = Path(model_dir)
   started = time.time()
@@ -718,7 +720,7 @@ def learn_hard_cmd(model_dir):
     raise click.ClickException(
       f"{len(untrained)} column(s) have no surrogate yet ({', '.join(untrained)}) — "
       f"run `olinda learn-soft -m {model_dir}` first. learn-hard fuses at the end and would "
-      "otherwise fail there, after training every ground-truth head."
+      "otherwise fail there, after training every hard-label head."
     )
 
   if not with_hard:
@@ -734,12 +736,14 @@ def learn_hard_cmd(model_dir):
   )
 
   # One resident copy of the library for the whole run: each column otherwise reopened and streamed
-  # it twice (scoring G, then fitting the gate), so a 10-column run read 2.8 GB twenty times over.
+  # it twice (scoring H, then fitting T), so a 10-column run read 2.8 GB twenty times over.
   from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
   from olinda.data.matrix import ReferenceMatrix
 
-  echo(f"loading reference descriptors · [dim]{MORGAN_FINGERPRINTS_FILENAME}[/]", "run")
-  matrix = ReferenceMatrix.load(OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME)
+  limit = runlib.row_limit(manifest)
+  scope = f" · [dim]first {limit:,} rows[/]" if limit else ""
+  echo(f"loading reference descriptors · [dim]{MORGAN_FINGERPRINTS_FILENAME}[/]{scope}", "run")
+  matrix = ReferenceMatrix.load(OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME, limit=limit)
   try:
     matrix.assert_matches(manifest["reference_library"])
   except ValueError as exc:
@@ -750,9 +754,7 @@ def learn_hard_cmd(model_dir):
     # more than one column to tell apart.
     if len(with_hard) > 1:
       rule(f"column {i}/{len(with_hard)} · {col['name']}", style=STEP_COLORS["learn-hard"])
-    train_ground_truth(
-      runlib.column_dir(md, col["id"]), soft=runlib.read_target(md, col["id"]), matrix=matrix
-    )
+    train_hard(runlib.column_dir(md, col["id"]), soft=runlib.read_target(md, col["id"]), matrix=matrix)
     col["status"]["hard_trained"] = True
     runlib.write_manifest(md, manifest)
 
@@ -784,8 +786,8 @@ def export_cmd(model_dir):
   """(Re)build the single self-describing `model.onnx` for a trained model dir.
 
   Fuses every column and every stage into ONE graph with one output per task — the surrogate alone, or,
-  where a hard head exists, the applicability-weighted blend of surrogate and calibrated ground truth.
-  The intermediate channels stay internal to the graph. The Morgan featurizer config + provenance (RDKit
+  where a hard head exists, the blend `(1-a)·S + a·H_S`.
+  The channels behind a blend are declared as outputs too. The Morgan featurizer config + provenance (RDKit
   version, reference library, hard-head summary) are embedded in the file's metadata, so it is
   self-describing. Gated on a numeric parity check. Featurization (RDKit) stays in Python — the graph
   consumes a 2048-count Morgan fingerprint.
@@ -900,7 +902,7 @@ def predict_cmd(model_onnx, input_path, out_path, smiles_column):
   and a leading `key` column is ignored — or name it outright with --smiles-column.
 
   Writes a `smiles` column followed by one column per task, named after the teacher column it distils.
-  For a model with a ground-truth head that number is already the blend — the applicability weighting
+  For a model with a hard-label head that number is already the blend — the weight `a`
   happens inside the graph. The featurizer and the RDKit build it needs are read from the model's
   embedded metadata, so the `.onnx` is the only input. Unparseable SMILES come back as empty cells.
   """
@@ -987,7 +989,7 @@ def validate_cmd(
   `--*-column(s)` flags for a file that doesn't follow it, or to score one column of a wide file.
 
   `--soft-labels` gives correlation and residual diagnostics; `--hard-labels` gives ROC, precision–recall
-  and enrichment — of the model's **blended** output, which is what `predict` emits, not the ground-truth
+  and enrichment — of the model's **blended** output, which is what `predict` emits, not the hard-label
   head alone. With neither, you still get the artifact's own calibration curves, read straight from the
   graph. Requires the reporting extra: `pip install "olinda[report]"`.
   """

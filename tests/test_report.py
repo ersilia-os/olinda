@@ -157,7 +157,7 @@ def test_every_figure_the_report_draws_has_a_title_and_caption():
     assert plots.caption(f"some_task_name_{key}") == (title, text), f"{key} is not reachable"
 
   # the ambiguous pair the longest-match rule exists for
-  assert plots.caption("t_soft_calibration")[0] == "Surrogate correction"
+  assert plots.caption("t_soft_calibration")[0] == "S · surrogate correction"
   assert plots.caption("t_calibration")[0] == "Calibration"
 
 

@@ -129,5 +129,5 @@ def test_hard_head_fuses_on_lightgbm(tmp_path, monkeypatch):
   assert r.exit_code == 0, r.output
 
   model = OlindaArtifact(onnx)
-  assert model.has_ground_truth is True
+  assert model.has_hard is True
   assert np.isfinite(model.run(_SM[:4])[model.columns[0]].to_numpy()).all()

@@ -3,24 +3,24 @@
 olinda's surrogate ``S(x)`` distills a teacher's *soft* labels. When real experimental (*hard*) labels of
 the same endpoint are available, ``learn-hard`` runs four steps, each printed clearly:
 
-1. **Train ``G``** — a binary hard-label classifier: a plain, portfolio-selected XGBoost booster via `lazy-qsar
+1. **Train ``H``** — a binary hard-label classifier: a plain, portfolio-selected XGBoost booster via `lazy-qsar
    <https://github.com/ersilia-os/lazy-qsar>`_'s ``BaseXGBClassifier(calibrated=False)`` on olinda's Morgan
    count fingerprints (:class:`~olinda.featurizer.MorganCountFeaturizer`). Output is raw ``predict_proba`` —
    lazy-qsar's internal probability calibrator is off. (Continuous hard labels are a raises-for-now
-   placeholder — see :func:`_new_gt_model`.)
-2. **Score ``G`` across the reference library** (``erl0_morgan.h5``) → one hard score per reference
-   compound, saved to ``g_reference.h5``.
-3. **Calibrate** ``G`` onto the soft-label scale — a monotonic isotonic map fit on the reference library
-   (where both ``G``'s score and the teacher's soft label exist), with the **direction learned from the
-   data** (a low hard score may map to a high soft label). Saved as ``g_to_soft.json``.
-4. **Learn the applicability gate** — label every reference compound with its exact 1-NN Tanimoto similarity
+   placeholder — see :func:`_new_hard_model`.)
+2. **Score ``H`` across the reference library** (``erl0_morgan.h5``) → one hard score per reference
+   compound, saved to ``h_reference.h5``.
+3. **Calibrate** ``H`` onto the soft-label scale — a monotonic isotonic map fit on the reference library
+   (where both ``H``'s score and the teacher's soft label exist), with the **direction learned from the
+   data** (a low hard score may map to a high soft label). Saved as ``h_to_s.json``.
+4. **Learn T** — label every reference compound with its exact 1-NN Tanimoto similarity
    to the labeled set, then fit a small MLP that predicts that number from the fingerprint alone (saved
-   under ``applicability/`` as ``gate.onnx`` + ``gate_meta.json``). At predict time two matrix multiplies
+   under ``tanimoto/`` as ``t.onnx`` + ``t_meta.json``). At predict time two matrix multiplies
    estimate the similarity and a linear ramp turns it into ``a``, so nothing searches the labeled set and
-   the labeled fingerprints never leave the run — see :mod:`olinda.applicability`.
+   the labeled fingerprints never leave the run — see :mod:`olinda.tanimoto`.
 
 The end goal is to predict the soft-label distribution informed by the hard labels. Artifacts land under
-``<model_dir>/_ground_truth/``. The gate decides *where* to trust ``G``: the blend
+``<model_dir>/_hard/``. The gate decides *where* to trust ``H``: the blend
 ``prediction = (1-a)·S + a·G_soft`` leans on the hard signal only near the labeled chemistry, and how far it
 can ever lean is capped by ``a_max``, which the head earns from how well its calibrated output reproduces
 the teacher's scale (:func:`_blend_ceiling`) — a head that loses to the surrogate earns zero and the model
@@ -43,25 +43,25 @@ from olinda.featurizer import MorganCountFeaturizer
 HARD_H5_NAME = (
   "hard.h5"  # featurized hard labels written by `prepare --hard-labels`, consumed by `learn-hard`
 )
-GT_DIRNAME = "_ground_truth"
-GT_MODEL_SUBDIR = "gt"
-G_REFERENCE_NAME = "g_reference.h5"  # G's score for every reference-library compound (aligned to erl0_morgan)
-CALIBRATOR_NAME = "g_to_soft.json"  # isotonic map from G's output onto the soft-label scale
-APPLICABILITY_DIRNAME = "applicability"  # the similarity regressor gating the hard signal
-GT_META_NAME = "ground_truth_meta.json"
-GT_EVAL_NAME = "gt_eval.json"
+HARD_DIRNAME = "_hard"
+HARD_MODEL_SUBDIR = "h"
+H_REFERENCE_NAME = "h_reference.h5"  # H's score for every reference-library compound (row-aligned)
+H_TO_S_NAME = "h_to_s.json"  # the isotonic map carrying H onto S's scale, producing H_S
+TANIMOTO_DIRNAME = "tanimoto"  # the similarity regressor gating the hard signal
+HARD_META_NAME = "hard_meta.json"
+HARD_EVAL_NAME = "hard_eval.json"
 
 
 def has_hard_head(model_dir: str | Path) -> bool:
   """True iff *model_dir* has a **complete** hard-label head.
 
-  ``learn-hard`` writes `G` first and its metadata last, with several minutes of reference scoring in
+  ``learn-hard`` writes `H` first and its metadata last, with several minutes of reference scoring in
   between, so the presence of the model says only that the step *started*. Interrupt it and the
   column would claim a head with no calibrator and no gate — which then fails the fuse with a missing
   file rather than simply being treated as soft-only. The metadata is written last, so it is the
   completion marker.
   """
-  return (Path(model_dir) / GT_DIRNAME / GT_META_NAME).exists()
+  return (Path(model_dir) / HARD_DIRNAME / HARD_META_NAME).exists()
 
 
 def _detect_task(y: np.ndarray) -> str:
@@ -79,13 +79,13 @@ def _featurize(smiles, featurizer):
   return X, valid
 
 
-def _new_gt_model(task: str):
-  """The hard-label model G. Binary → a plain, portfolio-selected XGBoost classifier (regression raises).
+def _new_hard_model(task: str):
+  """The hard-label model H. Binary → a plain, portfolio-selected XGBoost classifier (regression raises).
 
   We use lazy-qsar only for its portfolio/preset selection and booster training — ``calibrated=False`` turns
-  OFF lazy-qsar's internal probability calibrator, so ``G`` outputs raw ``predict_proba``. This keeps the
+  OFF lazy-qsar's internal probability calibrator, so ``H`` outputs raw ``predict_proba``. This keeps the
   reference scoring, prediction, and the exported ONNX all on the same raw probability (no hidden calibration
-  step), which is what makes ``G``'s ONNX faithful. The teacher-scale mapping is our own separate ``g_to_soft``
+  step), which is what makes ``H``'s ONNX faithful. The teacher-scale mapping is our own separate ``h_to_s``
   isotonic calibrator (step 3). Continuous hard labels would need a regressor — a planned placeholder.
   """
   from lazyqsar.base.xgboost import BaseXGBClassifier
@@ -98,17 +98,17 @@ def _new_gt_model(task: str):
   )
 
 
-def _selection_report(gt_model) -> dict:
+def _selection_report(hard_model) -> dict:
   """Read lazy-qsar's own model-selection diagnostics off a fitted estimator.
 
   ``BaseXGBClassifier`` / ``BaseXGBRegressor`` pick their config against an internal validation split
   during ``fit`` and expose the winning preset, its boosting rounds, and the portfolio scores.
   """
-  scores = getattr(gt_model, "portfolio_scores_", {}) or {}
-  preset = getattr(gt_model, "preset_name_", None)
+  scores = getattr(hard_model, "portfolio_scores_", {}) or {}
+  preset = getattr(hard_model, "preset_name_", None)
   return {
     "preset": preset,
-    "best_iteration": int(getattr(gt_model, "best_iteration_", -1)),
+    "best_iteration": int(getattr(hard_model, "best_iteration_", -1)),
     "portfolio_scores": {k: float(v) for k, v in scores.items()},
     "selected_score": float(scores[preset]) if preset in scores else None,
   }
@@ -122,13 +122,13 @@ def _reference_path() -> Path:
   if not path.exists():
     raise FileNotFoundError(
       f"reference library {path} not found — run `olinda setup` (or scripts/compute_morgan_fingerprints.py). "
-      "learn-hard needs it to score G across the reference and calibrate to the soft labels."
+      "learn-hard needs it to score H across the reference and calibrate to the soft labels."
     )
   return path
 
 
 def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 50_000):
-  """Score G over every reference compound, aligned to erl0_morgan row order.
+  """Score H over every reference compound, aligned to erl0_morgan row order.
 
   Reads from the shared in-RAM matrix rather than reopening the library, so a multi-column run pays
   for one load instead of one per scan per column.
@@ -136,7 +136,7 @@ def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 50_
   # 50k rows x 2048 float32 is ~410 MB per chunk; 200k was 1.64 GB for the same throughput.
   n, dim = matrix.n_rows, matrix.n_cols
   if dim != n_features:
-    raise ValueError(f"reference library has {dim}-d features but G expects {n_features}-d")
+    raise ValueError(f"reference library has {dim}-d features but H expects {n_features}-d")
   out = []
   with sweep_progress("scoring", n) as tick:
     for start in range(0, n, chunk):
@@ -168,13 +168,13 @@ def _blend_ceiling(alignment_r2: float) -> float:
   CCC penalises precisely that shrinkage, so it would mark down a correctly calibrated head and reward
   an over-confident one.
 
-  A spurious ``G`` leaves isotonic regression nothing to fit, so the map comes out nearly flat, the
+  A spurious ``H`` leaves isotonic regression nothing to fit, so the map comes out nearly flat, the
   calibrated signal nearly constant, and R² collapses — switching the blend off, which is the property
   worth having. Below zero the signal is worse than predicting the teacher's mean, so the blend is
   disabled rather than inverted. Non-finite (a constant teacher column, a hard set too small for the
   fit to mean anything) is treated the same way.
 
-  Anything under :data:`~olinda.applicability.A_MIN` is also dropped to zero: a few percent of a weakly
+  Anything under :data:`~olinda.tanimoto.A_MIN` is also dropped to zero: a few percent of a weakly
   aligned signal cannot shift a prediction enough to be worth the chance of shifting it the wrong way,
   so such a model ships soft-only instead of carrying a token hard branch.
 
@@ -188,7 +188,7 @@ def _blend_ceiling(alignment_r2: float) -> float:
     Comparing the head out-of-fold against the surrogate is what answers that. Until then this only
     ever lowers the ceiling, never raises it.
   """
-  from olinda.applicability import A_CEILING, A_MIN
+  from olinda.tanimoto import A_CEILING, A_MIN
 
   r2 = float(alignment_r2)
   if not np.isfinite(r2):
@@ -197,12 +197,12 @@ def _blend_ceiling(alignment_r2: float) -> float:
   return float(ceiling) if ceiling >= A_MIN else 0.0
 
 
-def _fit_applicability(
-  gt_bits, n_features, matrix, sim_lo: float, sim_hi: float, alignment_r2: float, chunk: int = 50_000
+def _fit_tanimoto(
+  hard_bits, n_features, matrix, sim_lo: float, sim_hi: float, alignment_r2: float, chunk: int = 50_000
 ):
-  """Learn the applicability gate: regress each reference compound's 1-NN Tanimoto to the labelled set.
+  """Learn T: regress each reference compound's 1-NN Tanimoto to the labelled set.
 
-  Streams the library once, computing the exact similarity per chunk (:func:`~olinda.applicability.tanimoto_nn`)
+  Streams the library once, computing the exact similarity per chunk (:func:`~olinda.tanimoto.tanimoto_nn`)
   and keeping it as a continuous target, then fits a small MLP on the same binarised Morgan features the
   rest of the pipeline uses. The regressor stands in for a nearest-neighbour search at
   predict time: approximate, but it keeps the labelled fingerprints out of the shipped artifact.
@@ -214,35 +214,35 @@ def _fit_applicability(
   Parameters
   ----------
   alignment_r2 : float
-      ``R²(calibrated G, soft)`` over the reference library, which caps the blend weight — see
+      ``R²(calibrated H_S, soft)`` over the reference library, which caps the blend weight — see
       :func:`_blend_ceiling`.
 
   Returns
   -------
   tuple
-      ``(regressor, stats)`` where ``regressor`` is a :class:`~olinda.applicability.SimilarityRegressor`
+      ``(regressor, stats)`` where ``regressor`` is a :class:`~olinda.tanimoto.TanimotoRegressor`
       and ``stats`` reports the target distribution and the fit's held-out quality.
   """
-  from olinda.applicability import (
-    GATE_BATCH,
-    SimilarityRegressor,
-    prepare_gt_bits,
+  from olinda.tanimoto import (
+    T_BATCH,
+    TanimotoRegressor,
+    prepare_hard_bits,
     ramp,
     tanimoto_nn,
   )
   from olinda.metrics import regression_metrics
 
-  gt_prepared = prepare_gt_bits(gt_bits)  # built once, reused for every chunk
+  hard_prepared = prepare_hard_bits(hard_bits)  # built once, reused for every chunk
   n = matrix.n_rows
   sim = np.empty(n, dtype=np.float32)
   with sweep_progress("scanning", n) as tick:
     for start in range(0, n, chunk):
       stop = min(start + chunk, n)
       bits = (matrix.x[start:stop] > 0).astype(np.float32)
-      sim[start:stop] = tanimoto_nn(bits, prepared=gt_prepared)
+      sim[start:stop] = tanimoto_nn(bits, prepared=hard_prepared)
       tick(stop)
 
-  n_gt = int(np.asarray(gt_bits).shape[0])
+  n_gt = int(np.asarray(hard_bits).shape[0])
 
   # Hold a slice out for early stopping and for the reported numbers; the net trains on everything
   # else, streamed a batch at a time straight off the resident uint8 library.
@@ -254,18 +254,18 @@ def _fit_applicability(
   def batches(shuffler):
     idx = train_idx.copy()
     shuffler.shuffle(idx)
-    for start in range(0, len(idx), GATE_BATCH):
-      take = np.sort(idx[start : start + GATE_BATCH])
+    for start in range(0, len(idx), T_BATCH):
+      take = np.sort(idx[start : start + T_BATCH])
       yield matrix.gather(take), sim[take]
 
   # A ceiling is only meaningful if the gate can ever legitimately open. If nothing in the view reaches
   # the ramp's lower knee, the labelled set has no neighbours here: the target is flat near zero, the
   # gate stays shut everywhere, and a positive ceiling is a number with nothing behind it. That same
-  # combination — a_max > 0 with zero applicability on every probe molecule — is what
+  # combination — a_max > 0 with T never opening on any probe molecule — is what
   # `export.build_bundle` refuses to fuse, so leaving it ungated turns a degenerate gate into a failed
   # run. Reachable is the norm on the full library; a subsampled view is where this bites.
   reachable = float(sim.max()) >= sim_lo
-  regressor = SimilarityRegressor.fit(
+  regressor = TanimotoRegressor.fit(
     batches,
     matrix.n_cols,
     (matrix.gather(val_idx), sim[val_idx]),
@@ -276,7 +276,7 @@ def _fit_applicability(
   )
 
   xval = matrix.gather(val_idx)
-  predicted = regressor.predict_similarity(xval)
+  predicted = regressor.predict_tanimoto(xval)
   del xval
   truth = sim[val_idx].astype(np.float64)
   metrics = regression_metrics(truth, predicted)
@@ -394,7 +394,7 @@ def prepare_hard_labels_wide(
         )
     else:
       raise NotImplementedError(
-        f"hard column '{hard_col}' looks continuous; only binary ground truth is supported today"
+        f"hard column '{hard_col}' looks continuous; only binary hard labels is supported today"
       )
 
     perm = np.random.RandomState(42).permutation(len(yc))
@@ -419,13 +419,13 @@ def prepare_hard_labels_wide(
   return out
 
 
-def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
-  """Train the hard-label model ``G`` and calibrate it onto the soft-label scale.
+def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
+  """Train the hard-label model ``H`` and calibrate it onto the soft-label scale.
 
-  Reads that column's ``hard.h5`` (written by :func:`prepare_hard_labels_wide`), then writes ``G``
-  (ONNX), its scores over the reference library, the ``G``→soft calibrator, and the applicability gate
-  (a similarity-regressing MLP) under ``<col_dir>/_ground_truth/``. The gate is learned here from the
-  reference but *applied* at predict time (no similarity search) — see :mod:`olinda.applicability`.
+  Reads that column's ``hard.h5`` (written by :func:`prepare_hard_labels_wide`), then writes ``H``
+  (ONNX), its scores over the reference library, the ``H``→``S`` calibrator, and ``T``
+  (a similarity-regressing MLP) under ``<col_dir>/_hard/``. The gate is learned here from the
+  reference but *applied* at predict time (no similarity search) — see :mod:`olinda.tanimoto`.
 
   Parameters
   ----------
@@ -440,7 +440,7 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
   Returns
   -------
   dict
-      ``{"task", "n", "gt_dir", "selection", "calibration", "applicability"}``.
+      ``{"task", "n", "hard_dir", "selection", "calibration", "tanimoto"}``.
   """
   import h5py
 
@@ -452,7 +452,7 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     )
   if soft is None:
     raise ValueError(
-      "train_ground_truth needs this column's reference-aligned soft labels; the caller reads them "
+      "train_hard needs this column's reference-aligned soft labels; the caller reads them "
       "from the run's targets.h5"
     )
   soft = np.asarray(soft, dtype=np.float64)
@@ -463,9 +463,9 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
 
     matrix = ReferenceMatrix.load(_reference_path())
 
-  gt_root = model_dir / GT_DIRNAME
-  gt_dir = gt_root / GT_MODEL_SUBDIR
-  gt_root.mkdir(parents=True, exist_ok=True)
+  hard_root = model_dir / HARD_DIRNAME
+  hard_dir = hard_root / HARD_MODEL_SUBDIR
+  hard_root.mkdir(parents=True, exist_ok=True)
 
   # --- load the prepared hard labels ---------------------------------------
   with h5py.File(hard_path, "r") as f:
@@ -474,31 +474,31 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     resolved_task = str(f.attrs.get("task", "binary"))
     featurizer_json = f.attrs.get("featurizer")
   featurizer_dict = json.loads(featurizer_json) if featurizer_json else MorganCountFeaturizer().to_dict()
-  gt_model = _new_gt_model(resolved_task)  # placeholder gate: raises NotImplementedError for regression
+  hard_model = _new_hard_model(resolved_task)  # placeholder gate: raises NotImplementedError for regression
   y = y.astype(int)  # binary labels (past the gate)
 
   with warnings.catch_warnings():
     warnings.simplefilter("ignore")  # hush lazy-qsar's sklearn version-drift FutureWarnings
 
-    # === Step 1/4 — train the hard-label classifier G ======================
-    step(1, 4, "training the hard-label model G")
+    # === Step 1/4 — train the hard-label classifier H ======================
+    step(1, 4, "training the hard-label model H")
     echo(f"  {len(y):,} labelled compounds · {int(y.sum()):,} positive ({y.mean():.1%})", "info")
-    gt_model.fit(X, y)
-    gt_model.save(str(gt_dir))
-    selection = _selection_report(gt_model)
+    hard_model.fit(X, y)
+    hard_model.save(str(hard_dir))
+    selection = _selection_report(hard_model)
     echo(f"  ready · {selection['preset']} preset · {selection['best_iteration']} trees", "info")
 
-    # === Step 2/4 — score G across the reference library ===================
-    step(2, 4, "scoring G across the reference library")
-    g_ref = _score_reference(gt_model, "binary", X.shape[1], matrix)
-    with h5py.File(gt_root / G_REFERENCE_NAME, "w") as f:
+    # === Step 2/4 — score H across the reference library ===================
+    step(2, 4, "scoring H across the reference library")
+    g_ref = _score_reference(hard_model, "binary", X.shape[1], matrix)
+    with h5py.File(hard_root / H_REFERENCE_NAME, "w") as f:
       f.create_dataset("g", data=g_ref.astype(np.float32))
-    echo(f"  saved → {G_REFERENCE_NAME}", "info")
+    echo(f"  saved → {H_REFERENCE_NAME}", "info")
 
-    # === Step 3/4 — calibrate G onto the soft-label scale ==================
+    # === Step 3/4 — calibrate H onto the soft-label scale ==================
     from olinda.calibrate import IsotonicCalibrator, _spearman_sign
 
-    step(3, 4, "calibrating G onto the soft-label scale")
+    step(3, 4, "calibrating H onto the soft-label scale")
     # `g_ref` covers the loaded view of the library while `soft` is always the full reference-aligned
     # target, so under `--max-samples` the two differ in length. Pairing the head of each is correct
     # because the limit truncates the head — but state that, rather than leaving a `min()` to absorb
@@ -512,7 +512,7 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     mask = np.isfinite(gv) & np.isfinite(sv)
     gv, sv = gv[mask], sv[mask]
     calibrator = IsotonicCalibrator().fit(gv, sv, increasing="auto")
-    calibrator.save(gt_root / CALIBRATOR_NAME)
+    calibrator.save(hard_root / H_TO_S_NAME)
     direction = "increasing" if calibrator._sign > 0 else "decreasing"
     # fit() already ranked both arrays to choose the direction; reuse that rather than paying for a
     # second full pass over the reference library just to report the magnitude.
@@ -526,7 +526,7 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     # R², not the correlation, is what bounds the blend — see _blend_ceiling. The gap between r² and
     # R² is the part of the disagreement that a shift or a rescaling would explain.
     alignment_r2 = _r2(sv, calibrated)
-    echo(f"  {direction} fit · Spearman(G, soft) {spearman:+.3f}", "info")
+    echo(f"  {direction} fit · Spearman(H, soft) {spearman:+.3f}", "info")
     # R² is the one that matters downstream — it is what caps the blend — so it is named as such
     # rather than left as the third number in a row of three.
     echo(
@@ -539,41 +539,41 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     # training-time copy would only ever be a second rendering of the same numbers — and drawing it
     # pulled matplotlib into every training run, which is what made the CLI pause on its font cache.
 
-    # === Step 4/4 — learn the applicability gate (similarity regressor) ====
-    from olinda.applicability import A_CEILING, SIM_HI, SIM_LO
+    # === Step 4/4 — train T, the Tanimoto regressor ========================
+    from olinda.tanimoto import A_CEILING, T_HI, T_LO
 
-    step(4, 4, "learning the applicability gate")
-    gt_bits = (X > 0).astype(np.float32)
-    ad_clf, ad_counts = _fit_applicability(gt_bits, X.shape[1], matrix, SIM_LO, SIM_HI, alignment_r2)
-    ad_clf.save(gt_root / APPLICABILITY_DIRNAME)
+    step(4, 4, "learning T · Tanimoto to the labelled set")
+    hard_bits = (X > 0).astype(np.float32)
+    ad_clf, ad_counts = _fit_tanimoto(hard_bits, X.shape[1], matrix, T_LO, T_HI, alignment_r2)
+    ad_clf.save(hard_root / TANIMOTO_DIRNAME)
     echo(
       f"  true similarity · median {ad_counts['sim_median']:.3f} · "
-      f"{ad_counts['frac_above_lo']:.1%} above {SIM_LO} · {ad_counts['frac_above_hi']:.1%} above {SIM_HI}",
+      f"{ad_counts['frac_above_lo']:.1%} above {T_LO} · {ad_counts['frac_above_hi']:.1%} above {T_HI}",
       "info",
     )
     echo(
-      f"  gate fit · R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} "
+      f"  T fit · R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} "
       f"[dim]on {ad_counts['fit_n']:,} held out[/]",
       "info",
     )
     echo(
-      f"  gate reach · opens for [bold]{ad_counts['fit_recall']:.0%}[/] of the compounds that qualify · "
+      f"  T reach · opens for [bold]{ad_counts['fit_recall']:.0%}[/] of the compounds that qualify · "
       f"{ad_counts['fit_precision']:.0%} of those it opens for deserve it",
       "info",
     )
     if ad_counts["a_max"] <= 0.0:
       reason = (
-        f"nothing in the scored reference reaches similarity {SIM_LO} — the labelled compounds have "
+        f"nothing in the scored reference reaches similarity {T_LO} — the labelled compounds have "
         "no neighbours here, so the gate could never open"
-        if ad_counts["sim_max"] < SIM_LO
-        else f"R²(calibrated G, soft)={alignment_r2:.3f} — the hard head does not reproduce the "
+        if ad_counts["sim_max"] < T_LO
+        else f"R²(calibrated H_S, soft)={alignment_r2:.3f} — the hard head does not reproduce the "
         "teacher's scale well enough to be worth mixing in"
       )
       echo(f"  blend DISABLED · {reason}", "warning")
     else:
       echo(
-        f"  blend weight ramps 0 → [bold]{ad_counts['a_max']:.3f}[/] across similarity {SIM_LO} → "
-        f"{SIM_HI} · ceiling from R²={alignment_r2:.3f}, capped at {A_CEILING}",
+        f"  blend weight ramps 0 → [bold]{ad_counts['a_max']:.3f}[/] across similarity {T_LO} → "
+        f"{T_HI} · ceiling from R²={alignment_r2:.3f}, capped at {A_CEILING}",
         "run",
       )
 
@@ -592,11 +592,11 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     else None,
     "n_reference": int(len(gv)),
   }
-  applicability = {
+  tanimoto = {
     "signal": "similarity_regressor",
-    "sim_lo": SIM_LO,
-    "sim_hi": SIM_HI,
-    "artifact": APPLICABILITY_DIRNAME,
+    "sim_lo": T_LO,
+    "sim_hi": T_HI,
+    "artifact": TANIMOTO_DIRNAME,
     "a_max_ceiling": A_CEILING,
     **ad_counts,
   }
@@ -606,52 +606,50 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     "features": "morgan_count",
     "featurizer": featurizer_dict,
     "featurizer_class": "MorganCountFeaturizer",
-    "gt_dir": GT_MODEL_SUBDIR,
-    "g_reference": G_REFERENCE_NAME,
-    "calibrator": CALIBRATOR_NAME,
+    "hard_dir": HARD_MODEL_SUBDIR,
+    "h_reference": H_REFERENCE_NAME,
+    "calibrator": H_TO_S_NAME,
     # Applicability gate is learned here and applied at predict time (a similarity regressor, no
-    # similarity search). Blend: prediction = (1-a)*surrogate + a*ground_truth_soft.
-    "applicability": applicability,
+    # similarity search). Blend: prediction = (1-a)*surrogate + a*h_s.
+    "tanimoto": tanimoto,
     "lazyqsar_version": getattr(_lq, "__version__", "unknown"),
   }
-  with open(gt_root / GT_META_NAME, "w") as fp:
+  with open(hard_root / HARD_META_NAME, "w") as fp:
     json.dump(meta, fp, indent=2)
-  with open(gt_root / GT_EVAL_NAME, "w") as fp:
-    json.dump(
-      {"selection": selection, "calibration": calibration, "applicability": applicability}, fp, indent=2
-    )
+  with open(hard_root / HARD_EVAL_NAME, "w") as fp:
+    json.dump({"selection": selection, "calibration": calibration, "tanimoto": tanimoto}, fp, indent=2)
 
   _mark_surrogate_combined(model_dir)
 
   # --- report ---------------------------------------------------------------
   rows = [
-    ("Hard model G", f"[bold]{selection['preset']}[/] · {selection['best_iteration']} trees"),
+    ("Hard model H", f"[bold]{selection['preset']}[/] · {selection['best_iteration']} trees"),
     ("Reference scored", f"[bold]{len(gv):,}[/] compounds"),
     (
-      "G → soft calibration",
+      "H → S calibration",
       f"[bold]{direction}[/] · Spearman {spearman:+.3f} · Pearson(cal) {pearson_after:.3f}",
     ),
     (
       "Applicability",
       f"similarity R² [bold]{ad_counts['fit_r2']:.3f}[/] · "
-      f"{ad_counts['frac_above_lo']:.1%} of the library above {SIM_LO} → [dim]{APPLICABILITY_DIRNAME}/[/]",
+      f"{ad_counts['frac_above_lo']:.1%} of the library above {T_LO} → [dim]{TANIMOTO_DIRNAME}/[/]",
     ),
-    ("Saved", f"[dim]{gt_root}[/]"),
+    ("Saved", f"[dim]{hard_root}[/]"),
   ]
   summary_panel("olinda · learn-hard", rows, border_style="green", icon="✓")
 
   return {
     "task": "binary",
     "n": int(len(y)),
-    "gt_dir": str(gt_dir),
+    "hard_dir": str(hard_dir),
     "selection": selection,
     "calibration": calibration,
-    "applicability": applicability,
+    "tanimoto": tanimoto,
   }
 
 
 def _mark_surrogate_combined(model_dir: Path) -> None:
-  """Flip ``ground_truth: true`` on the surrogate's ``train_meta.json`` if present (the ``_ground_truth/``
+  """Flip ``hard: true`` on the surrogate's ``train_meta.json`` if present (the ``_hard/``
   directory is the authoritative marker; this is just a convenience flag)."""
   path = model_dir / "train_meta.json"
   if not path.exists():
@@ -659,7 +657,7 @@ def _mark_surrogate_combined(model_dir: Path) -> None:
   try:
     with open(path) as fp:
       data = json.load(fp)
-    data["ground_truth"] = True
+    data["hard"] = True
     with open(path, "w") as fp:
       json.dump(data, fp, indent=2)
   except (json.JSONDecodeError, OSError):  # pragma: no cover - non-fatal

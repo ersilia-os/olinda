@@ -6,8 +6,8 @@
 #   ./run.sh check    a fast plumbing check — 20k reference compounds, 10k at predict
 #
 # `--max-samples` bounds every step that sweeps the library, learn-hard included, so check costs
-# minutes rather than the best part of an hour. 20k rather than a token 1k because the applicability
-# gate and the blend ceiling need enough neighbours to earn a hard head worth looking at.
+# minutes rather than the best part of an hour. 20k rather than a token 1k because T and the blend
+# ceiling need enough neighbours to earn a hard head worth looking at.
 #
 # `check` writes to results/check/ so it can never overwrite a real run.
 # The validate step needs the reporting extra:  pip install "olinda[report]"

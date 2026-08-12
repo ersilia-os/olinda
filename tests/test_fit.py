@@ -105,26 +105,20 @@ def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
   from olinda import OlindaArtifact
 
   model = OlindaArtifact(onnx)
-  assert model.has_ground_truth is True
+  assert model.has_hard is True
   assert model.columns == ["y"]
   # A blended column publishes its prediction *and* the pieces behind it, so validate can show what
-  # the ground-truth head actually said rather than only the isotonic map read off the initialisers.
+  # the hard-label head actually said rather than only the isotonic map read off the initialisers.
   channels = model.run_channels(_SM[:4])
-  assert set(channels) == {
-    "y",
-    "y__surrogate",
-    "y__ground_truth",
-    "y__ground_truth_soft",
-    "y__applicability",
-  }
-  assert model.channels_for("y")["applicability"] == "y__applicability"
+  assert set(channels) == {"y", "y__s", "y__h", "y__h_s", "y__a"}
+  assert model.channels_for("y")["a"] == "y__a"
 
   # The published prediction must *be* the blend of the channels beside it — otherwise the exposed
   # pieces describe some other computation than the one that produced the answer.
-  a = channels["y__applicability"]
+  a = channels["y__a"]
   np.testing.assert_allclose(
     channels["y"],
-    (1.0 - a) * channels["y__surrogate"] + a * channels["y__ground_truth_soft"],
+    (1.0 - a) * channels["y__s"] + a * channels["y__h_s"],
     atol=1e-9,
   )
   assert model.metadata["columns"][0]["has_hard"] is True

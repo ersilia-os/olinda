@@ -38,7 +38,7 @@ def check_column_budget(columns) -> None:
 
 
 def match_hard_columns(soft_columns, hard_columns) -> dict:
-  """Map each hard-label column onto the soft column it provides ground truth for.
+  """Map each hard-label column onto the soft column it provides hard labels for.
 
   A hard column matches a soft column by exact name, or — because teacher outputs are often the same
   name with a suffix (``abaumannii_inhibition`` → ``abaumannii_inhibition_probability``) — by being a
@@ -271,7 +271,7 @@ def load_reference_calcs_frame(
   -------
   (list of str, dict of str -> np.ndarray)
       ``(all_value_columns, selected)`` — the full ordered list of value-column names in the file
-      (for positional ground-truth matching later) and a mapping of each *selected* column to its
+      (for positional hard-label matching later) and a mapping of each *selected* column to its
       float32 value vector.
   """
   smiles, values = resolve_smiles_frame(_read_table(path), smiles_column=smiles_column)

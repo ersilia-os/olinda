@@ -10,7 +10,7 @@ vectors and one manifest describing the whole run. A single-column run is simply
       targets.h5         one reference-aligned y per column, keyed by column id
       splits.h5          per-column train/val row indices
       best_params.json   tuned hyperparameters, if `olinda tune` ran
-      columns/<id>/      that column's model, metrics, plots and ground-truth head
+      columns/<id>/      that column's model, metrics, plots and hard-label head
       model.onnx         all columns fused into one artifact
 
 The descriptor matrix is deliberately absent: it is the same for every column, so it is read from the
@@ -109,6 +109,16 @@ def new_manifest(*, soft_labels, hard_labels, reference, features, val_frac, see
     "hard_labels": {"path": str(hard_labels) if hard_labels else None},
     "columns": [],
   }
+
+
+def row_limit(manifest: dict) -> int | None:
+  """How many reference rows this run uses, or ``None`` for the whole library.
+
+  ``--max-samples`` is recorded once, at ``prepare``, and every later step reads it back from here —
+  which is what makes a limited run limited all the way through rather than only in the student's
+  train/val split. See :meth:`olinda.data.matrix.ReferenceMatrix.load`.
+  """
+  return (manifest.get("split") or {}).get("limit")
 
 
 def add_column(manifest: dict, *, name: str, y, train_idx, val_idx, hard: dict | None = None) -> dict:

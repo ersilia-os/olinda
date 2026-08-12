@@ -86,23 +86,34 @@ olinda fit -s teacher.csv -h measured.csv -m runs/my_model.onnx
 tested. Columns are matched to the teacher by name, allowing a suffix — `abaumannii_inhibition`
 matches `abaumannii_inhibition_probability`. Anything ambiguous is an error, not a guess.
 
-Olinda then trains a classifier on your labels, calibrates it onto the teacher's scale (learning the
-direction from the data), and learns where to trust it. The final prediction is
+Olinda then trains a model on your labels, calibrates it onto the teacher's scale (learning the
+direction from the data), and learns where to trust it. Three models, one letter each — the same names
+appear in the code, in the run directory and in the fused graph's channels:
+
+| | |
+|---|---|
+| **S** | the **surrogate**, distilled from the teacher's soft labels |
+| **H** | the **hard-label model**, trained on your measurements |
+| **H_S** | **H** carried onto **S**'s scale by an isotonic map |
+| **T** | predicted **1-NN Tanimoto** to your labelled set |
+| **a** | the blend weight, `a = a_max · ramp(T)` |
+
+The final prediction is
 
 ```
-(1 − a) · surrogate  +  a · calibrated hard labels
+prediction  =  (1 − a) · S  +  a · H_S
 ```
 
 `a` rises only near chemistry you have actually measured. Rather than search your labelled set for
 every query, olinda measures each reference compound's nearest-neighbour Tanimoto to it once, at
-training time, and fits a small network to predict that number from a fingerprint alone — so your
-compounds never travel inside the shipped model. A ramp turns the predicted similarity into `a`,
-continuously: nothing jumps at a threshold.
+training time, and fits **T**, a small network predicting that number from a fingerprint alone — so
+your compounds never travel inside the shipped model. A ramp turns **T** into `a`, continuously:
+nothing jumps at a threshold.
 
-How far `a` can ever rise is earned, not assumed. A hard head whose calibrated output tracks the
-teacher poorly is capped low, and one that loses to the surrogate outright is dropped, leaving the
-column soft-only. Far from your data the model falls back to the surrogate. That weighting is already
-inside the number `run()` returns.
+How far `a` can ever rise is earned, not assumed. An **H** whose calibrated output tracks the teacher
+poorly is capped low, and one that loses to **S** outright is dropped, leaving the column soft-only.
+Far from your data the model falls back to **S**. That weighting is already inside the number `run()`
+returns.
 
 ## Is it any good?
 
@@ -142,8 +153,8 @@ want the per-column boosters, metrics and plots that `fit` discards:
 |---|---|
 | `prepare` | Read the teacher columns and plan each one's split |
 | `tune` | Optional Optuna pass; single-column runs only |
-| `learn-soft` | Train the surrogate for every column |
-| `learn-hard` | Train and calibrate the hard-label head |
+| `learn-soft` | Train S, the surrogate, for every column |
+| `learn-hard` | Train H and T, and calibrate H onto S's scale |
 | `export` | Rebuild `model.onnx` from a trained run |
 | `clean` | Move the model out and delete the run folder |
 
@@ -161,7 +172,7 @@ inside the artifact, and how the hard-label head is calibrated and gated.
 | | |
 |---|---|
 | [The fused artifact](docs/diagrams/olinda_03_model_onnx.png) | Every stage in one graph, and what the metadata carries |
-| [Hard labels and applicability](docs/diagrams/olinda_04_hard.png) | The four `learn-hard` steps, and where `a` comes from |
+| [Hard labels: H, H_S and T](docs/diagrams/olinda_04_hard.png) | The four `learn-hard` steps, and where `a` comes from |
 
 They are drawn by [`scripts/make_diagrams.py`](scripts/make_diagrams.py) — regenerate them if you
 change the pipeline.

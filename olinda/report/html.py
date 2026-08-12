@@ -172,7 +172,7 @@ def write_report(out_dir: str | Path, report: dict) -> Path:
       ("olinda", meta.get("olinda_version") or "—"),
       ("RDKit", meta.get("rdkit_version") or "—"),
       ("Backend", meta.get("backend") or "—"),
-      ("Ground-truth head", "yes" if meta.get("has_ground_truth") else "no"),
+      ("Hard-label head", "yes" if meta.get("has_hard") else "no"),
     ],
     ("", "Value"),
   )

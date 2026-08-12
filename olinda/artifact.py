@@ -213,10 +213,10 @@ class OlindaArtifact:
   def channels_for(self, task: str) -> dict:
     """``{role: output name}`` for one task's internal channels, empty if it has none.
 
-    A blended column exposes ``surrogate``, ``ground_truth``, ``ground_truth_soft`` and
-    ``applicability`` alongside its prediction. A soft-only column exposes none — its surrogate *is*
-    its prediction. Artifacts fused before these were declared also return empty, which is why
-    callers should ask rather than build the names themselves.
+    A blended column exposes four: ``s`` (the surrogate), ``h`` (the hard-label model), ``h_s`` (``h``
+    carried onto ``s``'s scale) and ``a`` (the blend weight), alongside its prediction. A soft-only
+    column exposes none — its ``s`` *is* its prediction. Artifacts fused before these were declared
+    also return empty, which is why callers should ask rather than build the names themselves.
     """
     for c in self._columns:
       if c["name"] == task:
@@ -224,7 +224,7 @@ class OlindaArtifact:
     raise KeyError(f"{task!r} is not a task of this model; it predicts {self.columns}")
 
   @property
-  def has_ground_truth(self) -> bool:
+  def has_hard(self) -> bool:
     """True if any task blends in a hard-label head, so predictions use measured data."""
     return any(c.get("has_hard") for c in self._columns)
 
@@ -250,7 +250,7 @@ class OlindaArtifact:
       "rdkit_version": self.rdkit_version,
       "n_features": self.n_features,
       "columns": self.columns,
-      "has_ground_truth": self.has_ground_truth,
+      "has_hard": self.has_hard,
     }
 
   # ── inference ──────────────────────────────────────────────────────────────
@@ -264,8 +264,8 @@ class OlindaArtifact:
     """Every named output of the graph, as a dict of 1-D arrays keyed by output name.
 
     Most callers want :meth:`run`, which is this plus a DataFrame. A blended column also declares its
-    intermediate channels as graph outputs — the surrogate, the calibrated ground truth and the
-    applicability weight — so they appear here too, under the names :meth:`channels_for` reports.
+    intermediate channels as graph outputs — ``S``, ``H``, ``H_S`` and the blend weight ``a`` — so they
+    appear here too, under the names :meth:`channels_for` reports.
     Ask for them by that route rather than assembling the names: a soft-only column has none, and so
     does an artifact fused before the channels were declared.
 
@@ -325,7 +325,7 @@ class OlindaArtifact:
     -------
     pandas.DataFrame
         A ``smiles`` column followed by **one column per task** — the final blended prediction,
-        which already folds in the applicability weighting. The intermediate channels behind it
+        which already folds in the blend weight ``a``. The intermediate channels behind it
         are available from :meth:`run_channels`.
     """
     import pandas as pd

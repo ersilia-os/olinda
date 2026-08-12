@@ -26,7 +26,7 @@ NC = stylia.NamedColors()
 TEACHER = NC.purple  # the teacher / hard-label side
 STUDENT = NC.blue  # the surrogate
 BUNDLE = NC.mint  # the fused ONNX artifact
-GATE = NC.pink  # the applicability gate
+TANIMOTO = NC.pink  # T, and the blend weight a
 DATA = NC.gray  # data and files
 OUT = NC.orange  # outputs
 
@@ -126,10 +126,10 @@ def _ramp(ax, *, x0, x1, y0, y1):
   """An inset plot of the blend weight against predicted similarity, drawn in canvas coordinates.
 
   The gate's output is the one part of the pipeline a box cannot state honestly: what matters is that
-  ``a`` is *continuous* — zero below SIM_LO, rising linearly to ``a_max`` at SIM_HI — which is exactly
+  ``a`` is *continuous* — zero below T_LO, rising linearly to ``a_max`` at T_HI — which is exactly
   what the bucketed gate this replaced got wrong. So draw the function.
   """
-  lo, hi = 0.4, 0.7  # olinda.applicability.SIM_LO / SIM_HI
+  lo, hi = 0.4, 0.7  # olinda.tanimoto.T_LO / T_HI
 
   def px(t):  # similarity 0..1 → canvas x
     return x0 + t * (x1 - x0)
@@ -142,15 +142,15 @@ def _ramp(ax, *, x0, x1, y0, y1):
   ax.plot(
     [px(0), px(lo), px(hi), px(1)],
     [py(0), py(0), py(0.66), py(0.66)],
-    color=GATE,
+    color=TANIMOTO,
     linewidth=1.6,
     solid_capstyle="round",
     zorder=3,
   )
   for t, label in ((lo, "0.4"), (hi, "0.7")):
-    ax.plot([px(t), px(t)], [y0, py(0.66)], color=GATE, linewidth=0.7, linestyle=":", zorder=2)
+    ax.plot([px(t), px(t)], [y0, py(0.66)], color=TANIMOTO, linewidth=0.7, linestyle=":", zorder=2)
     _note(ax, px(t), y0 - 3.4, label, color=DATA)
-  _note(ax, x0 - 2.5, py(0.66), "a_max", color=GATE, ha="right")
+  _note(ax, x0 - 2.5, py(0.66), "a_max", color=TANIMOTO, ha="right")
   _note(ax, x0 - 2.5, y0, "0", color=DATA, ha="right")
   _note(ax, (x0 + x1) / 2, y0 - 8, "predicted 1-NN Tanimoto", color=DATA)
 
@@ -227,7 +227,7 @@ def draw_pipeline(ax) -> None:
     ("prepare", "manifest.json\ntargets.h5 · splits.h5", False),
     ("tune", "best_params.json", True),
     ("learn-soft", "columns/<id>/\nbooster · metrics · plots", False),
-    ("learn-hard", "columns/<id>/_ground_truth/\ncalibrator · gate", True),
+    ("learn-hard", "columns/<id>/_hard/\ncalibrator · gate", True),
     ("export", "model.onnx\nrebuilt on demand", True),
     ("clean", "model.onnx\nand nothing else", False),
   ]
@@ -319,25 +319,25 @@ def draw_model_onnx(ax) -> None:
   _note(ax, 19.5, 51, "2048 counts", color=DATA)
 
   # three heads, fed from the same fingerprint
-  _box(ax, 36, 66, 17, 13, "soft model\nGBM surrogate", STUDENT, bold_first=True)
+  _box(ax, 36, 66, 17, 13, "S · surrogate\nGBM", STUDENT, bold_first=True)
   _box(ax, 36, 44, 17, 13, "hard model\nG", TEACHER, bold_first=True)
-  _box(ax, 36, 24, 17, 13, "gate\nsimilarity MLP", GATE, bold_first=True)
+  _box(ax, 36, 24, 17, 13, "T · Tanimoto\nMLP", TANIMOTO, bold_first=True)
   for y in (66, 44, 24):
     _arrow(ax, (21.5, 46), (27, y), color=DATA)
 
   _box(ax, 57, 66, 15, 12, "isotonic\ncorrection", STUDENT, fill=0.09)
   _box(ax, 57, 44, 15, 12, "isotonic\nto soft scale", TEACHER, fill=0.09)
   _arrow(ax, (44.5, 66), (49.5, 66), color=STUDENT)
-  _arrow(ax, (44.5, 44), (49.5, 44), color=TEACHER, label="ground_truth", label_dy=1.8)
+  _arrow(ax, (44.5, 44), (49.5, 44), color=TEACHER, label="hard", label_dy=1.8)
 
   # everything converges on the blend
   _box(ax, 73, 44, 12, 20, "blend", OUT, bold_first=False)
   _arrow(ax, (64.5, 66), (69, 50), color=STUDENT)
-  _note(ax, 63, 57, "surrogate", color=STUDENT, ha="right")
+  _note(ax, 63, 57, "S", color=STUDENT, ha="right")
   _arrow(ax, (64.5, 44), (67, 44), color=TEACHER)
-  _note(ax, 57, 35, "ground_truth_soft", color=TEACHER)
-  _arrow(ax, (44.5, 24), (69, 38), elbow="angle_h", color=GATE)
-  _note(ax, 56, 20, "applicability  a", color=GATE)
+  _note(ax, 57, 35, "h_s", color=TEACHER)
+  _arrow(ax, (44.5, 24), (69, 38), elbow="angle_h", color=TANIMOTO)
+  _note(ax, 56, 20, "a", color=TANIMOTO)
 
   _arrow(ax, (79, 44), (86, 44), color=OUT)
   _box(ax, 93, 44, 13, 13, "prediction", OUT)
@@ -346,7 +346,7 @@ def draw_model_onnx(ax) -> None:
     ax,
     52,
     92,
-    "prediction  =  (1 − a) · surrogate  +  a · ground_truth_soft",
+    "prediction  =  (1 − a) · S  +  a · H_S",
     color=NC.black,
     italic=False,
   )
@@ -370,32 +370,32 @@ def draw_model_onnx(ax) -> None:
   stylia.label(ax, xlabel="", ylabel="", title="One fused, self-describing artifact")
 
 
-# ── 4 · ground truth and applicability ───────────────────────────────────────
+# ── 4 · hard labels: H, H_S and T ───────────────────────────────────────────
 
 
-def draw_ground_truth(ax) -> None:
-  """The four learn-hard steps, and how the applicability gate weights the blend."""
+def draw_hard(ax) -> None:
+  """The four learn-hard steps, and how T sets the blend weight."""
   _canvas(ax)
 
   steps = [
-    "1 · train G\non your hard labels",
-    "2 · score G\nacross the library",
-    "3 · calibrate\nisotonic → soft scale",
-    "4 · fit the gate\nsimilarity regressor",
+    "1 · train H\non your hard labels",
+    "2 · score H\nacross the library",
+    "3 · calibrate\nH → H_S, S's scale",
+    "4 · train T\nTanimoto regressor",
   ]
   xs = [14, 38, 62, 86]
   for text, x in zip(steps, xs):
     _box(ax, x, 80, 21, 16, text, TEACHER, bold_first=True)
   for x0, x1 in zip(xs[:-1], xs[1:]):
     _arrow(ax, (x0 + 10.5, 80), (x1 - 10.5, 80))
-  _note(ax, 50, 68, "the isotonic direction is learned — a low G may map to a high soft label", color=DATA)
+  _note(ax, 50, 68, "the isotonic direction is learned — a low H may map to a high soft label", color=DATA)
 
   # The gate learns to stand in for a nearest-neighbour search, so the labelled fingerprints never
   # have to ship: exact Tanimoto labels the library once, here, and an MLP reproduces it from bits.
-  _box(ax, 15, 48, 25, 17, "exact 1-NN Tanimoto\nto your labelled\ncompounds", GATE, bold_first=True)
-  _arrow(ax, (27.5, 48), (35, 48), color=GATE, label="target", label_dy=1.6)
-  _box(ax, 47, 50, 22, 17, "similarity MLP\n2048 → 256 → 64 → 1", GATE, bold_first=True)
-  _arrow(ax, (58, 50), (65, 50), color=GATE)
+  _box(ax, 15, 48, 25, 17, "exact 1-NN Tanimoto\nto your labelled\ncompounds", TANIMOTO, bold_first=True)
+  _arrow(ax, (27.5, 48), (35, 48), color=TANIMOTO, label="target", label_dy=1.6)
+  _box(ax, 47, 50, 22, 17, "T · MLP\n2048 → 256 → 64 → 1", TANIMOTO, bold_first=True)
+  _arrow(ax, (58, 50), (65, 50), color=TANIMOTO)
   _ramp(ax, x0=68, x1=95, y0=44, y1=59)
 
   _note(
@@ -415,10 +415,10 @@ def draw_ground_truth(ax) -> None:
     11,
     66,
     13,
-    "prediction  =  (1 − a) · surrogate  +  a · calibrated ground truth",
+    "prediction  =  (1 − a) · S  +  a · H_S",
     OUT,
   )
-  _note(ax, 50, 2.5, "far from your data the blend falls back to the surrogate", color=DATA)
+  _note(ax, 50, 2.5, "far from your data the blend falls back to S", color=DATA)
 
   stylia.label(ax, xlabel="", ylabel="", title="Hard labels, calibrated onto the teacher's scale")
 
@@ -427,7 +427,7 @@ FIGURES = [
   ("olinda_01_distillation.png", draw_distillation, 0.52),
   ("olinda_02_pipeline.png", draw_pipeline, 0.50),
   ("olinda_03_model_onnx.png", draw_model_onnx, 0.56),
-  ("olinda_04_ground_truth.png", draw_ground_truth, 0.50),
+  ("olinda_04_hard.png", draw_hard, 0.50),
 ]
 
 

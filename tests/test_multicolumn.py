@@ -141,7 +141,7 @@ def test_columns_are_independent_models(tmp_path, monkeypatch):
 
 
 def test_sparse_hard_labels_apply_only_to_matched_columns(tmp_path, monkeypatch):
-  """A wide hard file covering some columns gives exactly those a ground-truth head."""
+  """A wide hard file covering some columns gives exactly those a hard-label head."""
   from olinda import run as runlib
 
   home = tmp_path / "home"
@@ -168,7 +168,7 @@ def test_sparse_hard_labels_apply_only_to_matched_columns(tmp_path, monkeypatch)
   model = OlindaArtifact(md)
   flags = {c["name"]: c["has_hard"] for c in model.metadata["columns"]}
   assert flags == {"assay0_probability": True, "assay1_probability": False, "assay2_probability": True}
-  assert model.has_ground_truth is True
+  assert model.has_hard is True
   assert list(model.run(_SM[:4]).columns) == ["smiles", *model.columns]
 
 
@@ -382,7 +382,7 @@ def test_a_changed_reference_library_is_refused(tmp_path, monkeypatch):
 
 def test_an_interrupted_learn_hard_does_not_brick_the_run(tmp_path, monkeypatch):
   """learn-hard writes G first and its metadata last; a crash between must read as soft-only."""
-  from olinda.ground_truth import GT_DIRNAME, GT_META_NAME, GT_MODEL_SUBDIR, has_hard_head
+  from olinda.hard import HARD_DIRNAME, HARD_META_NAME, HARD_MODEL_SUBDIR, has_hard_head
 
   home = tmp_path / "home"
   home.mkdir()
@@ -394,24 +394,24 @@ def test_an_interrupted_learn_hard_does_not_brick_the_run(tmp_path, monkeypatch)
   )
   md = _steps(soft, tmp_path / "run", tmp_path / "hard.csv")
 
-  gt_root = md / "columns" / "c0" / GT_DIRNAME
+  hard_root = md / "columns" / "c0" / HARD_DIRNAME
   assert has_hard_head(md / "columns" / "c0")
 
   # simulate a crash after G was saved but before the head completed
-  (gt_root / GT_META_NAME).unlink()
-  assert (gt_root / GT_MODEL_SUBDIR).exists()  # the model is still on disk
+  (hard_root / HARD_META_NAME).unlink()
+  assert (hard_root / HARD_MODEL_SUBDIR).exists()  # the model is still on disk
   assert not has_hard_head(md / "columns" / "c0")  # but the head is not complete
 
   r2 = _run(["export", "-m", str(md)])  # must fuse soft-only, not die on a missing calibrator
   assert r2.exit_code == 0, r2.output
-  assert OlindaArtifact(md).has_ground_truth is False
+  assert OlindaArtifact(md).has_hard is False
 
 
 def test_parity_probe_exercises_the_hard_blend(tmp_path, monkeypatch):
-  """Fixed probe molecules may all score zero applicability, leaving the hard head unchecked."""
-  from olinda.applicability import SimilarityRegressor
+  """Fixed probe molecules may all score zero weight, leaving the hard head unchecked."""
+  from olinda.tanimoto import TanimotoRegressor
   from olinda.export import _parity_probe
-  from olinda.ground_truth import APPLICABILITY_DIRNAME, GT_DIRNAME
+  from olinda.hard import TANIMOTO_DIRNAME, HARD_DIRNAME
 
   md = _fit_with_hard(tmp_path, monkeypatch)
   from olinda.export import _column_plan
@@ -420,7 +420,7 @@ def test_parity_probe_exercises_the_hard_blend(tmp_path, monkeypatch):
   probe = _parity_probe(plan)
   assert len(probe) > 5, "the probe must add labelled compounds, not just the fixed molecules"
 
-  clf = SimilarityRegressor.load(md / "columns" / "c0" / GT_DIRNAME / APPLICABILITY_DIRNAME)
+  clf = TanimotoRegressor.load(md / "columns" / "c0" / HARD_DIRNAME / TANIMOTO_DIRNAME)
   assert (np.asarray(clf.weight(probe > 0)) > 0).any(), "blend never exercised — hard head unchecked"
 
 
@@ -562,7 +562,7 @@ def test_cleaning_twice_is_harmless(tmp_path, monkeypatch):
 
 
 def _fit_with_hard(tmp_path, monkeypatch):
-  """A trained single-column run with a ground-truth head, left uncleaned."""
+  """A trained single-column run with a hard-label head, left uncleaned."""
   home = tmp_path / "home"
   home.mkdir()
   soft, smiles, x = _stage(home, tmp_path, monkeypatch, n_columns=1)
@@ -587,7 +587,7 @@ def _channels(artifact_path, smiles):
 
   model = onnx.load(str(artifact_path))
   have = {o.name for o in model.graph.output}
-  for name in ("c0_surrogate", "c0_applicability"):
+  for name in ("c0_s", "c0_a"):
     if name not in have:
       model.graph.output.append(helper.make_tensor_value_info(name, TensorProto.DOUBLE, ["B"]))
   tmp = artifact_path.parent / "_channels.onnx"
@@ -608,12 +608,12 @@ def test_a_hard_head_that_earns_no_weight_still_fuses_and_predicts(tmp_path, mon
   outcome, and the graph must still build, load and predict — otherwise a weak hard head bricks the
   run instead of simply being ignored.
   """
-  from olinda.applicability import SimilarityRegressor
-  from olinda.ground_truth import APPLICABILITY_DIRNAME, GT_DIRNAME
+  from olinda.tanimoto import TanimotoRegressor
+  from olinda.hard import TANIMOTO_DIRNAME, HARD_DIRNAME
 
   md = _fit_with_hard(tmp_path, monkeypatch)
-  gate_dir = md / "columns" / "c0" / GT_DIRNAME / APPLICABILITY_DIRNAME
-  gate = SimilarityRegressor.load(gate_dir)
+  gate_dir = md / "columns" / "c0" / HARD_DIRNAME / TANIMOTO_DIRNAME
+  gate = TanimotoRegressor.load(gate_dir)
   gate.a_max = 0.0  # as _blend_ceiling would set it for a poorly aligned head
   gate.save(gate_dir)
 
@@ -622,9 +622,9 @@ def test_a_hard_head_that_earns_no_weight_still_fuses_and_predicts(tmp_path, mon
   model = OlindaArtifact(md)
   probe = _SM[:6]
   ch = _channels(md / "model.onnx", probe)
-  assert np.all(ch["c0_applicability"] == 0.0), "the ceiling is zero, so no weight may be assigned"
+  assert np.all(ch["c0_a"] == 0.0), "the ceiling is zero, so no weight may be assigned"
   # With a == 0 the blend is exactly the surrogate — the hard branch contributes nothing.
-  np.testing.assert_allclose(model.run(probe)[model.columns[0]].to_numpy(), ch["c0_surrogate"], atol=1e-12)
+  np.testing.assert_allclose(model.run(probe)[model.columns[0]].to_numpy(), ch["c0_s"], atol=1e-12)
 
 
 def test_a_near_constant_teacher_column_disables_the_blend(tmp_path, monkeypatch):
@@ -657,8 +657,8 @@ def test_a_near_constant_teacher_column_disables_the_blend(tmp_path, monkeypatch
   )
 
   md = _steps(soft, tmp_path / "run", hard)
-  meta = json.loads((md / "columns" / "c0" / "_ground_truth" / "ground_truth_meta.json").read_text())
-  assert meta["applicability"]["a_max"] == 0.0, "no variance to explain ⇒ no weight earned"
+  meta = json.loads((md / "columns" / "c0" / "_hard" / "hard_meta.json").read_text())
+  assert meta["tanimoto"]["a_max"] == 0.0, "no variance to explain ⇒ no weight earned"
   assert OlindaArtifact(md).run(_SM[:4])[["assay0_probability"]].notna().all().all()
 
 
@@ -673,9 +673,9 @@ def test_only_the_gate_branch_binarises_the_fingerprint(tmp_path, monkeypatch):
   m = onnx.load(str(md / "model.onnx"), load_external_data=False)
 
   greaters = [n for n in m.graph.node if n.op_type == "Greater"]
-  assert greaters, "the gate must threshold its input somewhere"
+  assert greaters, "T must threshold its input somewhere"
   for node in greaters:
-    assert "ap" in node.name or "ap" in node.output[0], f"{node.name} thresholds outside the gate"
+    assert "_t__" in node.output[0], f"{node.output[0]} thresholds outside T's branch"
 
   # And the surrogate must still be fed the raw input, not a thresholded copy.
   produced_by = {out: n for n in m.graph.node for out in n.output}

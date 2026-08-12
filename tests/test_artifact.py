@@ -105,7 +105,7 @@ def test_artifact_describes_itself(tmp_path, monkeypatch):
   assert d["producer"] == "olinda"
   assert d["trained_at"] and d["trained_at"].endswith("+00:00")
   assert d["rdkit_version"] and d["n_features"] == 2048
-  assert model.columns and model.has_ground_truth is False
+  assert model.columns and model.has_hard is False
 
 
 def test_standard_onnx_provenance_is_set(tmp_path, monkeypatch):

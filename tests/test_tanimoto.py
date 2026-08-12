@@ -1,14 +1,14 @@
-"""Learned applicability gate: exact Tanimoto-NN labelling, and the similarity → blend-weight ramp."""
+"""``T``: exact Tanimoto-NN labelling, and the predicted-similarity → blend-weight ramp."""
 
 import numpy as np
 import pytest
 
-from olinda.applicability import (
+from olinda.tanimoto import (
   A_CEILING,
   A_MIN,
-  SIM_HI,
-  SIM_LO,
-  prepare_gt_bits,
+  T_HI,
+  T_LO,
+  prepare_hard_bits,
   ramp,
   tanimoto_nn,
 )
@@ -37,7 +37,7 @@ def test_tanimoto_nn_empty_gt_and_counts_binarized():
   assert np.isclose(tanimoto_nn(np.array([[2, 0, 0, 0]]), np.array([[5, 0, 0, 0]]))[0], 1.0)
 
 
-# ── the exported gate must binarize exactly like the Python one ───────────────
+# ── the exported t must binarize exactly like the Python one ───────────────
 
 
 def test_the_gate_scores_counts_the_same_way_in_python_and_onnx():
@@ -45,13 +45,13 @@ def test_the_gate_scores_counts_the_same_way_in_python_and_onnx():
 
   Regression test for a parity failure that only showed up on real molecules: Python binarized the
   fingerprint before the model while the exported graph passed counts straight through, so any
-  compound with a repeated substructure got a different blend weight (0.23 on a real gate — 2000x the
+  compound with a repeated substructure got a different blend weight (0.23 on a real t — 2000x the
   parity tolerance, and a 1.6e-2 shift in the published prediction).
 
-  The resolution is that the gate binarizes on *both* sides: the net is trained and served on
+  The resolution is that the t binarizes on *both* sides: the net is trained and served on
   ``bits > 0``, and the exported graph thresholds its own input before the first MatMul. So the two
   assertions below are the contract — Python agrees with ONNX, and a count fingerprint scores exactly
-  as its indicator does. Note this is true of the gate branch alone: the surrogate and the hard head
+  as its indicator does. Note this is true of the t branch alone: the surrogate and the hard head
   are trained on counts and must keep receiving them.
   """
   onnx = pytest.importorskip("onnx")
@@ -61,8 +61,8 @@ def test_the_gate_scores_counts_the_same_way_in_python_and_onnx():
   import tempfile
   from pathlib import Path
 
-  from olinda.applicability import SimilarityRegressor
-  from olinda.export import _applicability_model, _save
+  from olinda.tanimoto import TanimotoRegressor
+  from olinda.export import _tanimoto_model, _save
 
   rng = np.random.default_rng(0)
   n_features = 64
@@ -78,25 +78,25 @@ def test_the_gate_scores_counts_the_same_way_in_python_and_onnx():
       take = idx[start : start + 256]
       yield counts[take], sim[take]
 
-  gate = SimilarityRegressor.fit(batches, n_features, (counts[2500:], sim[2500:]), a_max=0.6)
+  t = TanimotoRegressor.fit(batches, n_features, (counts[2500:], sim[2500:]), a_max=0.6)
 
   query = ((rng.random((32, n_features)) < 0.2) * rng.integers(1, 6, (32, n_features))).astype(np.float32)
   # Magnitude must not matter to this model — that is what binarizing on both sides buys.
   np.testing.assert_allclose(
-    gate.predict_similarity(query),
-    gate.predict_similarity((query > 0).astype(np.float32)),
+    t.predict_tanimoto(query),
+    t.predict_tanimoto((query > 0).astype(np.float32)),
     atol=1e-12,
   )
 
   with tempfile.TemporaryDirectory() as td:
-    path = Path(td) / "gate.onnx"
-    _save(_applicability_model(gate, n_features, "input", "applicability"), path)
+    path = Path(td) / "t.onnx"
+    _save(_tanimoto_model(t, n_features, "input", "a"), path)
     onnx.checker.check_model(onnx.load(str(path)))
     sess = ort.InferenceSession(path.read_bytes(), providers=["CPUExecutionProvider"])
     got = np.asarray(sess.run(None, {"input": query})[0]).ravel()
     on_bits = np.asarray(sess.run(None, {"input": (query > 0).astype(np.float32)})[0]).ravel()
 
-  assert np.allclose(got, np.asarray(gate.weight(query)).ravel(), atol=1e-6)
+  assert np.allclose(got, np.asarray(t.weight(query)).ravel(), atol=1e-6)
   assert np.allclose(got, on_bits, atol=1e-12), "the graph must threshold its own input"
 
 
@@ -130,7 +130,7 @@ def test_blocked_search_matches_the_unblocked_formulation():
   rng = np.random.default_rng(0)
   queries = (rng.random((300, 256)) < 0.05).astype(np.uint8)
   labelled = (rng.random((2500, 256)) < 0.05).astype(np.uint8)  # spans several blocks
-  prepared = prepare_gt_bits(labelled)
+  prepared = prepare_hard_bits(labelled)
   assert np.array_equal(tanimoto_nn(queries, prepared=prepared), _unblocked_reference(queries, prepared))
 
 
@@ -139,9 +139,11 @@ def test_degenerate_fingerprints_score_zero():
   rng = np.random.default_rng(1)
   labelled = (rng.random((50, 256)) < 0.05).astype(np.uint8)
   empty = np.zeros((3, 256), dtype=np.uint8)
-  assert np.array_equal(tanimoto_nn(empty, prepared=prepare_gt_bits(labelled)), np.zeros(3))
-  assert np.array_equal(tanimoto_nn(empty, prepared=prepare_gt_bits(empty)), np.zeros(3))
-  assert np.array_equal(tanimoto_nn(labelled[:4], prepared=prepare_gt_bits(np.zeros((0, 256)))), np.zeros(4))
+  assert np.array_equal(tanimoto_nn(empty, prepared=prepare_hard_bits(labelled)), np.zeros(3))
+  assert np.array_equal(tanimoto_nn(empty, prepared=prepare_hard_bits(empty)), np.zeros(3))
+  assert np.array_equal(
+    tanimoto_nn(labelled[:4], prepared=prepare_hard_bits(np.zeros((0, 256)))), np.zeros(4)
+  )
 
 
 # ── the ramp (similarity → blend weight) ─────────────────────────────────────
@@ -149,15 +151,15 @@ def test_degenerate_fingerprints_score_zero():
 
 def test_ramp_is_zero_below_the_lower_knee():
   """Far from the labelled chemistry the hard head must not speak at all."""
-  assert ramp([0.0, 0.1, SIM_LO - 1e-9]).tolist() == [0.0, 0.0, 0.0]
+  assert ramp([0.0, 0.1, T_LO - 1e-9]).tolist() == [0.0, 0.0, 0.0]
 
 
 def test_ramp_saturates_at_the_ceiling():
-  assert ramp([SIM_HI, 0.9, 1.0]).tolist() == [A_CEILING] * 3
+  assert ramp([T_HI, 0.9, 1.0]).tolist() == [A_CEILING] * 3
 
 
 def test_ramp_is_continuous_across_the_knees():
-  """The bucketed gate this replaced jumped 0.33 → 0.66 across sim_hi; nothing may jump now."""
+  """The bucketed t this replaced jumped 0.33 → 0.66 across sim_hi; nothing may jump now."""
   s = np.linspace(0.0, 1.0, 2001)
   a = ramp(s)
   assert np.all(np.diff(a) >= -1e-12), "the ramp must be non-decreasing"
@@ -165,7 +167,7 @@ def test_ramp_is_continuous_across_the_knees():
 
 
 def test_ramp_is_linear_between_the_knees():
-  mid = (SIM_LO + SIM_HI) / 2
+  mid = (T_LO + T_HI) / 2
   assert ramp([mid])[0] == pytest.approx(A_CEILING / 2)
 
 
@@ -179,7 +181,7 @@ def test_a_max_of_zero_disables_the_blend_everywhere():
 
 def test_a_barely_aligned_head_is_not_merged_at_all():
   """Under A_MIN there is no point mixing it in — a token weight risks more than it can add."""
-  from olinda.ground_truth import _blend_ceiling
+  from olinda.hard import _blend_ceiling
 
   assert _blend_ceiling(0.0) == 0.0
   assert _blend_ceiling(1e-4) == 0.0
@@ -189,7 +191,7 @@ def test_a_barely_aligned_head_is_not_merged_at_all():
 
 def test_a_negative_r2_disables_rather_than_inverts():
   """Worse than predicting the teacher's mean is a reason to switch off, not to run backwards."""
-  from olinda.ground_truth import _blend_ceiling
+  from olinda.hard import _blend_ceiling
 
   assert _blend_ceiling(-0.4) == 0.0
   assert _blend_ceiling(-99.0) == 0.0  # R² is unbounded below
@@ -198,7 +200,7 @@ def test_a_negative_r2_disables_rather_than_inverts():
 
 def test_the_ceiling_can_only_lower_trust():
   """R² caps A_CEILING; it never licenses more weight than the hard ceiling allows."""
-  from olinda.ground_truth import _blend_ceiling
+  from olinda.hard import _blend_ceiling
 
   assert _blend_ceiling(0.3) == pytest.approx(0.3)
   assert _blend_ceiling(0.99) == pytest.approx(A_CEILING)
@@ -207,7 +209,7 @@ def test_the_ceiling_can_only_lower_trust():
 
 def test_the_ceiling_is_monotone_in_alignment():
   """Better agreement must never buy less trust."""
-  from olinda.ground_truth import _blend_ceiling
+  from olinda.hard import _blend_ceiling
 
   values = [_blend_ceiling(r2) for r2 in np.linspace(-0.5, 1.0, 200)]
   assert all(b <= a for a, b in zip(values[1:], values[:-1]))

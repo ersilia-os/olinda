@@ -53,20 +53,20 @@ FIGURES = {
     "The score distribution for actives and inactives — the overlap is what AUROC summarises.",
   ),
   "soft_calibration": (
-    "Surrogate correction",
-    "The isotonic map the model applies to its own raw output, read from the graph.",
+    "S · surrogate correction",
+    "The isotonic map S applies to its own raw output, read from the graph.",
   ),
   "hard_calibration": (
-    "Hard-label correction",
-    "The isotonic map from the hard-label head onto the teacher's scale.",
+    "H → H_S correction",
+    "The isotonic map carrying H onto S's scale, read from the graph.",
   ),
   "score_distributions": (
     "Score distributions",
     "What the model predicts against what the teacher says, as distributions rather than pairs.",
   ),
-  "calibrated_vs_soft": (
-    "Hard-label head against the teacher",
-    "The calibrated hard-label head's output against the teacher, on these compounds.",
+  "h_s_vs_teacher": (
+    "H_S against the teacher",
+    "What the calibrated hard-label model says against the teacher, on these compounds.",
   ),
 }
 
@@ -356,7 +356,7 @@ def score_distributions(ax, st, y, p) -> None:
   )
 
 
-def calibrated_vs_soft(ax, st, y, g_soft, *, pearson: float) -> None:
+def h_s_vs_teacher(ax, st, y, h_s, *, pearson: float) -> None:
   """The calibrated hard-label head against the teacher, with the y=x line.
 
   ``learn-hard`` drew this over the reference library, where it measured how well the isotonic map
@@ -364,10 +364,10 @@ def calibrated_vs_soft(ax, st, y, g_soft, *, pearson: float) -> None:
   which makes it the more useful version: the map was fitted on the library, so the library was
   always the optimistic case.
   """
-  ys, gs = subsample([np.asarray(y, dtype=np.float64), np.asarray(g_soft, dtype=np.float64)], MAX_SCATTER, 0)
+  ys, gs = subsample([np.asarray(y, dtype=np.float64), np.asarray(h_s, dtype=np.float64)], MAX_SCATTER, 0)
   if len(ys) < 3:
     return False
   density(ax, st, ys, gs, role="hard")
   lo, hi = limits(ax, ys, gs)
   reference(ax, st, "diagonal", lo=lo, hi=hi)
-  st.label(ax, xlabel="Teacher value", ylabel="Calibrated hard-label head", title=f"r = {pearson:.3f}")
+  st.label(ax, xlabel="Teacher value", ylabel="H_S", title=f"r = {pearson:.3f}")

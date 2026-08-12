@@ -129,7 +129,7 @@ def _library_overlap(smiles) -> float | None:
 
 
 def _hard_head_warning(kind: str, artifact, n_rows: int) -> list[str]:
-  """Flag the easy mistake of scoring a ground-truth head on the labels it was trained on.
+  """Flag the easy mistake of scoring a hard-label head on the labels it was trained on.
 
   The artifact records how many compounds each hard head saw but not *which* — so identity cannot be
   proven from the ``.onnx`` alone. A matching row count is strong enough evidence to say so plainly;
@@ -146,20 +146,20 @@ def _hard_head_warning(kind: str, artifact, n_rows: int) -> list[str]:
       continue
     if trained_on == n_rows:
       notes.append(
-        f"{column['name']}: this model's ground-truth head was trained on {trained_on:,} compounds "
+        f"{column['name']}: this model's hard-label head was trained on {trained_on:,} compounds "
         f"and you passed exactly {n_rows:,} — if these are the same measurements, the ranking "
         "metrics are in-sample and will look far better than the model generalises."
       )
     else:
       notes.append(
-        f"{column['name']}: the ground-truth head was trained on {trained_on:,} compounds; any of "
+        f"{column['name']}: the hard-label head was trained on {trained_on:,} compounds; any of "
         "those present here are scored in-sample."
       )
   return notes
 
 
 def _hard_head_figures(artifact, task, channels, ok, y) -> list:
-  """The ground-truth-head figure for *task*, or nothing when the column has no hard head.
+  """The hard-label-head figure for *task*, or nothing when the column has no hard head.
 
   Returned as ``(name, draw)`` pairs so the caller's figure loop stays one list. A soft-only column,
   or an artifact fused before the channels were declared as graph outputs, simply contributes none.
@@ -167,7 +167,7 @@ def _hard_head_figures(artifact, task, channels, ok, y) -> list:
   from olinda.metrics import _pearsonr
   from olinda.report import plots
 
-  name = (artifact.channels_for(task) or {}).get("ground_truth_soft")
+  name = (artifact.channels_for(task) or {}).get("h_s")
   if name is None or name not in channels:
     return []
   g_soft = np.asarray(channels[name], dtype=np.float64)[ok]
@@ -176,8 +176,8 @@ def _hard_head_figures(artifact, task, channels, ok, y) -> list:
   r = _pearsonr(g_soft, y)
   return [
     (
-      "calibrated_vs_soft",
-      lambda ax, st, y=y, g=g_soft, r=r: plots.calibrated_vs_soft(ax, st, y, g, pearson=r),
+      "h_s_vs_teacher",
+      lambda ax, st, y=y, g=g_soft, r=r: plots.h_s_vs_teacher(ax, st, y, g, pearson=r),
     )
   ]
 
@@ -186,7 +186,7 @@ def _predict(artifact, smiles, echo=None) -> "tuple[dict[str, np.ndarray], dict[
   """``(prediction per task, every graph channel by output name)``.
 
   Runs the graph once and keeps everything it emits, rather than calling it again when a figure wants
-  the ground-truth head — scoring is the expensive part of validating a large file.
+  the hard-label head — scoring is the expensive part of validating a large file.
   """
   import warnings
 
@@ -221,7 +221,7 @@ def validate_model(
       diagnostics.
   hard_labels : str or Path, optional
       SMILES plus binary labels. Produces ROC, precision–recall and enrichment. Note this scores the
-      model's **blended** output, which is what ``predict`` emits, not the ground-truth head alone.
+      model's **blended** output, which is what ``predict`` emits, not the hard-label head alone.
   out_dir : str or Path
       Directory to write ``report.html``, ``metrics.json``, ``performance_table.csv``, ``png/`` and
       ``pdf/`` into.
@@ -350,8 +350,8 @@ def validate_model(
   for task, info in internals.items():
     # The column name is the section heading on the page, so it stays out of the title here.
     for stage, curve, label, xlabel, role in (
-      ("soft_calibration", info["soft_calibration"], "Surrogate", "Raw student output", "model"),
-      ("hard_calibration", info["hard_calibration"], "Ground truth", "G probability", "hard"),
+      ("soft_calibration", info["soft_calibration"], "S", "Raw student output", "model"),
+      ("hard_calibration", info["hard_calibration"], "H_S", "H probability", "hard"),
     ):
       fig = plots.render(
         lambda ax, st, c=curve, t=label, x=xlabel, r=role: plots.calibration_map(
