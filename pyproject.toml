@@ -1,9 +1,32 @@
 [project]
 name = "olinda"
 version = "1.0.0"
-description = "A model distillation library"
+description = "Distil a slow chemistry model into one fast, self-describing ONNX file"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "Ersilia Open Source Initiative", email = "hello@ersilia.io" }]
+keywords = [
+    "drug-discovery",
+    "machine-learning",
+    "model-distillation",
+    "cheminformatics",
+    "ersilia",
+    "open-science",
+    "global-health",
+    "onnx",
+]
+# No "License :: ..." classifier: PEP 639 replaced those with the `license` expression above, and
+# setuptools refuses a build that declares both.
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
 # Base install is INFERENCE ONLY: everything `olinda.OlindaArtifact` needs to run a distilled
 # model.onnx, and nothing else. Training pulls in an order of magnitude more — see [train].
 dependencies = [
@@ -12,6 +35,11 @@ dependencies = [
     "pandas==2.3.0",
     "rdkit==2025.9.4",
 ]
+
+[project.urls]
+Homepage = "https://ersilia.io"
+Repository = "https://github.com/ersilia-os/olinda"
+Issues = "https://github.com/ersilia-os/olinda/issues"
 
 [project.optional-dependencies]
 # Reading a model and reporting on it: `olinda validate`, and the figures training writes along the
