@@ -18,20 +18,10 @@ import xgboost as xgb
 from olinda.console import console, echo, live_status, spinner
 from olinda.train.xgb import detect_training_device
 
-# Rows read per H5 chunk when streaming into the QuantileDMatrix. Build-time I/O only — it does not
-# affect the trained model, just the memory/speed of constructing the matrix. 2^16 rows × 768 float32
-# ≈ 200 MB per batch: large enough for efficient sequential reads, small enough to stay bounded.
-_BUILD_BATCH_ROWS = 65536
-
-# Histogram resolution. Morgan COUNT fingerprints are small integers (mostly 0/1/2, clipped at 255), so a
-# feature has very few distinct values — 64 bins is already lossless for them and builds faster/leaner
-# than 128. Must match between the QuantileDMatrix (build_qdmatrix) and the training params.
-#
-# The canonical, backend-agnostic default hyperparameters live in ``olinda.train.backend.CANONICAL_DEFAULTS``;
-# ``XGBoostBackend.translate`` turns them into the native xgb params passed to ``train_regression`` here.
-# `tree_method="hist"` is correct for BOTH CPU and GPU on XGBoost ≥2.0 (GPU via `device="cuda"`, not the
-# deprecated `gpu_hist`).
-_DEFAULT_MAX_BIN = 64
+# The hyperparameters `train_regression` runs with are not chosen here: they live in canonical,
+# engine-agnostic names in ``olinda.train.backend.CANONICAL_DEFAULTS``, and ``XGBoostBackend.translate``
+# turns them into the native xgb params passed in below. `tree_method="hist"` is correct for BOTH CPU and
+# GPU on XGBoost ≥2.0 (GPU via `device="cuda"`, not the deprecated `gpu_hist`).
 
 
 def _val_stats(y: np.ndarray, p: np.ndarray) -> tuple[float, float, float]:

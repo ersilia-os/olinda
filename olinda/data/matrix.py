@@ -26,26 +26,46 @@ class ReferenceMatrix:
   Parameters
   ----------
   x : np.ndarray
-      The descriptor matrix, ``(n, dim)``, normally uint8 as stored in ``erl0_morgan.h5``.
+      The descriptor matrix, ``(n, dim)``, normally uint8 as stored in ``erl0_morgan.h5``. May be a
+      row *prefix* of the library rather than all of it — see :meth:`load`.
+  n_file_rows : int, optional
+      How many rows the source library actually has, when *x* is only a prefix of it. Defaults to
+      ``len(x)``, i.e. "this is the whole thing".
 
   Attributes
   ----------
   n_rows, n_cols : int
-      Shape of the underlying matrix.
+      Shape of the matrix held in RAM — what every consumer should size its work from.
+  n_file_rows : int
+      Rows in the library on disk. Only :meth:`assert_matches` cares: identity is a property of the
+      file, not of how much of it was read.
   """
 
-  def __init__(self, x: np.ndarray) -> None:
+  def __init__(self, x: np.ndarray, n_file_rows: int | None = None) -> None:
     self.x = x
     self.n_rows = int(x.shape[0])
     self.n_cols = int(x.shape[1])
+    self.n_file_rows = self.n_rows if n_file_rows is None else int(n_file_rows)
 
   @classmethod
-  def load(cls, descriptors_h5: str | Path, dataset: str = "data") -> ReferenceMatrix:
-    """Read the whole descriptor dataset into RAM in one sequential pass."""
+  def load(cls, descriptors_h5: str | Path, dataset: str = "data", limit: int | None = None):
+    """Read the descriptor dataset into RAM in one sequential pass.
+
+    Parameters
+    ----------
+    limit : int, optional
+      Read only the first *limit* rows. This is how ``--max-samples`` reaches every step that sweeps
+      the library: the split indices it produces are all ``< limit`` (the flag truncates the head —
+      see :func:`olinda.data.split.split_reference_to_indices`), so bounding the resident matrix
+      bounds the hard-label scoring, the calibration and T too, without any of
+      them needing to know a limit exists. ``None`` reads everything, which is what a real run does.
+    """
     import h5py
 
     with h5py.File(str(descriptors_h5), "r") as f:
-      return cls(f[dataset][:])
+      ds = f[dataset]
+      # ds[:None] is the whole dataset, so the unlimited path is exactly what it always was.
+      return cls(ds[:limit], n_file_rows=int(ds.shape[0]))
 
   def gather(self, idx: np.ndarray, dtype=np.float32, step: int = 8192) -> np.ndarray:
     """Return the rows at ``idx`` as a new array of ``dtype``.
@@ -69,11 +89,15 @@ class ReferenceMatrix:
     Splits are stored as positional row indices, so a library that has been regenerated or swapped
     since ``prepare`` pairs each row's features with a different molecule's label. Training would
     complete and the metrics would look plausible; the model would be meaningless.
+
+    Checked against the row count of the **file**, not of the resident matrix: reading a prefix is a
+    deliberate choice by the caller (``--max-samples``), while a file of the wrong length is a
+    changed library. Both would otherwise look identical here.
     """
     want_rows, want_dim = reference.get("n_rows"), reference.get("dim")
-    if want_rows is not None and self.n_rows != want_rows:
+    if want_rows is not None and self.n_file_rows != want_rows:
       raise ValueError(
-        f"reference library has {self.n_rows:,} rows but this run was prepared against "
+        f"reference library has {self.n_file_rows:,} rows but this run was prepared against "
         f"{want_rows:,} — the library changed. Re-run `olinda prepare`."
       )
     if want_dim is not None and self.n_cols != want_dim:

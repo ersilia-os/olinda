@@ -22,6 +22,10 @@ import numpy as np
 
 MODEL_NAME = "model.onnx"
 
+# The metadata layout this code understands. Kept here, next to the reader, rather than imported from
+# olinda.export: the export module belongs to the [train] extra and inference must not reach into it.
+BUNDLE_SCHEMA = "olinda.bundle.v1"
+
 
 class RDKitVersionMismatch(RuntimeError):
   """Raised when the installed RDKit differs from the build that produced ``model.onnx``."""
@@ -47,6 +51,28 @@ def _check_rdkit_version(meta: dict) -> None:
 
 
 _BATCH = 4096
+
+
+def _as_smiles_list(smiles) -> list[str]:
+  """Normalise user input to a list of SMILES strings, refusing the shapes that would mislead.
+
+  A bare ``"CCO"`` is the trap worth guarding: a string is a perfectly good sequence of characters, so
+  it would featurize as three one-atom molecules and return three rows without complaint. Being handed
+  one molecule instead of a list is a natural mistake, and a wrong answer is a far worse outcome than
+  an exception.
+  """
+  if isinstance(smiles, (str, bytes)):
+    raise TypeError(
+      f"expected a sequence of SMILES, got a single string {smiles!r:.40} — iterating it would score "
+      f"each character as a molecule. Pass a list: [{smiles!r:.40}]"
+    )
+    # (a set would scramble the row order against the caller's input, so it is not accepted either)
+  if isinstance(smiles, (dict, set, frozenset)):
+    raise TypeError(f"expected an ordered sequence of SMILES, got {type(smiles).__name__} — order matters")
+  try:
+    return [str(s) for s in smiles]
+  except TypeError as exc:
+    raise TypeError(f"expected a sequence of SMILES, got {type(smiles).__name__}") from exc
 
 
 class _Progress:
@@ -132,6 +158,16 @@ class OlindaArtifact:
         "self-describing bundles. Rebuild it with `olinda export`."
       )
     self.metadata = json.loads(raw)
+    schema = self.metadata.get("schema")
+    if schema != BUNDLE_SCHEMA:
+      # Checked rather than assumed. The bundle carried a version from the start but nothing read it,
+      # so a file written to any other layout would have been parsed as though it were this one and
+      # gone wrong field by field. Refusing is the only honest answer: the graph is fine, but this
+      # code cannot say what its metadata means.
+      raise ValueError(
+        f"{path} declares metadata schema {schema!r}, but this olinda reads {BUNDLE_SCHEMA!r}. "
+        "Rebuild it with `olinda export`, or install the olinda that wrote it."
+      )
     if check_rdkit:
       _check_rdkit_version(self.metadata)
 
@@ -143,16 +179,10 @@ class OlindaArtifact:
     self._input_name = self._session.get_inputs()[0].name
     self._output_names = [o.name for o in self._session.get_outputs()]
 
-    # A single-task model is just the one-column case, so normalise here and let everything
-    # downstream treat every artifact identically. The fallback covers bundles fused before
-    # columns were recorded, which named their blended output "prediction".
-    self._columns = self.metadata.get("columns") or [
-      {
-        "name": "prediction",
-        "output": "prediction",
-        "has_hard": bool(self.metadata.get("has_hard")),
-      }
-    ]
+    # A single-task model is just the one-column case, so nothing downstream distinguishes them.
+    self._columns = self.metadata.get("columns") or []
+    if not self._columns:
+      raise ValueError(f"{path} records no columns — rebuild it with `olinda export`.")
 
     # Fail here rather than with a bare KeyError deep inside run() if the embedded column list and
     # the graph disagree — which is what a hand-edited or mismatched artifact looks like.
@@ -188,10 +218,37 @@ class OlindaArtifact:
     """The RDKit build the featurizer must match."""
     return (self.metadata.get("featurizer") or {}).get("rdkit_version")
 
+  def _column(self, task: str) -> dict:
+    for c in self._columns:
+      if c["name"] == task:
+        return c
+    raise KeyError(f"{task!r} is not a task of this model; it predicts {self.columns}")
+
+  def heads_for(self, task: str) -> list[dict]:
+    """The models behind one task, in the order they were added — the surrogate first.
+
+    Each entry carries its own ``role``, ``task``, ``source``, ``training`` and ``metrics``, so asking
+    "is this head a classifier?" is a lookup rather than a guess from which metrics are present. A
+    soft-only column has one head; a blended one has two.
+    """
+    return [dict(h) for h in (self._column(task).get("heads") or [])]
+
+  def task_for(self, task: str) -> dict:
+    """``{"type", "range", "units"}`` for what one task predicts."""
+    return dict(self._column(task).get("task") or {})
+
+  def roles_for(self, task: str) -> list[str]:
+    """Just the head roles behind one task, e.g. ``["soft", "hard"]``."""
+    return [h.get("role") for h in (self._column(task).get("heads") or [])]
+
   @property
-  def has_ground_truth(self) -> bool:
-    """True if any task blends in a hard-label head, so predictions use measured data."""
-    return any(c.get("has_hard") for c in self._columns)
+  def has_hard(self) -> bool:
+    """True if any task blends in a hard-label head, so predictions use measured data.
+
+    Derived from the heads rather than stored: a boolean beside the list it summarises is a second
+    source of truth, and the two can disagree.
+    """
+    return any("hard" in self.roles_for(c["name"]) for c in self._columns)
 
   @property
   def n_features(self) -> int:
@@ -215,7 +272,7 @@ class OlindaArtifact:
       "rdkit_version": self.rdkit_version,
       "n_features": self.n_features,
       "columns": self.columns,
-      "has_ground_truth": self.has_ground_truth,
+      "has_hard": self.has_hard,
     }
 
   # ── inference ──────────────────────────────────────────────────────────────
@@ -225,23 +282,43 @@ class OlindaArtifact:
     # The featurizer already allocates float32, so this is a view rather than a copy.
     return np.asarray(self._featurizer.transform([str(s) for s in smiles]), dtype=np.float32)
 
-  def run_channels(self, smiles, batch_size: int = _BATCH, progress: bool | None = None) -> dict:
-    """Every named output of the graph, as a dict of 1-D arrays keyed by output name.
+  def run(self, smiles, batch_size: int = _BATCH, progress: bool | None = None):
+    """Predict for a list of SMILES. This is the only way to run the model.
 
-    Useful for inspecting the pieces behind a blended prediction (the surrogate, the calibrated
-    ground truth, and the applicability weight). Most callers want :meth:`run`.
+    Parameters
+    ----------
+    smiles : sequence of str
+        The molecules to score.
+    batch_size : int, optional
+        Rows per forward pass. Bounds memory on large inputs; does not change results.
+    progress : bool, optional
+        Show a progress bar on stderr. Defaults to showing one for multi-batch inputs on a terminal,
+        so redirected output and notebooks stay clean.
 
-    ``progress`` shows a bar on stderr; the default shows one only for inputs larger than a single
-    batch, and only when stderr is a terminal.
+    Returns
+    -------
+    pandas.DataFrame
+        A ``smiles`` column followed by **one column per task** — the prediction, which for a blended
+        column already folds in the hard-label model at the weight it earned. The graph declares
+        nothing else: the pieces behind that number are internal to it by design.
 
-    Molecules RDKit cannot parse yield ``NaN`` in every channel rather than a number. Their
-    fingerprint is all-zero, which the graph happily scores — and the applicability gate places an
-    empty fingerprint in its *most*-trusted bucket — so an unparseable input would otherwise come
-    back looking like a confident prediction.
+    Notes
+    -----
+    Molecules RDKit cannot parse come back as ``NaN``, and a single warning names how many. Their
+    fingerprint is all-zero, which the graph happily scores — the trees take every "bit absent" branch
+    and ``T``'s first layer sees nothing but its own bias — so without this an unparseable input would
+    return a confident-looking number.
     """
     import warnings
 
-    smiles = [str(s) for s in smiles]
+    import pandas as pd
+
+    smiles = _as_smiles_list(smiles)
+    batch_size = int(batch_size)
+    if batch_size < 1:
+      raise ValueError(f"batch_size must be at least 1, got {batch_size}")
+
+    wanted = [c["output"] for c in self._columns]
     chunks: list[dict] = []
     n_invalid = 0
     with _Progress(len(smiles), enabled=progress) as bar:
@@ -264,34 +341,11 @@ class OlindaArtifact:
         RuntimeWarning,
         stacklevel=2,
       )
-    if not chunks:
-      return {n: np.array([], dtype=np.float64) for n in self._output_names}
-    return {n: np.concatenate([c[n] for c in chunks]) for n in self._output_names}
-
-  def run(self, smiles, batch_size: int = _BATCH, progress: bool | None = None):
-    """Predict for a list of SMILES.
-
-    Parameters
-    ----------
-    smiles : sequence of str
-        The molecules to score.
-    batch_size : int, optional
-        Rows per forward pass. Bounds memory on large inputs; does not change results.
-    progress : bool, optional
-        Show a progress bar on stderr. Defaults to showing one for multi-batch inputs on a terminal.
-
-    Returns
-    -------
-    pandas.DataFrame
-        A ``smiles`` column followed by **one column per task** — the final blended prediction,
-        which already folds in the applicability weighting. The intermediate channels behind it
-        are available from :meth:`run_channels`.
-    """
-    import pandas as pd
-
-    smiles = [str(s) for s in smiles]
-    channels = self.run_channels(smiles, batch_size=batch_size, progress=progress)  # already str
-    values = {c["name"]: channels[c["output"]] for c in self._columns}
+    if chunks:
+      scored = {n: np.concatenate([c[n] for c in chunks]) for n in wanted}
+    else:
+      scored = {n: np.array([], dtype=np.float64) for n in wanted}
+    values = {c["name"]: scored[c["output"]] for c in self._columns}
     return pd.DataFrame({"smiles": smiles, **values})
 
   def __len__(self) -> int:

@@ -3,18 +3,20 @@
 Every olinda-owned transform downstream of the RDKit featurizer is ONNX-able, so a bundle collapses to ONE
 graph that runs on onnxruntime alone. Two shapes:
 
-- **soft-only**: ``fp → soft_model → [soft_correction] → prediction`` (= surrogate).
-- **hard present**: fuse ``soft_model → [soft_correction]`` (surrogate), ``hard_model → [G score] →
-  hard_correction`` (ground_truth_soft), ``applicability`` (weight ``a``) and ``blender``
-  (``(1-a)·soft + a·hard``). Outputs: ``prediction``, ``surrogate``, ``ground_truth``, ``ground_truth_soft``,
-  ``applicability``.
+- **soft-only**: ``fp → soft_model → [soft_correction] → prediction`` (= ``S``).
+- **hard present**: fuse ``S``, ``H → h_correction`` (``H_S``), ``T → ramp`` (the weight ``a``) and the
+  blender, ``(1-a)·S + a·H_S``.
+
+Either way a column declares **one output, its prediction**, named after the teacher column. ``S``,
+``H_S`` and ``a`` stay internal tensors: they are how the answer is computed, not part of the answer,
+and declaring them would let callers depend on a wiring that has already changed once.
 
 The **featurizer config + provenance travel inside ``model.onnx`` metadata** (``metadata_props["olinda"]``),
 so the file is self-describing — a consumer reads the Morgan config (and RDKit version) to build the 2048-count
 fingerprint in Python (no ONNX op for featurization) and runs the single graph.
 
 The hard head is task-aware: a **classifier** exposes ``probabilities`` (we take column 1); a **regressor**
-would expose ``variable`` directly (seam — only classifier is enabled today, see :func:`olinda.ground_truth`).
+would expose ``variable`` directly (seam — only classifier is enabled today, see :func:`olinda.hard`).
 """
 
 from __future__ import annotations
@@ -28,17 +30,20 @@ import numpy as np
 
 from olinda.console import STEP_COLORS, echo, path as cpath, rule, success, summary_panel
 from olinda.metrics import json_safe
-from olinda.ground_truth import (
-  APPLICABILITY_DIRNAME,
+from olinda.hard import (
+  TANIMOTO_DIRNAME,
   HARD_H5_NAME,
-  CALIBRATOR_NAME,
-  GT_DIRNAME,
-  GT_META_NAME,
-  GT_MODEL_SUBDIR,
+  H_TO_S_NAME,
+  HARD_DIRNAME,
+  HARD_EVAL_NAME,
+  HARD_META_NAME,
+  HARD_MODEL_SUBDIR,
   has_hard_head,
 )
 
 MODEL_NAME = "model.onnx"
+# One schema, versioned from here on. Nothing in the wild predates it, so there is no legacy shape to
+# read: OlindaArtifact refuses a bundle it does not recognise and says to re-run `olinda export`.
 BUNDLE_SCHEMA = "olinda.bundle.v1"
 PRODUCER_NAME = "olinda"
 _IR_VERSION = 10  # onnxruntime in this env caps the model IR version at 10
@@ -205,63 +210,72 @@ def isotonic_to_onnx(cal, out_path: Path, *, in_name: str = "input", out_name: s
   return {"knots": n_knots, "max_abs_diff": float(np.max(np.abs(got - cal.transform(raw))))}
 
 
-# ── applicability NB gate → ONNX ──────────────────────────────────────────────
+# ── T (Tanimoto regressor) + ramp → ONNX ──────────────────────────────────────
 
 
-def _applicability_model(clf, n_features: int, in_name: str, out_name: str):
+def _tanimoto_model(clf, n_features: int, in_name: str, out_name: str):
   """ONNX ``ModelProto``: fp(float32) → blend weight ``a`` (double).
 
-  The gate is a similarity regressor followed by a linear ramp, so the graph is the booster's own tree
-  ensemble plus five element-wise ops. The regressor's output is clipped to [0, 1] first — trees can
-  extrapolate past the target's range, and a similarity above 1 would otherwise push ``a`` past its
-  ceiling.
+  Three parts spliced into one graph: binarise the incoming count fingerprint, run the gate network,
+  ramp its output into a weight.
+
+  The binarisation is not optional. The net is trained and evaluated on ``bits > 0``
+  (:meth:`TanimotoRegressor.predict_tanimoto`), while the fused graph carries the shared *count*
+  fingerprint, so without it the graph would feed counts to a net that has only ever seen indicators
+  and quietly disagree with its own Python reference on any molecule with a repeated substructure.
+
+  The ramp clips to [0, 1] before scaling: a net can extrapolate past the target's range, and a
+  similarity above 1 would otherwise push ``a`` past its ceiling.
   """
   import onnx
   from onnx import TensorProto, helper
 
-  from olinda.train.backend import get_backend
+  net = onnx.load_from_string(clf.onnx_bytes)
 
-  with tempfile.TemporaryDirectory() as td:
-    path = Path(td) / "gate.onnx"
-    get_backend(clf.backend, "cpu").to_onnx(clf.model, path, n_features)
-    tree = onnx.load(str(path))
+  # Rewire the net's own input so the binarisation can sit in front of it.
+  inner = "t_bits"
+  _rename_input(net, inner)
+  del net.graph.input[:]
+  net.graph.input.append(helper.make_tensor_value_info(in_name, TensorProto.FLOAT, ["B", int(n_features)]))
 
-  # Splice the ramp onto the booster's own graph rather than composing two models: one output tensor,
-  # one place for the arithmetic, and no prefix juggling for a five-node tail.
-  tree_out = tree.graph.output[0].name
+  net_out = net.graph.output[0].name
   span = max(float(clf.sim_hi) - float(clf.sim_lo), 1e-9)
   ct = helper.make_tensor
-  tree.graph.initializer.extend([
-    ct("ap_zero", TensorProto.DOUBLE, [1], [0.0]),
-    ct("ap_one", TensorProto.DOUBLE, [1], [1.0]),
-    ct("ap_lo", TensorProto.DOUBLE, [1], [float(clf.sim_lo)]),
-    ct("ap_span", TensorProto.DOUBLE, [1], [span]),
-    ct("ap_max", TensorProto.DOUBLE, [1], [float(clf.a_max)]),
+  net.graph.initializer.extend([
+    ct("t_thr", TensorProto.FLOAT, [1], [0.0]),
+    ct("t_zero", TensorProto.DOUBLE, [1], [0.0]),
+    ct("t_one", TensorProto.DOUBLE, [1], [1.0]),
+    ct("t_lo", TensorProto.DOUBLE, [1], [float(clf.sim_lo)]),
+    ct("t_span", TensorProto.DOUBLE, [1], [span]),
+    ct("t_max", TensorProto.DOUBLE, [1], [float(clf.a_max)]),
+    ct("t_flat", TensorProto.INT64, [1], [-1]),
   ])
-  tree.graph.node.extend([
-    helper.make_node("Cast", [tree_out], ["ap_simd"], to=TensorProto.DOUBLE),
-    helper.make_node("Reshape", ["ap_simd", "ap_flat"], ["ap_sim1"]),
-    helper.make_node("Clip", ["ap_sim1", "ap_zero", "ap_one"], ["ap_sim"]),
-    helper.make_node("Sub", ["ap_sim", "ap_lo"], ["ap_shift"]),
-    helper.make_node("Div", ["ap_shift", "ap_span"], ["ap_frac0"]),
-    helper.make_node("Clip", ["ap_frac0", "ap_zero", "ap_one"], ["ap_frac"]),
-    helper.make_node("Mul", ["ap_frac", "ap_max"], [out_name]),
-  ])
-  tree.graph.initializer.append(ct("ap_flat", TensorProto.INT64, [1], [-1]))
-  del tree.graph.output[:]
-  tree.graph.output.append(helper.make_tensor_value_info(out_name, TensorProto.DOUBLE, ["B"]))
-  if tree.graph.input[0].name != in_name:
-    _rename_input(tree, in_name)
-  # Raise ONLY the default domain: the converter emits it at 8, and Clip takes its bounds as inputs
-  # from 11 onward. ai.onnx.ml carries TreeEnsembleRegressor and tops out far below _OPSET — setting
-  # that one to 16 is what makes onnxruntime reject the node as deprecated.
-  default = next((o for o in tree.opset_import if o.domain in ("", "ai.onnx")), None)
-  if default is None:
-    default = tree.opset_import.add()
-    default.domain = ""
-  default.version = _OPSET
-  tree.ir_version = _IR_VERSION
-  return tree
+  head = [
+    helper.make_node("Greater", [in_name, "t_thr"], ["t_on"]),
+    helper.make_node("Cast", ["t_on"], [inner], to=TensorProto.FLOAT),
+  ]
+  tail = [
+    helper.make_node("Cast", [net_out], ["t_simd"], to=TensorProto.DOUBLE),
+    helper.make_node("Reshape", ["t_simd", "t_flat"], ["t_sim1"]),
+    helper.make_node("Clip", ["t_sim1", "t_zero", "t_one"], ["t_sim"]),
+    helper.make_node("Sub", ["t_sim", "t_lo"], ["t_shift"]),
+    helper.make_node("Div", ["t_shift", "t_span"], ["t_frac0"]),
+    helper.make_node("Clip", ["t_frac0", "t_zero", "t_one"], ["t_frac"]),
+    helper.make_node("Mul", ["t_frac", "t_max"], [out_name]),
+  ]
+  existing = list(net.graph.node)
+  del net.graph.node[:]
+  net.graph.node.extend(head + existing + tail)
+
+  del net.graph.output[:]
+  net.graph.output.append(helper.make_tensor_value_info(out_name, TensorProto.DOUBLE, ["B"]))
+  # The gate pins its own opset when it serialises itself; re-stamp it to the bundle's. Every op used
+  # here (MatMul, Relu, Add, Cast, Reshape, Clip, Greater) exists at _OPSET, and unlike the boosted
+  # stages there is no ai.onnx.ml domain to preserve, so replacing the whole list is safe.
+  del net.opset_import[:]
+  net.opset_import.append(helper.make_opsetid("", _OPSET))
+  net.ir_version = _IR_VERSION
+  return net
 
 
 def _rename_input(model, new_name: str) -> None:
@@ -272,19 +286,22 @@ def _rename_input(model, new_name: str) -> None:
     node.input[:] = [new_name if i == old else i for i in node.input]
 
 
-def applicability_to_onnx(clf, n_features: int, out_path: Path, *, in_name: str = "input") -> dict:
-  """Save a standalone applicability ONNX and self-check vs ``clf.weight``; return ``{max_abs_diff}``."""
+def tanimoto_to_onnx(clf, n_features: int, out_path: Path, *, in_name: str = "input") -> dict:
+  """Save ``T`` + its ramp as a standalone ONNX and self-check vs ``clf.weight``; return ``{max_abs_diff}``."""
   import onnxruntime as ort
 
-  _save(_applicability_model(clf, n_features, in_name, "applicability"), out_path)
+  _save(_tanimoto_model(clf, n_features, in_name, "a"), out_path)
   rng = np.random.default_rng(0)
-  fp = (rng.random((64, n_features)) < 0.1).astype(np.float32)
+  # Morgan *counts*, not bits: a 0/1 probe cannot tell "the graph binarises" from "the graph forgot
+  # to", because the two agree exactly on such input. Real fingerprints reach well past 1.
+  fp = (rng.random((64, n_features)) < 0.1) * rng.integers(1, 5, (64, n_features))
+  fp = fp.astype(np.float32)
   sess = ort.InferenceSession(out_path.read_bytes(), providers=["CPUExecutionProvider"])
   got = sess.run(None, {in_name: fp})[0]
-  return {"max_abs_diff": float(np.max(np.abs(got - clf.weight(fp > 0))))}
+  return {"max_abs_diff": float(np.max(np.abs(got - clf.weight(fp))))}
 
 
-# ── small structural graphs (blender, prob→G) ─────────────────────────────────
+# ── small structural graphs (blender, prob→H) ─────────────────────────────────
 
 
 def _blender_model():
@@ -338,11 +355,94 @@ def _soft_model_proto(sm, x_dim: int):
 # ── fusion ────────────────────────────────────────────────────────────────────
 
 
-def _bundle_metadata(manifest: dict, plan: list, featurizer: dict, featurizer_class: str, outputs) -> dict:
+def _task(kind: str, value_range=None) -> dict:
+  """One task descriptor: what a head or a column predicts, and over what range.
+
+  Every predicting thing in the bundle carries one of these, so nothing has to be inferred from which
+  metric keys happen to be present. ``kind`` is ``"regression"`` or ``"classification"``; ``range`` is
+  the observed span of the values, or ``None`` when it was not measured. ``units`` is reserved and
+  always ``None`` today — olinda never learns what a teacher's numbers mean.
+  """
+  return {
+    "type": "classification" if kind in ("binary", "classification") else "regression",
+    "range": list(value_range) if value_range else None,
+    "units": None,
+  }
+
+
+def _soft_head(entry: dict) -> dict:
+  """The surrogate's entry in a column's ``heads`` list."""
+  training = entry.get("training") or {}
+  return {
+    "role": "soft",
+    # The surrogate is fitted with squared error against the teacher's values (see
+    # CANONICAL_DEFAULTS), so it regresses whatever scale the teacher emits — including a
+    # probability. A future classification surrogate declares itself here and nowhere else.
+    "task": _task("regression", training.get("value_range")),
+    "source": {"kind": "teacher", "column": entry["name"]},
+    "training": {
+      "n": training.get("n_finite"),
+      "n_train": training.get("n_train"),
+      "n_val": training.get("n_val"),
+    },
+    "metrics": entry.get("metrics"),
+  }
+
+
+def _hard_head(entry: dict) -> dict:
+  """The hard-label head's entry in a column's ``heads`` list, read back off the run.
+
+  Its metrics are the alignment numbers, not classification scores: what decides whether this head is
+  trusted is how well its *calibrated* output reproduces the teacher's scale, and that is what
+  ``a_max`` is derived from.
+  """
+  meta_path = entry["dir"] / HARD_DIRNAME / HARD_META_NAME
+  meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+  eval_path = entry["dir"] / HARD_DIRNAME / HARD_EVAL_NAME
+  evaluation = json.loads(eval_path.read_text()) if eval_path.exists() else {}
+  prepared = entry.get("hard_meta") or {}
+  gate = meta.get("tanimoto") or {}
+  calibration = evaluation.get("calibration") or {}
+
+  return {
+    "role": "hard",
+    # Taken from what the run resolved, not hardcoded: the labels decide, and a regression head is
+    # the case this field exists for.
+    "task": _task(prepared.get("task") or meta.get("task") or "binary"),
+    "source": {"kind": "measured", "column": prepared.get("source_column")},
+    "training": {"n": meta.get("n"), "n_positive": prepared.get("n_positive")},
+    "metrics": {
+      "r2_calibrated_soft": calibration.get("r2_calibrated_soft"),
+      "pearson_calibrated_soft": calibration.get("pearson_calibrated_soft"),
+      "spearman_h_soft": calibration.get("spearman_g_soft"),
+    },
+    "calibration": {"direction": calibration.get("direction")},
+    # The gate is a model in the graph like any other, so record what it is and the knees it ramps
+    # between. a_max of 0 means this head earned no weight and the column ships soft-only.
+    "gate": {
+      "signal": gate.get("signal"),
+      "a_max": gate.get("a_max"),
+      "t_lo": gate.get("sim_lo"),
+      "t_hi": gate.get("sim_hi"),
+    },
+    "provenance": {"lazyqsar_version": meta.get("lazyqsar_version")},
+  }
+
+
+def _bundle_metadata(manifest: dict, plan: list, featurizer: dict, featurizer_class: str) -> dict:
   """Everything a consumer needs, embedded in ``model.onnx`` so the file is the only input required.
 
   Carries the featurizer (and the RDKit build it must run under), when the model was trained, the
   reference library it was distilled from, and one entry per column describing that task.
+
+  The shape is N-ary throughout: ``columns`` is a list, and a one-endpoint model is simply its
+  one-element case. Within a column, every model that contributes is an entry in ``heads``, each
+  carrying its own ``task`` — so a classification surrogate, or a regression hard head, needs a
+  different ``type`` and no new keys. How the heads combine is *not* described here: the graph is the
+  only statement of that, and its single output per column is the only thing a consumer reads.
+
+  Nothing derivable is stored. ``n_columns``, the flat output list and "does this have a hard head"
+  are all properties of ``columns``, and duplicating them here is how they come to disagree with it.
   """
   import importlib.metadata
 
@@ -357,26 +457,20 @@ def _bundle_metadata(manifest: dict, plan: list, featurizer: dict, featurizer_cl
 
   columns = []
   for entry in plan:
-    col = {
-      "name": entry["name"],
-      "id": entry["id"],
-      "output": entry["output"],
-      "has_hard": bool(entry["has_hard"]),
-      "metrics": entry.get("metrics"),
-      "training": entry.get("training"),
-    }
+    heads = [_soft_head(entry)]
     if entry["has_hard"]:
-      gtm_path = entry["dir"] / GT_DIRNAME / GT_META_NAME
-      gtm = json.loads(gtm_path.read_text()) if gtm_path.exists() else {}
-      task = gtm.get("task", "binary")
-      col["hard"] = {
-        "source_column": (entry.get("hard_meta") or {}).get("source_column"),
-        "n_train": gtm.get("n"),
-        "task": "regression" if task == "regression" else "classification",
-        "lazyqsar_version": gtm.get("lazyqsar_version"),
-      }
-    columns.append(col)
+      heads.append(_hard_head(entry))
+    columns.append({
+      "id": entry["id"],
+      "name": entry["name"],
+      "output": entry["output"],
+      # What the column itself emits. The blend maps the hard head onto the teacher's scale before
+      # mixing, so the column's task is the soft head's task whatever else contributes.
+      "task": heads[0]["task"],
+      "heads": heads,
+    })
 
+  split = manifest.get("split") or {}
   return {
     "schema": BUNDLE_SCHEMA,
     "producer": "olinda",
@@ -389,13 +483,12 @@ def _bundle_metadata(manifest: dict, plan: list, featurizer: dict, featurizer_cl
       "url": MORGAN_FINGERPRINTS_URL,
       **{k: v for k, v in (manifest.get("reference_library") or {}).items() if k in ("n_rows", "dim")},
     },
-    "n_columns": len(columns),
+    "run": {
+      "backend": _run_backend(plan, manifest),
+      "created": manifest.get("created"),
+      **{k: split.get(k) for k in ("val_frac", "seed", "limit")},
+    },
     "columns": columns,
-    "outputs": list(outputs),
-    "has_hard": any(c["has_hard"] for c in columns),
-    "backend": _run_backend(plan, manifest),
-    "split": manifest.get("split"),
-    "created": manifest.get("created"),
   }
 
 
@@ -442,11 +535,11 @@ def _toposort(nodes: list, available: set) -> list:
 def _parity_probe(plan: list) -> np.ndarray:
   """Fingerprints to check the fused graph against the Python pipeline.
 
-  A handful of fixed molecules is not enough on its own: the applicability gate may score them all
+  A handful of fixed molecules is not enough on its own: ``T`` may score them all
   zero, in which case the blend collapses to the surrogate and the hard model, its calibrator and the
-  gate are compared against nothing — a cross-wired column would pass. Each hard column's own
-  labelled compounds are guaranteed to sit in the gate's HIGH bucket, so a few of them are appended
-  to force the whole blend to be exercised.
+  gate are compared against nothing — a cross-wired column would pass. A hard column's own labelled
+  compounds are at Tanimoto 1.0 from the labelled set, which is the top of the gate's ramp, so a few
+  of them are appended to force the whole blend to be exercised.
   """
   import h5py
 
@@ -536,7 +629,7 @@ def _fuse(model_dir: Path):
   from onnx import TensorProto, helper
   from onnx.compose import add_prefix
 
-  from olinda.applicability import SimilarityRegressor
+  from olinda.tanimoto import TanimotoRegressor
   from olinda.calibrate import IsotonicCalibrator
   from olinda.featurizer import featurizer_from_meta
   from olinda.models.bundle import StudentModel
@@ -586,45 +679,47 @@ def _fuse(model_dir: Path):
       surrogate_src = f"{p}sc__out"
     else:
       surrogate_src = soft_raw
-    nodes.append(cast_d(surrogate_src, f"{p}surrogate"))
+    nodes.append(cast_d(surrogate_src, f"{p}s"))
 
     if entry["has_hard"]:
-      gt_root = entry["dir"] / GT_DIRNAME
-      with open(gt_root / GT_META_NAME) as fp:
+      hard_root = entry["dir"] / HARD_DIRNAME
+      with open(hard_root / HARD_META_NAME) as fp:
         hard_task = json.load(fp).get("task", "binary")
 
-      collect(onnx.load(str(gt_root / GT_MODEL_SUBDIR / "xgboost.onnx")), f"{p}hm")
+      collect(onnx.load(str(hard_root / HARD_MODEL_SUBDIR / "xgboost.onnx")), f"{p}hm")
       nodes.append(ident("input", f"{p}hm__float_input"))
-      if hard_task == "regression":  # seam: a G regressor exposes a single "variable" output
+      if hard_task == "regression":  # seam: an H regressor exposes a single "variable" output
         nodes.append(flat(f"{p}hm__variable", f"{p}g_reg"))
         g_src = f"{p}g_reg"
       else:  # classifier: take probabilities[:, 1]
         collect(_prob1_model("p", "g"), f"{p}pr")
         nodes.append(ident(f"{p}hm__probabilities", f"{p}pr__p"))
         g_src = f"{p}pr__g"
-      nodes.append(cast_d(g_src, f"{p}ground_truth"))
 
-      gcal = IsotonicCalibrator.load(gt_root / CALIBRATOR_NAME)
+      gcal = IsotonicCalibrator.load(hard_root / H_TO_S_NAME)
       collect(_isotonic_model(gcal, "in", "out"), f"{p}hc")
       nodes.append(ident(g_src, f"{p}hc__in"))
-      nodes.append(ident(f"{p}hc__out", f"{p}ground_truth_soft"))
+      nodes.append(ident(f"{p}hc__out", f"{p}h_s"))
 
-      clf = SimilarityRegressor.load(gt_root / APPLICABILITY_DIRNAME)
-      collect(_applicability_model(clf, n_features, "input", "applicability"), f"{p}ap")
-      nodes.append(ident("input", f"{p}ap__input"))
-      nodes.append(ident(f"{p}ap__applicability", f"{p}applicability"))
+      clf = TanimotoRegressor.load(hard_root / TANIMOTO_DIRNAME)
+      collect(_tanimoto_model(clf, n_features, "input", "a"), f"{p}t")
+      nodes.append(ident("input", f"{p}t__input"))
+      nodes.append(ident(f"{p}t__a", f"{p}a"))
 
       collect(_blender_model(), f"{p}bl")
-      nodes.append(ident(f"{p}surrogate", f"{p}bl__soft"))
-      nodes.append(ident(f"{p}ground_truth_soft", f"{p}bl__hard"))
-      nodes.append(ident(f"{p}applicability", f"{p}bl__a"))
+      nodes.append(ident(f"{p}s", f"{p}bl__soft"))
+      nodes.append(ident(f"{p}h_s", f"{p}bl__hard"))
+      nodes.append(ident(f"{p}a", f"{p}bl__a"))
       nodes.append(ident(f"{p}bl__prediction", f"{p}prediction"))
     else:
-      nodes.append(ident(f"{p}surrogate", f"{p}prediction"))
+      nodes.append(ident(f"{p}s", f"{p}prediction"))
 
     nodes.append(ident(f"{p}prediction", entry["output"]))
     outputs.append(entry["output"])
 
+  # One output per column and nothing else. ``S``, ``H_S`` and ``a`` remain as internal tensors — the
+  # blender consumes them — but they are working, not product: declaring them would invite callers to
+  # depend on a wiring we need to stay free to change.
   out_vi = [helper.make_tensor_value_info(n, TensorProto.DOUBLE, ["B"]) for n in outputs]
   graph = helper.make_graph(
     _toposort(nodes, {"input"} | {i.name for i in inits}),
@@ -634,7 +729,7 @@ def _fuse(model_dir: Path):
     initializer=inits,
   )
   model = helper.make_model(graph, opset_imports=[helper.make_opsetid(d, v) for d, v in opset.items()])
-  md = _bundle_metadata(manifest, plan, featurizer, featurizer_class, outputs)
+  md = _bundle_metadata(manifest, plan, featurizer, featurizer_class)
 
   # Standard ONNX provenance, so the file identifies itself to any tool (Netron, hub tooling, the
   # onnx CLI) without them having to know about the custom metadata key below.
@@ -686,21 +781,21 @@ def build_bundle(model_dir: str | Path) -> dict:
 
     from lazyqsar.base.xgboost import BaseXGBArtifact
 
-    from olinda.applicability import SimilarityRegressor
+    from olinda.tanimoto import TanimotoRegressor
     from olinda.calibrate import IsotonicCalibrator
 
-    gt_root = entry["dir"] / GT_DIRNAME
-    g = np.asarray(BaseXGBArtifact.load(str(gt_root / GT_MODEL_SUBDIR)).run(fp))[:, 1].astype(np.float64)
-    gsoft = np.asarray(IsotonicCalibrator.load(gt_root / CALIBRATOR_NAME).transform(g)).ravel()
-    gate = SimilarityRegressor.load(gt_root / APPLICABILITY_DIRNAME)
-    a = np.asarray(gate.weight(fp > 0)).ravel()
+    hard_root = entry["dir"] / HARD_DIRNAME
+    g = np.asarray(BaseXGBArtifact.load(str(hard_root / HARD_MODEL_SUBDIR)).run(fp))[:, 1].astype(np.float64)
+    gsoft = np.asarray(IsotonicCalibrator.load(hard_root / H_TO_S_NAME).transform(g)).ravel()
+    gate = TanimotoRegressor.load(hard_root / TANIMOTO_DIRNAME)
+    a = np.asarray(gate.weight(fp)).ravel()
     # a == 0 everywhere has two very different causes. If the ceiling itself is zero the hard head did
     # not earn any weight, the blend is off by design, and the fused output simply *is* the surrogate —
     # there is nothing left to cross-check. If the ceiling is positive and the gate still never fires,
     # the gate is broken and the hard branch would ship unverified.
     if gate.a_max > 0 and not (a > 0).any():
       raise RuntimeError(
-        f"parity probe for column {entry['name']!r} scored zero applicability on every molecule, so "
+        f"parity probe for column {entry['name']!r} scored zero blend weight on every molecule, so "
         "the blend collapses to the surrogate and the hard head would go unchecked. This should not "
         "happen — the probe includes that column's own labelled compounds."
       )

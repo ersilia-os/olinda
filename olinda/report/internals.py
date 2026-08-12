@@ -5,7 +5,7 @@ interpolates between — so the calibration curves a run learned are recoverable
 alone, with no run directory and no training data. Same for the tree counts.
 
 Names follow the per-column prefixes ``_fuse`` assigns (:mod:`olinda.export`): ``c0_sc__xk`` is the
-surrogate correction for column ``c0``, ``c0_hc__xk`` the ground-truth head's map onto the teacher's
+surrogate correction for column ``c0``, ``c0_hc__xk`` the hard-label head's map onto the teacher's
 scale.
 """
 
@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 SOFT_STAGE = "sc"  # surrogate correction: raw student output → teacher scale
-HARD_STAGE = "hc"  # ground truth: G's probability → teacher scale
+HARD_STAGE = "hc"  # H → S: the hard model's probability onto the surrogate's scale
 
 
 def _initializers(graph) -> dict:
@@ -69,7 +69,7 @@ def describe_graph(model_onnx: str | Path) -> dict:
       ``{column_name: {"id", "soft_calibration", "hard_calibration", "n_trees", "n_nodes"}}``. Each
       calibration is ``{"x", "y", "sign", "n_anchors"}`` or ``None`` when that stage is absent — a
       column with too small a validation split has no surrogate correction, and a soft-only column
-      has no ground-truth map.
+      has no hard-label map.
   """
   import json
 

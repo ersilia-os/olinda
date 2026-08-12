@@ -70,11 +70,19 @@ def _match_columns(value_cols, tasks) -> tuple[dict, list]:
   return matched, ignored
 
 
-def _read_labels(path, artifact_columns) -> tuple[list[str], dict, list]:
-  """Read a SMILES + values file and map its value columns onto the model's task names."""
+def _read_labels(
+  path, artifact_columns, *, smiles_column=None, label_columns=None
+) -> tuple[list[str], dict, list]:
+  """Read a SMILES + values file and map its value columns onto the model's task names.
+
+  Column layout follows the same convention as `prepare`: a ``smiles``/``input`` column (Ersilia
+  writes the latter), with everything after it treated as values, so a leading ``key`` is dropped
+  rather than offered up as a label column. *smiles_column* and *label_columns* name the columns
+  outright, for files that don't follow it.
+  """
   import pandas as pd
 
-  from olinda.predict import read_smiles
+  from olinda.data.reference import resolve_smiles_frame
 
   path = Path(path)
   suffix = path.suffix.lower()
@@ -82,19 +90,20 @@ def _read_labels(path, artifact_columns) -> tuple[list[str], dict, list]:
     frame = pd.read_parquet(str(path))
   else:
     frame = pd.read_csv(str(path), sep="\t" if suffix == ".tsv" else ",")
-  read_smiles(path)  # reuse its validation of the smiles column, and its error message
 
-  value_cols = [c for c in frame.columns if c != "smiles"]
-  if not value_cols:
-    raise ValueError(f"{path} has a smiles column but no values to compare against")
+  try:
+    smiles_arr, values = resolve_smiles_frame(frame, smiles_column=smiles_column, label_columns=label_columns)
+  except ValueError as exc:
+    raise ValueError(f"{path}: {exc}") from exc
+
+  value_cols = list(values.columns)
   matched, ignored = _match_columns(value_cols, artifact_columns)
   if not matched:
     raise ValueError(
       f"none of {value_cols} match this model's tasks {list(artifact_columns)} — "
       "columns are matched by name, allowing a suffix"
     )
-  smiles = frame["smiles"].astype(str).tolist()
-  return smiles, {task: frame[src].to_numpy() for task, src in matched.items()}, ignored
+  return smiles_arr.tolist(), {task: values[src].to_numpy() for task, src in matched.items()}, ignored
 
 
 def _library_overlap(smiles) -> float | None:
@@ -102,6 +111,11 @@ def _library_overlap(smiles) -> float | None:
 
   Validating on the library the model was distilled from is a legitimate question ("how well did it
   fit?") but not a measure of generalisation, so the report says which one you asked.
+
+  Every failure to answer is "no answer", including a missing h5py. That one is not hypothetical:
+  h5py belongs to the [train] extra, so on a machine with only [report] installed — the tier whose
+  entire purpose is scoring a model someone handed you — an unguarded import takes down the whole
+  report over an optional note, but only when the library happens to be downloaded.
   """
   from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
 
@@ -113,14 +127,14 @@ def _library_overlap(smiles) -> float | None:
 
     with h5py.File(path, "r") as f:
       raw = f["input"][:]
-  except (OSError, KeyError):
+  except (ImportError, OSError, KeyError):
     return None
   library = {s.decode() if isinstance(s, bytes) else str(s) for s in raw}
   return float(np.mean([s in library for s in smiles])) if smiles else 0.0
 
 
 def _hard_head_warning(kind: str, artifact, n_rows: int) -> list[str]:
-  """Flag the easy mistake of scoring a ground-truth head on the labels it was trained on.
+  """Flag the easy mistake of scoring a hard-label head on the labels it was trained on.
 
   The artifact records how many compounds each hard head saw but not *which* — so identity cannot be
   proven from the ``.onnx`` alone. A matching row count is strong enough evidence to say so plainly;
@@ -132,24 +146,26 @@ def _hard_head_warning(kind: str, artifact, n_rows: int) -> list[str]:
     return []
   notes = []
   for column in artifact.metadata.get("columns", []):
-    trained_on = (column.get("hard") or {}).get("n_train")
+    hard = next((h for h in (column.get("heads") or []) if h.get("role") == "hard"), None)
+    trained_on = (hard or {}).get("training", {}).get("n")
     if not trained_on:
       continue
     if trained_on == n_rows:
       notes.append(
-        f"{column['name']}: this model's ground-truth head was trained on {trained_on:,} compounds "
+        f"{column['name']}: this model's hard-label head was trained on {trained_on:,} compounds "
         f"and you passed exactly {n_rows:,} — if these are the same measurements, the ranking "
         "metrics are in-sample and will look far better than the model generalises."
       )
     else:
       notes.append(
-        f"{column['name']}: the ground-truth head was trained on {trained_on:,} compounds; any of "
+        f"{column['name']}: the hard-label head was trained on {trained_on:,} compounds; any of "
         "those present here are scored in-sample."
       )
   return notes
 
 
 def _predict(artifact, smiles, echo=None) -> "dict[str, np.ndarray]":
+  """The model's prediction per task, which is everything the artifact exposes."""
   import warnings
 
   with warnings.catch_warnings():
@@ -166,6 +182,10 @@ def validate_model(
   soft_labels: str | Path | None = None,
   hard_labels: str | Path | None = None,
   out_dir: str | Path = "report",
+  soft_smiles_column: str | None = None,
+  soft_label_columns=None,
+  hard_smiles_column: str | None = None,
+  hard_label_columns=None,
 ) -> dict:
   """Score an artifact against labelled data and write a report directory.
 
@@ -178,10 +198,15 @@ def validate_model(
       diagnostics.
   hard_labels : str or Path, optional
       SMILES plus binary labels. Produces ROC, precision–recall and enrichment. Note this scores the
-      model's **blended** output, which is what ``predict`` emits, not the ground-truth head alone.
+      model's **blended** output, which is what ``predict`` emits, not the hard-label head alone.
   out_dir : str or Path
       Directory to write ``report.html``, ``metrics.json``, ``performance_table.csv``, ``png/`` and
       ``pdf/`` into.
+  soft_smiles_column, hard_smiles_column : str, optional
+      Name the SMILES column of the corresponding file instead of auto-detecting it.
+  soft_label_columns, hard_label_columns : sequence of str, optional
+      Score only these value columns of the corresponding file, instead of every column that
+      matches one of the model's tasks.
 
   Returns
   -------
@@ -205,15 +230,22 @@ def validate_model(
 
   report: dict = {
     "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    "model": {**artifact.describe(), "backend": artifact.metadata.get("backend")},
+    "model": {**artifact.describe(), "backend": (artifact.metadata.get("run") or {}).get("backend")},
     "notes": [],
     "figures": {"soft": [], "hard": [], "internals": []},
   }
 
+  columns_for = {
+    "soft": (soft_smiles_column, soft_label_columns),
+    "hard": (hard_smiles_column, hard_label_columns),
+  }
   for kind, source in (("soft", soft_labels), ("hard", hard_labels)):
     if source is None:
       continue
-    smiles, values, ignored = _read_labels(source, artifact.columns)
+    smiles_col, label_cols = columns_for[kind]
+    smiles, values, ignored = _read_labels(
+      source, artifact.columns, smiles_column=smiles_col, label_columns=label_cols
+    )
     echo(f"{kind} labels · [bold]{len(smiles):,}[/] compounds · {', '.join(values)}", "run")
     if ignored:
       report["notes"].append(
@@ -244,18 +276,18 @@ def validate_model(
       if kind == "soft":
         m = regression_metrics(y, p)
         entry["metrics"][task] = m
-        for name, draw, square in (
+        for name, draw in (
           (
             "correlation",
             lambda ax, st, y=y, p=p, m=m, t=task: plots.correlation(ax, st, y, p, metrics=m, task=t),
-            True,
           ),
-          ("residuals", lambda ax, st, y=y, p=p: plots.residual_hist(ax, st, y, p), False),
-          ("residual_structure", lambda ax, st, y=y, p=p: plots.residuals_vs_pred(ax, st, y, p), True),
-          ("calibration", lambda ax, st, y=y, p=p: plots.calibration_bins(ax, st, y, p), True),
-          ("residual_qq", lambda ax, st, y=y, p=p: plots.qq_residuals(ax, st, y, p), True),
+          ("residuals", lambda ax, st, y=y, p=p: plots.residual_hist(ax, st, y, p)),
+          ("residual_structure", lambda ax, st, y=y, p=p: plots.residuals_vs_pred(ax, st, y, p)),
+          ("calibration", lambda ax, st, y=y, p=p: plots.calibration_bins(ax, st, y, p)),
+          ("residual_qq", lambda ax, st, y=y, p=p: plots.qq_residuals(ax, st, y, p)),
+          ("score_distributions", lambda ax, st, y=y, p=p: plots.score_distributions(ax, st, y, p)),
         ):
-          fig = plots.render(draw, out_dir, f"{task}_{name}", square=square)
+          fig = plots.render(draw, out_dir, f"{task}_{name}", cells=plots.CELLS.get(name))
           if fig:
             report["figures"]["soft"].append(fig)
       else:
@@ -265,17 +297,16 @@ def validate_model(
           continue
         m = binary_metrics(y, p)
         entry["metrics"][task] = m
-        for name, draw, square in (
-          ("roc", lambda ax, st, y=y, p=p, m=m: plots.roc(ax, st, y, p, metrics=m), True),
+        for name, draw in (
+          ("roc", lambda ax, st, y=y, p=p, m=m: plots.roc(ax, st, y, p, metrics=m)),
           (
             "precision_recall",
             lambda ax, st, y=y, p=p, m=m: plots.precision_recall(ax, st, y, p, metrics=m),
-            True,
           ),
-          ("enrichment", lambda ax, st, y=y, p=p: plots.enrichment(ax, st, y, p), False),
-          ("score_by_class", lambda ax, st, y=y, p=p: plots.score_by_class(ax, st, y, p), False),
+          ("enrichment", lambda ax, st, y=y, p=p: plots.enrichment(ax, st, y, p)),
+          ("score_by_class", lambda ax, st, y=y, p=p: plots.score_by_class(ax, st, y, p)),
         ):
-          fig = plots.render(draw, out_dir, f"{task}_{name}", square=square)
+          fig = plots.render(draw, out_dir, f"{task}_{name}", cells=plots.CELLS.get(name))
           if fig:
             report["figures"]["hard"].append(fig)
 
@@ -293,13 +324,14 @@ def validate_model(
     for task, info in internals.items()
   }
   for task, info in internals.items():
-    for stage, curve, label, xlabel in (
-      ("soft_calibration", info["soft_calibration"], "Surrogate correction", "Raw student output"),
-      ("hard_calibration", info["hard_calibration"], "Ground truth → teacher", "G probability"),
+    # The column name is the section heading on the page, so it stays out of the title here.
+    for stage, curve, label, xlabel, role in (
+      ("soft_calibration", info["soft_calibration"], "S", "Raw student output", "model"),
+      ("hard_calibration", info["hard_calibration"], "H_S", "H probability", "hard"),
     ):
       fig = plots.render(
-        lambda ax, st, c=curve, t=f"{label} · {task}", x=xlabel: plots.calibration_map(
-          ax, st, c, title=t, xlabel=x
+        lambda ax, st, c=curve, t=label, x=xlabel, r=role: plots.calibration_map(
+          ax, st, c, title=t, xlabel=x, role=r
         ),
         out_dir,
         f"{task}_{stage}",

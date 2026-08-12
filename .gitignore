@@ -18,8 +18,11 @@ access.json
 /runs/
 /test_*/
 
-# Local example inputs (teacher values over the full reference library — 136MB)
-example/
+# Example INPUTS and OUTPUTS only — not the directory. example/run.sh and run_stepwise.sh are the
+# worked examples the README points at, so they ship; the teacher values they read are 136MB of
+# reference-library predictions and the results they write are models and reports.
+example/data/
+example/results/
 
 # Python-generated files
 __pycache__/
@@ -31,6 +34,7 @@ artifacts/
 wheels/
 *.egg-info
 .ruff_cache
+.pytest_cache/
 # Virtual environments
 .venv
 
