@@ -210,6 +210,19 @@ class OlindaArtifact:
     """The RDKit build the featurizer must match."""
     return (self.metadata.get("featurizer") or {}).get("rdkit_version")
 
+  def channels_for(self, task: str) -> dict:
+    """``{role: output name}`` for one task's internal channels, empty if it has none.
+
+    A blended column exposes ``surrogate``, ``ground_truth``, ``ground_truth_soft`` and
+    ``applicability`` alongside its prediction. A soft-only column exposes none — its surrogate *is*
+    its prediction. Artifacts fused before these were declared also return empty, which is why
+    callers should ask rather than build the names themselves.
+    """
+    for c in self._columns:
+      if c["name"] == task:
+        return dict(c.get("channels") or {})
+    raise KeyError(f"{task!r} is not a task of this model; it predicts {self.columns}")
+
   @property
   def has_ground_truth(self) -> bool:
     """True if any task blends in a hard-label head, so predictions use measured data."""

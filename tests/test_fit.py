@@ -107,6 +107,24 @@ def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
   model = OlindaArtifact(onnx)
   assert model.has_ground_truth is True
   assert model.columns == ["y"]
-  # the graph exposes exactly one output per task; the blend happens inside it
-  assert set(model.run_channels(_SM[:4])) == {"y"}
+  # A blended column publishes its prediction *and* the pieces behind it, so validate can show what
+  # the ground-truth head actually said rather than only the isotonic map read off the initialisers.
+  channels = model.run_channels(_SM[:4])
+  assert set(channels) == {
+    "y",
+    "y__surrogate",
+    "y__ground_truth",
+    "y__ground_truth_soft",
+    "y__applicability",
+  }
+  assert model.channels_for("y")["applicability"] == "y__applicability"
+
+  # The published prediction must *be* the blend of the channels beside it — otherwise the exposed
+  # pieces describe some other computation than the one that produced the answer.
+  a = channels["y__applicability"]
+  np.testing.assert_allclose(
+    channels["y"],
+    (1.0 - a) * channels["y__surrogate"] + a * channels["y__ground_truth_soft"],
+    atol=1e-9,
+  )
   assert model.metadata["columns"][0]["has_hard"] is True

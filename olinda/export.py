@@ -39,6 +39,9 @@ from olinda.ground_truth import (
 )
 
 MODEL_NAME = "model.onnx"
+# Separates a column's name from the channel it exposes: "assay_probability__applicability". Doubled
+# so it cannot be mistaken for part of a task name, which routinely contains single underscores.
+CHANNEL_SEP = "__"
 BUNDLE_SCHEMA = "olinda.bundle.v1"
 PRODUCER_NAME = "olinda"
 _IR_VERSION = 10  # onnxruntime in this env caps the model IR version at 10
@@ -577,6 +580,7 @@ def _fuse(model_dir: Path):
   featurizer_class = "MorganCountFeaturizer"
   n_features = 2048
   outputs: list[str] = []
+  channels: dict[str, dict[str, str]] = {}
 
   for entry in plan:
     p = entry["id"] + "_"  # every node and tensor of this column is namespaced by it
@@ -637,7 +641,22 @@ def _fuse(model_dir: Path):
     nodes.append(ident(f"{p}prediction", entry["output"]))
     outputs.append(entry["output"])
 
-  out_vi = [helper.make_tensor_value_info(n, TensorProto.DOUBLE, ["B"]) for n in outputs]
+    # Declare the pieces behind a blended prediction as outputs of their own. They already exist as
+    # internal tensors; without this they are unreachable, so `validate` could show the isotonic map
+    # recovered from the initialisers but never what the ground-truth head actually predicts on real
+    # compounds. Only for blended columns — for a soft-only one the surrogate *is* the prediction.
+    if entry["has_hard"]:
+      chans = {}
+      for role in ("surrogate", "ground_truth", "ground_truth_soft", "applicability"):
+        public = f"{entry['output']}{CHANNEL_SEP}{role}"
+        nodes.append(ident(f"{p}{role}", public))
+        chans[role] = public
+      channels[entry["name"]] = chans
+
+  out_vi = [
+    helper.make_tensor_value_info(n, TensorProto.DOUBLE, ["B"])
+    for n in outputs + [c for spec in channels.values() for c in spec.values()]
+  ]
   graph = helper.make_graph(
     _toposort(nodes, {"input"} | {i.name for i in inits}),
     "olinda_model",
@@ -647,6 +666,9 @@ def _fuse(model_dir: Path):
   )
   model = helper.make_model(graph, opset_imports=[helper.make_opsetid(d, v) for d, v in opset.items()])
   md = _bundle_metadata(manifest, plan, featurizer, featurizer_class, outputs)
+  for col in md["columns"]:
+    if col["name"] in channels:
+      col["channels"] = channels[col["name"]]
 
   # Standard ONNX provenance, so the file identifies itself to any tool (Netron, hub tooling, the
   # onnx CLI) without them having to know about the custom metadata key below.
