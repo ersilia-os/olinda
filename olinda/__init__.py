@@ -11,8 +11,8 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # import-time cost avoided at runtime; see __getattr__ below
-  from olinda.artifact import OlindaArtifact as OlindaArtifact
-  from olinda.artifact import RDKitVersionMismatch as RDKitVersionMismatch
+    from olinda.artifact import OlindaArtifact as OlindaArtifact
+    from olinda.artifact import RDKitVersionMismatch as RDKitVersionMismatch
 
 # Silence matplotlib's "Matplotlib is building the font cache; this may take a moment." notice (emitted
 # by the font_manager logger on first import / stale cache). Set here — before matplotlib is ever lazily
@@ -21,12 +21,12 @@ logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 
 def __getattr__(name):
-  """Expose the inference API lazily, so `import olinda` stays cheap for CLI startup."""
-  if name in ("OlindaArtifact", "RDKitVersionMismatch"):
-    from olinda import artifact
+    """Expose the inference API lazily, so `import olinda` stays cheap for CLI startup."""
+    if name in ("OlindaArtifact", "RDKitVersionMismatch"):
+        from olinda import artifact
 
-    return getattr(artifact, name)
-  raise AttributeError(f"module 'olinda' has no attribute {name!r}")
+        return getattr(artifact, name)
+    raise AttributeError(f"module 'olinda' has no attribute {name!r}")
 
 
 __all__ = ["OlindaArtifact", "RDKitVersionMismatch"]

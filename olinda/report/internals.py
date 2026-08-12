@@ -20,77 +20,79 @@ HARD_STAGE = "hc"  # H → S: the hard model's probability onto the surrogate's 
 
 
 def _initializers(graph) -> dict:
-  from onnx import numpy_helper
+    from onnx import numpy_helper
 
-  return {i.name: numpy_helper.to_array(i) for i in graph.initializer}
+    return {i.name: numpy_helper.to_array(i) for i in graph.initializer}
 
 
 def _curve(init: dict, prefix: str, stage: str) -> dict | None:
-  """The anchor points of one isotonic stage, or ``None`` if the model has no such stage."""
-  xk, yk = init.get(f"{prefix}{stage}__xk"), init.get(f"{prefix}{stage}__yk")
-  if xk is None or yk is None:
-    return None
-  sign = float(np.asarray(init.get(f"{prefix}{stage}__sign", 1.0)).ravel()[0])
-  # The graph stores the map over sign*raw, so undo the flip to get back to the model's own scale.
-  x = np.asarray(xk, dtype=np.float64) * sign
-  y = np.asarray(yk, dtype=np.float64)
-  order = np.argsort(x)
-  return {"x": x[order], "y": y[order], "sign": sign, "n_anchors": int(len(x))}
+    """The anchor points of one isotonic stage, or ``None`` if the model has no such stage."""
+    xk, yk = init.get(f"{prefix}{stage}__xk"), init.get(f"{prefix}{stage}__yk")
+    if xk is None or yk is None:
+        return None
+    sign = float(np.asarray(init.get(f"{prefix}{stage}__sign", 1.0)).ravel()[0])
+    # The graph stores the map over sign*raw, so undo the flip to get back to the model's own scale.
+    x = np.asarray(xk, dtype=np.float64) * sign
+    y = np.asarray(yk, dtype=np.float64)
+    order = np.argsort(x)
+    return {"x": x[order], "y": y[order], "sign": sign, "n_anchors": int(len(x))}
 
 
 def _tree_counts(graph) -> dict:
-  """``{column_prefix: {"n_trees", "n_nodes"}}`` summed over that column's TreeEnsemble nodes."""
-  out: dict[str, dict] = {}
-  for node in graph.node:
-    if not node.op_type.startswith("TreeEnsemble"):
-      continue
-    prefix = node.name.split("_", 1)[0] + "_" if "_" in node.name else ""
-    treeids = next((a for a in node.attribute if a.name == "nodes_treeids"), None)
-    if treeids is None:
-      continue
-    ids = np.asarray(treeids.ints)
-    entry = out.setdefault(prefix, {"n_trees": 0, "n_nodes": 0})
-    entry["n_trees"] += int(len(np.unique(ids)))
-    entry["n_nodes"] += int(len(ids))
-  return out
+    """``{column_prefix: {"n_trees", "n_nodes"}}`` summed over that column's TreeEnsemble nodes."""
+    out: dict[str, dict] = {}
+    for node in graph.node:
+        if not node.op_type.startswith("TreeEnsemble"):
+            continue
+        prefix = node.name.split("_", 1)[0] + "_" if "_" in node.name else ""
+        treeids = next((a for a in node.attribute if a.name == "nodes_treeids"), None)
+        if treeids is None:
+            continue
+        ids = np.asarray(treeids.ints)
+        entry = out.setdefault(prefix, {"n_trees": 0, "n_nodes": 0})
+        entry["n_trees"] += int(len(np.unique(ids)))
+        entry["n_nodes"] += int(len(ids))
+    return out
 
 
 def describe_graph(model_onnx: str | Path) -> dict:
-  """Per-column internals of a fused artifact: its calibration curves and tree sizes.
+    """Per-column internals of a fused artifact: its calibration curves and tree sizes.
 
-  Parameters
-  ----------
-  model_onnx : str or Path
-      A fused ``model.onnx``.
+    Parameters
+    ----------
+    model_onnx : str or Path
+        A fused ``model.onnx``.
 
-  Returns
-  -------
-  dict
-      ``{column_name: {"id", "soft_calibration", "hard_calibration", "n_trees", "n_nodes"}}``. Each
-      calibration is ``{"x", "y", "sign", "n_anchors"}`` or ``None`` when that stage is absent — a
-      column with too small a validation split has no surrogate correction, and a soft-only column
-      has no hard-label map.
-  """
-  import json
+    Returns
+    -------
+    dict
+        ``{column_name: {"id", "soft_calibration", "hard_calibration", "n_trees", "n_nodes"}}``. Each
+        calibration is ``{"x", "y", "sign", "n_anchors"}`` or ``None`` when that stage is absent — a
+        column with too small a validation split has no surrogate correction, and a soft-only column
+        has no hard-label map.
+    """
+    import json
 
-  import onnx
+    import onnx
 
-  model = onnx.load(str(model_onnx), load_external_data=False)
-  raw = next((p.value for p in model.metadata_props if p.key == "olinda"), None)
-  if not raw:
-    raise ValueError(f"{model_onnx} carries no olinda metadata — is it an olinda artifact?")
-  meta = json.loads(raw)
+    model = onnx.load(str(model_onnx), load_external_data=False)
+    raw = next((p.value for p in model.metadata_props if p.key == "olinda"), None)
+    if not raw:
+        raise ValueError(
+            f"{model_onnx} carries no olinda metadata — is it an olinda artifact?"
+        )
+    meta = json.loads(raw)
 
-  init = _initializers(model.graph)
-  trees = _tree_counts(model.graph)
+    init = _initializers(model.graph)
+    trees = _tree_counts(model.graph)
 
-  out = {}
-  for col in meta.get("columns", []):
-    prefix = f"{col['id']}_"
-    out[col["name"]] = {
-      "id": col["id"],
-      "soft_calibration": _curve(init, prefix, SOFT_STAGE),
-      "hard_calibration": _curve(init, prefix, HARD_STAGE),
-      **trees.get(prefix, {"n_trees": 0, "n_nodes": 0}),
-    }
-  return out
+    out = {}
+    for col in meta.get("columns", []):
+        prefix = f"{col['id']}_"
+        out[col["name"]] = {
+            "id": col["id"],
+            "soft_calibration": _curve(init, prefix, SOFT_STAGE),
+            "hard_calibration": _curve(init, prefix, HARD_STAGE),
+            **trees.get(prefix, {"n_trees": 0, "n_nodes": 0}),
+        }
+    return out

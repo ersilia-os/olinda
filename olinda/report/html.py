@@ -22,10 +22,10 @@ from olinda.style import hexcol
 
 # What the colours mean, stated once for the whole page so no figure needs its own legend.
 _KEY = (
-  ("model", "olinda prediction"),
-  ("teacher", "Teacher value"),
-  ("active", "Active"),
-  ("inactive", "Inactive"),
+    ("model", "olinda prediction"),
+    ("teacher", "Teacher value"),
+    ("active", "Active"),
+    ("inactive", "Inactive"),
 )
 
 _CSS = """
@@ -103,130 +103,159 @@ summary { cursor: pointer; color: var(--link); }
 
 
 def _table(rows, headers) -> str:
-  if not rows:
-    return ""
-  head = "".join(f"<th>{html.escape(str(h))}</th>" for h in headers)
-  body = "".join("<tr>" + "".join(f"<td>{html.escape(str(c))}</td>" for c in row) + "</tr>" for row in rows)
-  return f'<div class="wrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+    if not rows:
+        return ""
+    head = "".join(f"<th>{html.escape(str(h))}</th>" for h in headers)
+    body = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(str(c))}</td>" for c in row) + "</tr>"
+        for row in rows
+    )
+    return f'<div class="wrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
 def _figures(figs) -> str:
-  if not figs:
-    return ""
-  cards = []
-  for f in figs:
-    # Titles and captions come from the plots' own registry, so a figure is described the same way
-    # wherever it appears; older reports without them fall back to the file name.
-    title = html.escape(f.get("title") or f["name"].replace("_", " "))
-    text = html.escape(f.get("caption", ""))
-    aspect = float(f.get("aspect", 1) or 1)
-    # A panel twice as wide as it is tall gets its own row; squeezed into a half-width card it
-    # would render at half the size of its neighbours.
-    cls = ' class="wide"' if aspect >= 2 else ""
-    cards.append(
-      # Not lazy-loaded: a report is a dozen small PNGs, and deferring them means they are simply
-      # absent when the page is printed, exported to PDF or captured full-height.
-      f'<figure{cls}><img src="{f["png"]}" alt="{title}" style="--ar:{aspect}">'
-      f'<figcaption><span class="t">{title}<a href="{f["pdf"]}">PDF</a></span>'
-      f'<span class="c">{text}</span></figcaption></figure>'
-    )
-  return f'<div class="grid">{"".join(cards)}</div>'
+    if not figs:
+        return ""
+    cards = []
+    for f in figs:
+        # Titles and captions come from the plots' own registry, so a figure is described the same way
+        # wherever it appears; older reports without them fall back to the file name.
+        title = html.escape(f.get("title") or f["name"].replace("_", " "))
+        text = html.escape(f.get("caption", ""))
+        aspect = float(f.get("aspect", 1) or 1)
+        # A panel twice as wide as it is tall gets its own row; squeezed into a half-width card it
+        # would render at half the size of its neighbours.
+        cls = ' class="wide"' if aspect >= 2 else ""
+        cards.append(
+            # Not lazy-loaded: a report is a dozen small PNGs, and deferring them means they are simply
+            # absent when the page is printed, exported to PDF or captured full-height.
+            f'<figure{cls}><img src="{f["png"]}" alt="{title}" style="--ar:{aspect}">'
+            f'<figcaption><span class="t">{title}<a href="{f["pdf"]}">PDF</a></span>'
+            f'<span class="c">{text}</span></figcaption></figure>'
+        )
+    return f'<div class="grid">{"".join(cards)}</div>'
 
 
 def _stats(items) -> str:
-  """The headline numbers, so the answer is visible before any table is read."""
-  items = [(k, v) for k, v in items if v is not None]
-  if not items:
-    return ""
-  cells = "".join(
-    f'<li><div class="k">{html.escape(k)}</div><div class="v">{html.escape(v)}</div></li>' for k, v in items
-  )
-  return f'<ul class="stats">{cells}</ul>'
+    """The headline numbers, so the answer is visible before any table is read."""
+    items = [(k, v) for k, v in items if v is not None]
+    if not items:
+        return ""
+    cells = "".join(
+        f'<li><div class="k">{html.escape(k)}</div><div class="v">{html.escape(v)}</div></li>'
+        for k, v in items
+    )
+    return f'<ul class="stats">{cells}</ul>'
 
 
 def _colour_key() -> str:
-  swatches = "".join(
-    f'<span><i style="background:{hexcol(role)}"></i>{html.escape(label)}</span>' for role, label in _KEY
-  )
-  return f'<div class="key">{swatches}</div>'
+    swatches = "".join(
+        f'<span><i style="background:{hexcol(role)}"></i>{html.escape(label)}</span>'
+        for role, label in _KEY
+    )
+    return f'<div class="key">{swatches}</div>'
 
 
 def _section(slug: str, title: str, *blocks: str) -> str:
-  blocks = [b for b in blocks if b]
-  if not blocks:
-    return ""
-  return f'<h2 id="{slug}">{html.escape(title)}</h2>' + "".join(blocks)
+    blocks = [b for b in blocks if b]
+    if not blocks:
+        return ""
+    return f'<h2 id="{slug}">{html.escape(title)}</h2>' + "".join(blocks)
 
 
 def write_report(out_dir: str | Path, report: dict) -> Path:
-  """Render ``report.html`` from the structure :func:`olinda.report.validate_model` assembles."""
-  out_dir = Path(out_dir)
-  meta = report["model"]
-  title = f"olinda validation · {Path(meta['path']).name}"
+    """Render ``report.html`` from the structure :func:`olinda.report.validate_model` assembles."""
+    out_dir = Path(out_dir)
+    meta = report["model"]
+    title = f"olinda validation · {Path(meta['path']).name}"
 
-  config = _table(
-    [
-      ("Model", meta["path"]),
-      ("Tasks", ", ".join(meta["columns"])),
-      ("Trained", meta.get("trained_at") or "—"),
-      ("olinda", meta.get("olinda_version") or "—"),
-      ("RDKit", meta.get("rdkit_version") or "—"),
-      ("Backend", meta.get("backend") or "—"),
-      ("Hard-label head", "yes" if meta.get("has_hard") else "no"),
-    ],
-    ("", "Value"),
-  )
+    config = _table(
+        [
+            ("Model", meta["path"]),
+            ("Tasks", ", ".join(meta["columns"])),
+            ("Trained", meta.get("trained_at") or "—"),
+            ("olinda", meta.get("olinda_version") or "—"),
+            ("RDKit", meta.get("rdkit_version") or "—"),
+            ("Backend", meta.get("backend") or "—"),
+            ("Hard-label head", "yes" if meta.get("has_hard") else "no"),
+        ],
+        ("", "Value"),
+    )
 
-  dataset_rows = []
-  for key, label in (("soft", "Soft labels"), ("hard", "Hard labels")):
-    d = report.get(key)
-    if d:
-      dataset_rows.append((label, d["file"], f"{d['n']:,}", f"{d['n_unparseable']:,}"))
-  dataset = _table(dataset_rows, ("", "File", "Compounds", "Unparseable"))
+    dataset_rows = []
+    for key, label in (("soft", "Soft labels"), ("hard", "Hard labels")):
+        d = report.get(key)
+        if d:
+            dataset_rows.append(
+                (label, d["file"], f"{d['n']:,}", f"{d['n_unparseable']:,}")
+            )
+    dataset = _table(dataset_rows, ("", "File", "Compounds", "Unparseable"))
 
-  notes = "".join(f'<div class="note">{html.escape(n)}</div>' for n in report.get("notes", []))
+    notes = "".join(
+        f'<div class="note">{html.escape(n)}</div>' for n in report.get("notes", [])
+    )
 
-  perf_rows = []
-  for task, m in (report.get("soft") or {}).get("metrics", {}).items():
-    perf_rows.append((
-      task,
-      f"{m['n']:,}",
-      f"{m['r2']:+.4f}",
-      f"{m['pearson']:+.4f}",
-      f"{m['spearman']:+.4f}",
-      f"{m['rmse']:.5f}",
-      f"{m['mae']:.5f}",
-    ))
-  perf = _table(perf_rows, ("Task", "n", "R²", "Pearson", "Spearman", "RMSE", "MAE"))
+    perf_rows = []
+    for task, m in (report.get("soft") or {}).get("metrics", {}).items():
+        perf_rows.append(
+            (
+                task,
+                f"{m['n']:,}",
+                f"{m['r2']:+.4f}",
+                f"{m['pearson']:+.4f}",
+                f"{m['spearman']:+.4f}",
+                f"{m['rmse']:.5f}",
+                f"{m['mae']:.5f}",
+            )
+        )
+    perf = _table(perf_rows, ("Task", "n", "R²", "Pearson", "Spearman", "RMSE", "MAE"))
 
-  rank_rows = []
-  for task, m in (report.get("hard") or {}).get("metrics", {}).items():
-    enr = m.get("enrichment", {})
-    rank_rows.append((
-      task,
-      f"{m['n']:,}",
-      f"{m['n_positive']:,}",
-      f"{m['hit_rate']:.3f}",
-      _fmt(m["auroc"]),
-      _fmt(m["average_precision"]),
-      *[_fmt(enr.get(k), "{:.1f}x") for k in ("top_0.01", "top_0.05", "top_0.1")],
-    ))
-  rank = _table(rank_rows, ("Task", "n", "Actives", "Hit rate", "AUROC", "AP", "EF 1%", "EF 5%", "EF 10%"))
+    rank_rows = []
+    for task, m in (report.get("hard") or {}).get("metrics", {}).items():
+        enr = m.get("enrichment", {})
+        rank_rows.append(
+            (
+                task,
+                f"{m['n']:,}",
+                f"{m['n_positive']:,}",
+                f"{m['hit_rate']:.3f}",
+                _fmt(m["auroc"]),
+                _fmt(m["average_precision"]),
+                *[
+                    _fmt(enr.get(k), "{:.1f}x")
+                    for k in ("top_0.01", "top_0.05", "top_0.1")
+                ],
+            )
+        )
+    rank = _table(
+        rank_rows,
+        ("Task", "n", "Actives", "Hit rate", "AUROC", "AP", "EF 1%", "EF 5%", "EF 10%"),
+    )
 
-  figs = report.get("figures", {})
-  sections = [
-    ("config", "Configuration", (config,)),
-    ("dataset", "Dataset", (dataset,)),
-    ("teacher", "Agreement with the teacher", (perf, _colour_key(), _figures(figs.get("soft", [])))),
-    ("ranking", "Ranking against measured labels", (rank, _figures(figs.get("hard", [])))),
-    ("internals", "Model internals", (_figures(figs.get("internals", [])),)),
-  ]
-  body = "".join(_section(slug, name, *blocks) for slug, name, blocks in sections)
-  nav_links = "".join(
-    f'<a href="#{slug}">{html.escape(name)}</a>' for slug, name, blocks in sections if any(b for b in blocks)
-  )
+    figs = report.get("figures", {})
+    sections = [
+        ("config", "Configuration", (config,)),
+        ("dataset", "Dataset", (dataset,)),
+        (
+            "teacher",
+            "Agreement with the teacher",
+            (perf, _colour_key(), _figures(figs.get("soft", []))),
+        ),
+        (
+            "ranking",
+            "Ranking against measured labels",
+            (rank, _figures(figs.get("hard", []))),
+        ),
+        ("internals", "Model internals", (_figures(figs.get("internals", [])),)),
+    ]
+    body = "".join(_section(slug, name, *blocks) for slug, name, blocks in sections)
+    nav_links = "".join(
+        f'<a href="#{slug}">{html.escape(name)}</a>'
+        for slug, name, blocks in sections
+        if any(b for b in blocks)
+    )
 
-  page = f"""<title>{html.escape(title)}</title>
+    page = f"""<title>{html.escape(title)}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>{_CSS}</style>
 <div class="shell">
@@ -250,37 +279,37 @@ rest. Each figure links its vector PDF for publication use.</details>
 </main>
 </div>
 """
-  from olinda.report import REPORT_NAME
+    from olinda.report import REPORT_NAME
 
-  path = out_dir / REPORT_NAME
-  path.write_text(page, encoding="utf-8")
-  return path
+    path = out_dir / REPORT_NAME
+    path.write_text(page, encoding="utf-8")
+    return path
 
 
 def _headline(report: dict) -> list[tuple[str, str | None]]:
-  """The two or three numbers worth reading before anything else."""
-  items: list[tuple[str, str | None]] = []
-  soft = (report.get("soft") or {}).get("metrics", {})
-  hard = (report.get("hard") or {}).get("metrics", {})
-  if soft:
-    first = next(iter(soft.values()))
-    items.append(("Compounds scored", f"{first['n']:,}"))
-    items.append(("R²", _fmt(first["r2"], "{:+.3f}")))
-    items.append(("Spearman ρ", _fmt(first["spearman"], "{:+.3f}")))
-  if hard:
-    first = next(iter(hard.values()))
-    if not soft:
-      items.append(("Compounds scored", f"{first['n']:,}"))
-    items.append(("AUROC", _fmt(first["auroc"])))
-    items.append(("Actives", f"{first['n_positive']:,}"))
-  return items
+    """The two or three numbers worth reading before anything else."""
+    items: list[tuple[str, str | None]] = []
+    soft = (report.get("soft") or {}).get("metrics", {})
+    hard = (report.get("hard") or {}).get("metrics", {})
+    if soft:
+        first = next(iter(soft.values()))
+        items.append(("Compounds scored", f"{first['n']:,}"))
+        items.append(("R²", _fmt(first["r2"], "{:+.3f}")))
+        items.append(("Spearman ρ", _fmt(first["spearman"], "{:+.3f}")))
+    if hard:
+        first = next(iter(hard.values()))
+        if not soft:
+            items.append(("Compounds scored", f"{first['n']:,}"))
+        items.append(("AUROC", _fmt(first["auroc"])))
+        items.append(("Actives", f"{first['n_positive']:,}"))
+    return items
 
 
 def _fmt(value, spec: str = "{:.3f}") -> str:
-  """Format a metric, showing an undefined one as an em dash rather than ``nan``."""
-  if value is None:
-    return "—"
-  try:
-    return "—" if value != value else spec.format(value)  # NaN != NaN
-  except (TypeError, ValueError):
-    return str(value)
+    """Format a metric, showing an undefined one as an em dash rather than ``nan``."""
+    if value is None:
+        return "—"
+    try:
+        return "—" if value != value else spec.format(value)  # NaN != NaN
+    except (TypeError, ValueError):
+        return str(value)
