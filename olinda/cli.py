@@ -75,6 +75,22 @@ def cli():
   pass
 
 
+def _require_train() -> None:
+  """Refuse a distilling command with guidance when the training extra is absent.
+
+  The CLI ships with the base install, so these commands are reachable on an inference-only one and
+  would otherwise die on whichever heavy ``import`` came first — a traceback naming ``h5py``, which
+  says nothing about what to install. Raised as a ClickException so it prints in the error panel like
+  any other user-facing refusal. `validate` does the same through ``require_report_extra``.
+  """
+  from olinda.train import require_train_extra
+
+  try:
+    require_train_extra()
+  except RuntimeError as exc:
+    raise click.ClickException(str(exc)) from exc
+
+
 def _columns(value: str | None):
   """Parse a comma-separated ``--*-label-columns`` value into a list of names, or ``None``.
 
@@ -138,7 +154,15 @@ def setup_cmd(target_dir):
 @click.option(
   "--max-samples", default=None, type=int, help="Use only the first N reference compounds (dev subsampling)."
 )
-@click.option("--val-frac", default=0.1, type=float, show_default=True)
+@click.option(
+  "--val-frac",
+  default=0.1,
+  type=float,
+  show_default=True,
+  help="Fraction of each teacher column held back for validation — early stopping and the reported "
+  "metrics both read it. Split per column and stratified by value, so the held-back rows span the "
+  "whole range rather than landing in one part of it.",
+)
 @click.option(
   "--num-boost-round",
   default=10000,
@@ -199,6 +223,7 @@ def fit_cmd(
   Drive the steps individually against `-m runs/foo` if you want to keep the per-column boosters, metrics
   and plots.
   """
+  _require_train()
   import time
 
   from olinda.console import (
@@ -304,7 +329,15 @@ def fit_cmd(
   type=int,
   help="Use only the first N reference compounds (development subsampling).",
 )
-@click.option("--val-frac", default=0.1, type=float, show_default=True)
+@click.option(
+  "--val-frac",
+  default=0.1,
+  type=float,
+  show_default=True,
+  help="Fraction of each teacher column held back for validation — early stopping and the reported "
+  "metrics both read it. Split per column and stratified by value, so the held-back rows span the "
+  "whole range rather than landing in one part of it.",
+)
 @click.option(
   "--soft-smiles-column",
   default=None,
@@ -348,6 +381,7 @@ def prepare_cmd(
   the four `--*-column(s)` flags are only needed for files that don't follow it, or to distil a
   subset of a wide teacher file. Naming a column that isn't in the file is an error.
   """
+  _require_train()
   import h5py
 
   from olinda import run as runlib
@@ -518,6 +552,7 @@ def learn_soft_cmd(model_dir, num_boost_round):
   reported, and a single self-describing `model.onnx` bundle is fused at the end (soft-only here;
   `learn-hard` re-fuses it with the hard head).
   """
+  _require_train()
   from olinda import run as runlib
   import time
 
@@ -657,6 +692,7 @@ def tune_cmd(model_dir, trials, max_rows):
   uses good internal defaults — call ``olinda.train.tune.run_tuning`` directly to override them.
   Requires the ``[train]`` extra (Optuna).
   """
+  _require_train()
   from olinda.train.tune import run_tuning
 
   from olinda.run import PARAMS_NAME
@@ -688,6 +724,7 @@ def learn_hard_cmd(model_dir):
   the named output (`T` needs no similarity search at predict time, and the blend favours `S` away from
   the labeled set).
   """
+  _require_train()
   import time
 
   from olinda import run as runlib
@@ -792,6 +829,7 @@ def export_cmd(model_dir):
   self-describing. Gated on a numeric parity check. Featurization (RDKit) stays in Python — the graph
   consumes a 2048-count Morgan fingerprint.
   """
+  _require_train()
   from olinda.export import build_bundle
 
   from olinda import run as runlib

@@ -1,7 +1,10 @@
 """Console-script entry point.
 
-The base install carries only what inference needs, so the CLI's dependencies may be absent. Fail
-with an instruction rather than an ImportError traceback.
+The CLI ships with the base install, so this should always import. It is guarded anyway: a partial
+or broken environment is worth naming rather than dumping an ImportError traceback on someone who
+only wanted `--help`. Commands that need an extra refuse individually — see
+:func:`olinda.train.require_train_extra` and :func:`olinda.report.require_report_extra` — because
+that is a normal, expected state, while this is not.
 """
 
 from __future__ import annotations
@@ -10,12 +13,12 @@ from __future__ import annotations
 def main() -> None:
   try:
     from olinda.cli import cli
-  except ImportError as exc:  # pragma: no cover - exercised only on a base install
-    missing = getattr(exc, "name", None) or "a training dependency"
+  except ImportError as exc:  # pragma: no cover - a broken install, not a supported tier
+    missing = getattr(exc, "name", None) or "a dependency"
     raise SystemExit(
-      f"The olinda CLI needs the training dependencies (missing: {missing}).\n"
-      "This looks like an inference-only install. Install the full stack with:\n\n"
-      "    pip install 'olinda[train]'\n\n"
-      "Running distilled models needs no extras — see olinda.OlindaArtifact."
+      f"The olinda CLI could not start: {missing} is missing.\n"
+      "The CLI is part of the base install, so this environment looks incomplete. Reinstall with:\n\n"
+      "    pip install --force-reinstall olinda\n\n"
+      "Distilling additionally needs `olinda[train]`; scoring a model needs `olinda[report]`."
     ) from exc
   cli()

@@ -28,8 +28,8 @@ jobs:
       - name: Test
         run: pytest -q
 
-  # The base install promises numpy/pandas/rdkit/onnxruntime and nothing more. The job above can
-  # never catch a stray training-only import on the inference path, because it has the whole stack.
+  # The base install promises numpy/pandas/rdkit/onnxruntime, the CLI, and nothing more. The job
+  # above can never catch a stray extras-only import on that path, because it has the whole stack.
   inference-install:
     runs-on: ubuntu-latest
     steps:
@@ -44,6 +44,18 @@ jobs:
           pip install pytest
       - name: Test the inference path
         run: pytest -q tests/test_inference_install.py
+      # Run the console script itself, from outside the repo so the checkout cannot shadow the
+      # installed package. Nothing exercised `olinda` on a base install before, which is exactly how
+      # a version shipped whose CLI could not start at all.
+      - name: The CLI starts, and refuses what it cannot do
+        run: |
+          cd /tmp
+          olinda --help
+          olinda predict --help
+          # a distilling command must name its extra rather than dying on an import
+          ! olinda fit -s x.csv -m y.onnx 2>&1 | tee /tmp/fit.log
+          grep -q "olinda\[train\]" /tmp/fit.log
+          ! grep -q "Traceback" /tmp/fit.log
 
   # `pip install "olinda[report]"` promises you can validate a model you were handed. The `test` job
   # cannot check that: it has the training stack, so every import resolves whether the extra declares

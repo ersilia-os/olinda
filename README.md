@@ -9,13 +9,14 @@ gradient-boosting student to reproduce it, and ship the result as a single ONNX 
 ## Installation
 
 ```bash
-pip install olinda                 # inference only: numpy, pandas, rdkit, onnxruntime
-pip install "olinda[report]"       # + validate a model you were given, and the CLI
+pip install olinda                 # run models: the CLI, `olinda predict`, olinda.OlindaArtifact
+pip install "olinda[report]"       # + score one: `olinda validate` and its figures
 pip install "olinda[train]"        # + distil your own (the boosting stack)
 ```
 
 Running a model should never drag in a plotting stack, so the tiers are separate. `[train]` includes
-`[report]`, since a training run draws its own figures. CI installs each tier on its own and
+`[report]`, since a training run draws its own figures. A command that needs an extra refuses and
+names it, rather than failing on an import three steps in. CI installs each tier on its own and
 exercises it, so the boundaries are real rather than aspirational.
 
 ## Running a model at inference time
