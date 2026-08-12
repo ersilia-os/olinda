@@ -33,7 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
-from olinda.console import echo, summary_panel, sweep_progress
+from olinda.console import echo, step, summary_panel, sweep_progress
 from olinda.featurizer import MorganCountFeaturizer
 
 # Layout under <model_dir>/
@@ -200,8 +200,8 @@ def _fit_applicability(
   """Learn the applicability gate: regress each reference compound's 1-NN Tanimoto to the labelled set.
 
   Streams the library once, computing the exact similarity per chunk (:func:`~olinda.applicability.tanimoto_nn`)
-  and keeping it as a continuous target, then fits a small gradient-boosted regressor on the same binarised
-  Morgan features the rest of the pipeline uses. The regressor stands in for a nearest-neighbour search at
+  and keeping it as a continuous target, then fits a small MLP on the same binarised Morgan features the
+  rest of the pipeline uses. The regressor stands in for a nearest-neighbour search at
   predict time: approximate, but it keeps the labelled fingerprints out of the shipped artifact.
 
   Labelled compounds that are themselves in the library land at similarity 1.0 naturally; those outside
@@ -549,25 +549,24 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     warnings.simplefilter("ignore")  # hush lazy-qsar's sklearn version-drift FutureWarnings
 
     # === Step 1/4 — train the hard-label classifier G ======================
-    echo(
-      f"Step 1/4 · training hard-label classifier G on {len(y):,} compounds ({int(y.sum())} positive)", "run"
-    )
+    step(1, 4, "training the hard-label model G")
+    echo(f"  {len(y):,} labelled compounds · {int(y.sum()):,} positive ({y.mean():.1%})", "info")
     gt_model.fit(X, y)
     gt_model.save(str(gt_dir))
     selection = _selection_report(gt_model)
-    echo(f"  G ready · preset={selection['preset']} · {selection['best_iteration']} trees", "run")
+    echo(f"  ready · {selection['preset']} preset · {selection['best_iteration']} trees", "info")
 
     # === Step 2/4 — score G across the full reference library ==============
-    echo("Step 2/4 · scoring G across the reference library", "run")
+    step(2, 4, "scoring G across the reference library")
     g_ref = _score_reference(gt_model, "binary", X.shape[1], matrix)
     with h5py.File(gt_root / G_REFERENCE_NAME, "w") as f:
       f.create_dataset("g", data=g_ref.astype(np.float32))
-    echo(f"  saved G scores for {len(g_ref):,} reference compounds → {G_REFERENCE_NAME}", "run")
+    echo(f"  saved → {G_REFERENCE_NAME}", "info")
 
     # === Step 3/4 — calibrate G onto the soft-label scale ==================
     from olinda.calibrate import IsotonicCalibrator, _spearman_sign
 
-    echo("Step 3/4 · calibrating G → soft-label scale", "run")
+    step(3, 4, "calibrating G onto the soft-label scale")
     m = min(len(g_ref), len(soft))
     gv, sv = g_ref[:m].astype(np.float64), soft[:m]
     mask = np.isfinite(gv) & np.isfinite(sv)
@@ -587,40 +586,40 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     # R², not the correlation, is what bounds the blend — see _blend_ceiling. The gap between r² and
     # R² is the part of the disagreement that a shift or a rescaling would explain.
     alignment_r2 = _r2(sv, calibrated)
+    echo(f"  {direction} fit · Spearman(G, soft) {spearman:+.3f}", "info")
+    # R² is the one that matters downstream — it is what caps the blend — so it is named as such
+    # rather than left as the third number in a row of three.
     echo(
-      f"  calibrated ({direction}) on {len(gv):,} reference compounds · "
-      f"Spearman(G,soft)={spearman:+.3f} · Pearson(calibrated,soft)={pearson_after:.3f} · "
-      f"R²={alignment_r2:.3f}",
-      "run",
+      f"  agreement after calibration · Pearson {pearson_after:.3f} · "
+      f"[bold]R² {alignment_r2:.3f}[/] [dim]· R² caps the blend weight[/]",
+      "info",
     )
 
-    # diagnostic plots (stylia; skipped with a warning if stylia is absent)
-    from olinda.train.plots import save_ground_truth_plots
-
-    plots = save_ground_truth_plots(
-      gv, sv, calibrator, gt_root / "plots", direction=direction, pearson_after=pearson_after
-    )
-    for p in plots:
-      echo(f"  plot → {p.relative_to(gt_root)}", "run")
+    # No plots here. `olinda validate` draws the calibration map from the fused graph itself, so a
+    # training-time copy would only ever be a second rendering of the same numbers — and drawing it
+    # pulled matplotlib into every training run, which is what made the CLI pause on its font cache.
 
     # === Step 4/4 — learn the applicability gate (similarity regressor) ====
     from olinda.applicability import A_CEILING, SIM_HI, SIM_LO
 
-    echo("Step 4/4 · learning the applicability gate — regressing similarity to the labelled set", "run")
+    step(4, 4, "learning the applicability gate")
     gt_bits = (X > 0).astype(np.float32)
-    ad_clf, ad_counts = _fit_applicability(gt_bits, X.shape[1], matrix, SIM_LO, SIM_HI, pearson_after)
+    ad_clf, ad_counts = _fit_applicability(gt_bits, X.shape[1], matrix, SIM_LO, SIM_HI, alignment_r2)
     ad_clf.save(gt_root / APPLICABILITY_DIRNAME)
     echo(
-      f"  true similarity over {ad_counts['n_ref']:,} reference compounds · "
-      f"median {ad_counts['sim_median']:.3f} · {ad_counts['frac_above_lo']:.1%} above {SIM_LO} · "
-      f"{ad_counts['frac_above_hi']:.1%} above {SIM_HI}",
-      "run",
+      f"  true similarity · median {ad_counts['sim_median']:.3f} · "
+      f"{ad_counts['frac_above_lo']:.1%} above {SIM_LO} · {ad_counts['frac_above_hi']:.1%} above {SIM_HI}",
+      "info",
     )
     echo(
-      f"  gate R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} on "
-      f"{ad_counts['fit_n']:,} held-out compounds · opens for [bold]{ad_counts['fit_recall']:.0%}[/] "
-      f"of those that qualify (precision {ad_counts['fit_precision']:.0%}) → {APPLICABILITY_DIRNAME}/",
-      "run",
+      f"  gate fit · R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} "
+      f"[dim]on {ad_counts['fit_n']:,} held out[/]",
+      "info",
+    )
+    echo(
+      f"  gate reach · opens for [bold]{ad_counts['fit_recall']:.0%}[/] of the compounds that qualify · "
+      f"{ad_counts['fit_precision']:.0%} of those it opens for deserve it",
+      "info",
     )
     if ad_counts["a_max"] <= 0.0:
       echo(
@@ -696,8 +695,6 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     ),
     ("Saved", f"[dim]{gt_root}[/]"),
   ]
-  if plots:
-    rows.append(("Plots", f"[bold]{len(plots)}[/] → [dim]{gt_root / 'plots'}[/]"))
   summary_panel("olinda · learn-hard", rows, border_style="green", icon="✓")
 
   return {

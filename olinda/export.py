@@ -264,8 +264,9 @@ def _applicability_model(clf, n_features: int, in_name: str, out_name: str):
 
   del net.graph.output[:]
   net.graph.output.append(helper.make_tensor_value_info(out_name, TensorProto.DOUBLE, ["B"]))
-  # skl2onnx emits a newer opset than the rest of the bundle; every op used here (MatMul, Relu, Add,
-  # Cast, Reshape, Clip, Greater) exists at _OPSET, and there is no ai.onnx.ml domain to preserve.
+  # The gate pins its own opset when it serialises itself; re-stamp it to the bundle's. Every op used
+  # here (MatMul, Relu, Add, Cast, Reshape, Clip, Greater) exists at _OPSET, and unlike the boosted
+  # stages there is no ai.onnx.ml domain to preserve, so replacing the whole list is safe.
   del net.opset_import[:]
   net.opset_import.append(helper.make_opsetid("", _OPSET))
   net.ir_version = _IR_VERSION

@@ -41,10 +41,6 @@ train = [
     "pyarrow==24.0.0",  # pandas' parquet engine; olinda reads teacher/query files as .parquet
     "rich==14.1.0",
     "rich-click==1.9.8",
-    # The applicability gate is an sklearn MLP, converted to ONNX at export. Both are train-time
-    # only: the fused artifact carries the gate as plain graph ops, so inference needs neither.
-    "scikit-learn==1.6.1",
-    "skl2onnx==1.19.1",
     "tqdm==4.68.3",
     "xgboost==3.2.0",
 ]
