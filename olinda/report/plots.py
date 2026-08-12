@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from olinda.style import REPORT_DPI, density, figure, limits, reference, rgb, setup
+from olinda.style import REPORT_DPI, density, figure, import_stylia, limits, reference, rgb, subsample
 
 MAX_SCATTER = 400_000  # hexbin bins server-side, so this cap is about read time, not legibility
 
@@ -57,16 +57,16 @@ FIGURES = {
     "The isotonic map the model applies to its own raw output, read from the graph.",
   ),
   "hard_calibration": (
-    "Ground-truth correction",
-    "The isotonic map from the ground-truth head onto the teacher's scale.",
+    "Hard-label correction",
+    "The isotonic map from the hard-label head onto the teacher's scale.",
   ),
   "score_distributions": (
     "Score distributions",
     "What the model predicts against what the teacher says, as distributions rather than pairs.",
   ),
   "calibrated_vs_soft": (
-    "Ground-truth head against the teacher",
-    "The calibrated ground-truth head's output against the teacher, on these compounds.",
+    "Hard-label head against the teacher",
+    "The calibrated hard-label head's output against the teacher, on these compounds.",
   ),
 }
 
@@ -95,12 +95,7 @@ def caption(name: str) -> tuple[str, str]:
 
 def _stylia():
   """The configured stylia module, or ``None`` when it is not installed."""
-  try:
-    import stylia
-  except ImportError:
-    return None
-  setup(stylia)
-  return stylia
+  return import_stylia()
 
 
 def render(draw, out_dir: str | Path, name: str, *, cells: tuple[int, int] | None = None) -> dict | None:
@@ -155,8 +150,6 @@ def render(draw, out_dir: str | Path, name: str, *, cells: tuple[int, int] | Non
 
 def correlation(ax, st, y, p, *, metrics: dict, task: str) -> None:
   """Predicted against observed as a density surface, with the y=x line."""
-  from olinda.train.plots import subsample
-
   ys, ps = subsample([np.asarray(y), np.asarray(p)], MAX_SCATTER, 0)
   density(ax, st, ys, ps, role="teacher")
   lo, hi = limits(ax, ys, ps)
@@ -184,8 +177,6 @@ def residual_hist(ax, st, y, p) -> None:
 
 def residuals_vs_pred(ax, st, y, p) -> None:
   """Residual against predicted value — a fan or a slope means the error depends on the answer."""
-  from olinda.train.plots import subsample
-
   y = np.asarray(y, dtype=np.float64)
   p = np.asarray(p, dtype=np.float64)
   ps, rs = subsample([p, p - y], MAX_SCATTER, 0)
@@ -366,19 +357,17 @@ def score_distributions(ax, st, y, p) -> None:
 
 
 def calibrated_vs_soft(ax, st, y, g_soft, *, pearson: float) -> None:
-  """The calibrated ground-truth head against the teacher, with the y=x line.
+  """The calibrated hard-label head against the teacher, with the y=x line.
 
   ``learn-hard`` drew this over the reference library, where it measured how well the isotonic map
   had done its job. Here the same comparison runs on whatever compounds were passed to ``validate``,
   which makes it the more useful version: the map was fitted on the library, so the library was
   always the optimistic case.
   """
-  from olinda.train.plots import subsample
-
   ys, gs = subsample([np.asarray(y, dtype=np.float64), np.asarray(g_soft, dtype=np.float64)], MAX_SCATTER, 0)
   if len(ys) < 3:
     return False
   density(ax, st, ys, gs, role="hard")
   lo, hi = limits(ax, ys, gs)
   reference(ax, st, "diagonal", lo=lo, hi=hi)
-  st.label(ax, xlabel="Teacher value", ylabel="Calibrated ground-truth head", title=f"r = {pearson:.3f}")
+  st.label(ax, xlabel="Teacher value", ylabel="Calibrated hard-label head", title=f"r = {pearson:.3f}")

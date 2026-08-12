@@ -36,12 +36,35 @@ CELLS_PER_WIDTH = 6
 ROLES = {
   "model": "periwinkle",  # what olinda predicts — the surrogate, the blended output, ROC/PR
   "teacher": "cobalt",  # the teacher values the student is judged against
-  "hard": "orchid",  # the ground-truth head and its calibration
-  "gate": "amber",  # applicability / blend weight
+  "hard": "orchid",  # the hard-label head and its calibration
+  "tanimoto": "amber",  # T and the blend weight a
   "active": "crimson",  # the positive class
   "inactive": "cobalt",  # the negative class
   "neutral": "silver",  # diagonals, chance lines, no-skill baselines
 }
+
+
+def import_stylia():
+  """Import stylia and put it into the report's style and format, or return ``None`` if absent.
+
+  The one place olinda imports stylia, because importing it is not as safe as it looks: stylia 1.0.1
+  runs ``shutil.rmtree(matplotlib.get_cachedir())`` at module scope, unconditionally. Whichever
+  process imports it first deletes that directory, and matplotlib does not necessarily recreate it —
+  so the *next* import raises ``FileNotFoundError`` on a path nobody asked about, and a validation run
+  or a training run dies for a font cache. Creating the directory first turns that into the no-op it
+  was meant to be.
+  """
+  import os
+
+  try:
+    import matplotlib
+
+    os.makedirs(matplotlib.get_cachedir(), exist_ok=True)
+    import stylia
+  except ImportError:
+    return None
+  setup(stylia)
+  return stylia
 
 
 def setup(stylia) -> None:
@@ -151,6 +174,19 @@ def density(ax, stylia, x, y, *, role: str = "teacher", label: str = "Compounds"
   bar.outline.set_visible(False)
   bar.ax.tick_params(length=2)
   return hb
+
+
+def subsample(arrays: list[np.ndarray], max_points: int, seed: int) -> list[np.ndarray]:
+  """Jointly subsample a list of equal-length arrays down to ``max_points`` rows.
+
+  Jointly, so the rows stay paired: a residual plot subsampling its x and y independently would show
+  the residuals of one set of compounds against the predictions of another.
+  """
+  n = len(arrays[0])
+  if n <= max_points:
+    return arrays
+  idx = np.random.default_rng(seed).choice(n, size=max_points, replace=False)
+  return [a[idx] for a in arrays]
 
 
 def limits(ax, *values, pad: float = 0.03) -> tuple[float, float]:

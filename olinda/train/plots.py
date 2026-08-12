@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from olinda.helpers import logger
-from olinda.style import density, figure, limits, reference, setup
+from olinda.style import density, figure, import_stylia, limits, reference, subsample
 
 
 def _close(fig) -> None:
@@ -53,15 +53,6 @@ def density_scatter(
   stylia.label(ax, xlabel=xlabel, ylabel=ylabel, title=title)
 
 
-def subsample(arrays: list[np.ndarray], max_points: int, seed: int) -> list[np.ndarray]:
-  """Jointly subsample a list of equal-length arrays down to ``max_points`` rows."""
-  n = len(arrays[0])
-  if n <= max_points:
-    return arrays
-  idx = np.random.default_rng(seed).choice(n, size=max_points, replace=False)
-  return [a[idx] for a in arrays]
-
-
 def save_true_vs_pred(
   y_true: np.ndarray,
   y_pred: np.ndarray,
@@ -87,13 +78,10 @@ def save_true_vs_pred(
   max_points : int
       Read cap for very large validation sets.
   """
-  try:
-    import stylia
-  except ImportError:
+  stylia = import_stylia()
+  if stylia is None:
     logger.warning("stylia not installed — skipping true-vs-pred plot (pip install stylia)")
     return None
-
-  setup(stylia)
 
   y = np.asarray(y_true, dtype=np.float64).ravel()
   p = np.asarray(y_pred, dtype=np.float64).ravel()
