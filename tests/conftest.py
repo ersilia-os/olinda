@@ -278,39 +278,6 @@ def artifact(tmp_path_factory) -> Path:
   return build_artifact(tmp_path_factory.mktemp("artifact"))
 
 
-def peek_internals(model_onnx: Path, smiles, names) -> dict:
-  """Run *model_onnx* with internal tensors promoted to outputs, and return every output by name.
-
-  The shipped graph declares one output per column and keeps ``S``, ``H_S`` and the weight ``a`` to
-  itself — deliberately, so no caller can build a dependency on wiring that is free to change. That
-  leaves the blend arithmetic unverifiable from outside, which is exactly the thing most worth
-  verifying: a cross-wired branch produces plausible numbers.
-
-  So promote them on a throwaway copy. The artifact on disk is untouched, the test sees the parts, and
-  the contract stays closed.
-  """
-  import numpy as np
-  import onnx
-  import onnxruntime as ort
-  from onnx import TensorProto, helper
-
-  from olinda.artifact import OlindaArtifact
-
-  model = onnx.load(str(model_onnx))
-  declared = {o.name for o in model.graph.output}
-  for name in names:
-    if name not in declared:
-      model.graph.output.append(helper.make_tensor_value_info(name, TensorProto.DOUBLE, ["B"]))
-
-  options = ort.SessionOptions()
-  options.log_severity_level = 3
-  session = ort.InferenceSession(model.SerializeToString(), options, providers=["CPUExecutionProvider"])
-  fingerprints = OlindaArtifact(model_onnx).featurize(smiles)
-  outputs = [o.name for o in session.get_outputs()]
-  values = session.run(None, {session.get_inputs()[0].name: fingerprints})
-  return {n: np.asarray(v, dtype=np.float64).ravel() for n, v in zip(outputs, values)}
-
-
 def corrupt_metadata(source: Path, dest: Path, mutate=None) -> Path:
   """Copy *source* to *dest*, editing its olinda metadata block with *mutate* (or removing it).
 
