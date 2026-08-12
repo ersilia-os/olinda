@@ -75,6 +75,18 @@ def cli():
   pass
 
 
+def _columns(value: str | None):
+  """Parse a comma-separated ``--*-label-columns`` value into a list of names, or ``None``.
+
+  An unset — or empty, or all-whitespace — flag means "work it out from the file", which is the
+  behaviour every one of these commands had before the flags existed.
+  """
+  if value is None:
+    return None
+  names = [part.strip() for part in value.split(",") if part.strip()]
+  return names or None
+
+
 @cli.command("setup")
 @click.option(
   "--target-dir",
@@ -100,7 +112,7 @@ def setup_cmd(target_dir):
   "--soft-labels",
   "-s",
   required=True,
-  help="Teacher (soft) values over the reference library (col 0 = SMILES, col 1 = value, library order).",
+  help="Teacher (soft) values over the reference library (SMILES + one or more value columns, library order).",
 )
 @click.option(
   "--hard-labels",
@@ -142,8 +154,40 @@ def setup_cmd(target_dir):
   help="Run an Optuna tuning pass before learn-soft.",
 )
 @click.option("--trials", default=100, type=int, show_default=True, help="Optuna trials (only with --tune).")
+@click.option(
+  "--soft-smiles-column",
+  default=None,
+  help="Name of the SMILES column in --soft-labels (default: `smiles`/`input`, else the first column).",
+)
+@click.option(
+  "--soft-label-columns",
+  default=None,
+  help="Comma-separated teacher columns to distil (default: every value column in the file).",
+)
+@click.option(
+  "--hard-smiles-column",
+  default=None,
+  help="Name of the SMILES column in --hard-labels (default: `smiles`/`input`, else the first column).",
+)
+@click.option(
+  "--hard-label-columns",
+  default=None,
+  help="Comma-separated measurement columns to use (default: every column matching a teacher task).",
+)
 def fit_cmd(
-  soft_labels, hard_labels, model_onnx, task, max_samples, val_frac, num_boost_round, do_tune, trials
+  soft_labels,
+  hard_labels,
+  model_onnx,
+  task,
+  max_samples,
+  val_frac,
+  num_boost_round,
+  do_tune,
+  trials,
+  soft_smiles_column,
+  soft_label_columns,
+  hard_smiles_column,
+  hard_label_columns,
 ):
   """Distill a teacher into a student end-to-end: prepare → (tune) → learn-soft → (learn-hard) → clean.
 
@@ -198,6 +242,10 @@ def fit_cmd(
     task=task,
     max_samples=max_samples,
     val_frac=val_frac,
+    soft_smiles_column=soft_smiles_column,
+    soft_label_columns=soft_label_columns,
+    hard_smiles_column=hard_smiles_column,
+    hard_label_columns=hard_label_columns,
   )
   if do_tune:
     tune_cmd.callback(model_dir=model_dir, trials=trials, max_rows=100_000)
@@ -232,7 +280,7 @@ def fit_cmd(
   "--soft-labels",
   "-s",
   required=True,
-  help="Teacher (soft) values over the reference library (col 0 = SMILES, col 1 = value, same order as the library).",
+  help="Teacher (soft) values over the reference library (SMILES + value columns, same order as the library).",
 )
 @click.option(
   "--hard-labels",
@@ -257,13 +305,48 @@ def fit_cmd(
   help="Use only the first N reference compounds (development subsampling).",
 )
 @click.option("--val-frac", default=0.1, type=float, show_default=True)
-def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac):
+@click.option(
+  "--soft-smiles-column",
+  default=None,
+  help="Name of the SMILES column in --soft-labels (default: `smiles`/`input`, else the first column).",
+)
+@click.option(
+  "--soft-label-columns",
+  default=None,
+  help="Comma-separated teacher columns to distil (default: every value column in the file).",
+)
+@click.option(
+  "--hard-smiles-column",
+  default=None,
+  help="Name of the SMILES column in --hard-labels (default: `smiles`/`input`, else the first column).",
+)
+@click.option(
+  "--hard-label-columns",
+  default=None,
+  help="Comma-separated measurement columns to use (default: every column matching a teacher task).",
+)
+def prepare_cmd(
+  soft_labels,
+  hard_labels,
+  model_dir,
+  task,
+  max_samples,
+  val_frac,
+  soft_smiles_column,
+  soft_label_columns,
+  hard_smiles_column,
+  hard_label_columns,
+):
   """Prepare every teacher column in --soft-labels into one run directory.
 
   Each value column gets its own value-stratified train/val split, recorded as row indices rather
   than a copy of the descriptor matrix. With --hard-labels (a wide file: SMILES plus one column per
   assay, empty where untested), each hard column is matched onto its soft column by name and
   featurized into that column's hard.h5 for a later `learn-hard`.
+
+  Columns are found by convention — a `smiles`/`input` column, then the value columns after it — so
+  the four `--*-column(s)` flags are only needed for files that don't follow it, or to distil a
+  subset of a wide teacher file. Naming a column that isn't in the file is an error.
   """
   import h5py
 
@@ -312,23 +395,35 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
 
   n_steps = 3 if hard_labels is not None else 2
 
-  # --- soft labels: every value column in the file, verified against the library once -------
+  # --- soft labels: the selected value columns, verified against the library once -----------
   step(1, n_steps, "reading teacher columns")
+  wanted_soft = _columns(soft_label_columns)
   try:
-    all_cols, targets = load_reference_calcs_frame(soft_labels, descriptors)
-    check_column_budget(all_cols)
+    all_cols, targets = load_reference_calcs_frame(
+      soft_labels, descriptors, columns=wanted_soft, smiles_column=soft_smiles_column
+    )
+    # The budget bounds what actually gets distilled, so it counts the selection, not the file.
+    selected_cols = list(targets)
+    check_column_budget(selected_cols)
   except ValueError as exc:
     raise click.ClickException(str(exc)) from exc
-  echo(f"{len(all_cols)} teacher column(s): [bold]{', '.join(all_cols)}[/]", "run")
+  if wanted_soft is not None and len(selected_cols) < len(all_cols):
+    skipped = [c for c in all_cols if c not in targets]
+    echo(f"distilling {len(selected_cols)} of {len(all_cols)} column(s) · [dim]skipping {skipped}[/]", "info")
+  echo(f"{len(selected_cols)} teacher column(s): [bold]{', '.join(selected_cols)}[/]", "run")
 
   # --- hard labels: match them onto the soft columns before doing any work ------------------
   hard_map: dict = {}
   if hard_labels is not None:
     from olinda.data.reference import _read_table, resolve_smiles_frame
 
-    _, hard_values = resolve_smiles_frame(_read_table(hard_labels))
     try:
-      hard_map = match_hard_columns(all_cols, [str(c) for c in hard_values.columns])
+      _, hard_values = resolve_smiles_frame(
+        _read_table(hard_labels),
+        smiles_column=hard_smiles_column,
+        label_columns=_columns(hard_label_columns),
+      )
+      hard_map = match_hard_columns(selected_cols, [str(c) for c in hard_values.columns])
     except ValueError as exc:
       raise click.ClickException(str(exc)) from exc
     for hard_col, soft_col in hard_map.items():
@@ -347,7 +442,7 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
     limit=max_samples,
   )
   by_id, splits, name_to_id = {}, {}, {}
-  for name in all_cols:
+  for name in selected_cols:
     y = targets[name]
     train_idx, val_idx = split_reference_to_indices(y, val_frac=val_frac, limit=max_samples)[:2]
     entry = runlib.add_column(manifest, name=name, y=y, train_idx=train_idx, val_idx=val_idx)
@@ -368,7 +463,11 @@ def prepare_cmd(soft_labels, hard_labels, model_dir, task, max_samples, val_frac
     step(3, n_steps, "featurizing hard labels")
     try:
       hard_info = prepare_hard_labels_wide(
-        hard_labels, md, {h: name_to_id[s] for h, s in hard_map.items()}, task=task
+        hard_labels,
+        md,
+        {h: name_to_id[s] for h, s in hard_map.items()},
+        task=task,
+        smiles_column=hard_smiles_column,
       )
     except (ValueError, NotImplementedError) as exc:
       raise click.ClickException(str(exc)) from exc
@@ -785,10 +884,20 @@ def clean_cmd(model_onnx):
   required=True,
   help="The distilled model.onnx (a run directory containing one also works).",
 )
-@click.option("--input", "-i", "input_path", required=True, help="CSV/TSV/Parquet with a `smiles` column.")
+@click.option(
+  "--input", "-i", "input_path", required=True, help="CSV/TSV/Parquet with a `smiles` (or `input`) column."
+)
 @click.option("--output", "-o", "out_path", required=True, help="Output CSV for the predictions.")
-def predict_cmd(model_onnx, input_path, out_path):
-  """Run the fused `model.onnx`: verify RDKit, featurize the `smiles` column (RDKit Morgan), run the graph.
+@click.option(
+  "--smiles-column",
+  default=None,
+  help="Name of the SMILES column (default: `smiles`/`input`, whichever the file has).",
+)
+def predict_cmd(model_onnx, input_path, out_path, smiles_column):
+  """Run the fused `model.onnx`: verify RDKit, featurize the SMILES column (RDKit Morgan), run the graph.
+
+  The input's SMILES column may be called `smiles` or `input` — the latter is what Ersilia writes,
+  and a leading `key` column is ignored — or name it outright with --smiles-column.
 
   Writes a `smiles` column followed by one column per task, named after the teacher column it distils.
   For a model with a ground-truth head that number is already the blend — the applicability weighting
@@ -820,7 +929,7 @@ def predict_cmd(model_onnx, input_path, out_path):
   from olinda.predict import predict_file
 
   try:
-    predict_file(model_onnx, input_path, out_path)
+    predict_file(model_onnx, input_path, out_path, smiles_column=smiles_column)
   except (RDKitVersionMismatch, ValueError, FileNotFoundError) as exc:
     raise click.ClickException(str(exc)) from exc
 
@@ -837,13 +946,45 @@ def predict_cmd(model_onnx, input_path, out_path):
 )
 @click.option("--hard-labels", "-h", default=None, help="Held-out measurements (SMILES + binary columns).")
 @click.option("--output-dir", "-o", "out_dir", default="report", show_default=True, help="Report directory.")
-def validate_cmd(model_onnx, soft_labels, hard_labels, out_dir):
+@click.option(
+  "--soft-smiles-column",
+  default=None,
+  help="Name of the SMILES column in --soft-labels (default: `smiles`/`input`, else the first column).",
+)
+@click.option(
+  "--soft-label-columns",
+  default=None,
+  help="Comma-separated columns of --soft-labels to score (default: every column matching a task).",
+)
+@click.option(
+  "--hard-smiles-column",
+  default=None,
+  help="Name of the SMILES column in --hard-labels (default: `smiles`/`input`, else the first column).",
+)
+@click.option(
+  "--hard-label-columns",
+  default=None,
+  help="Comma-separated columns of --hard-labels to score (default: every column matching a task).",
+)
+def validate_cmd(
+  model_onnx,
+  soft_labels,
+  hard_labels,
+  out_dir,
+  soft_smiles_column,
+  soft_label_columns,
+  hard_smiles_column,
+  hard_label_columns,
+):
   """Measure a finished `model.onnx` on data of your choosing and write a report.
 
   Unlike the teacher file `prepare` takes, these labels have **no size or ordering restriction** — any
   SMILES with values, matched to the model's tasks by name (allowing a suffix). Held-out data is the
   point: the surrogate's isotonic correction was fitted on the run's own validation rows, so only new
   data measures the calibrated model honestly.
+
+  Columns are found by convention — a `smiles`/`input` column, then the values after it. Use the
+  `--*-column(s)` flags for a file that doesn't follow it, or to score one column of a wide file.
 
   `--soft-labels` gives correlation and residual diagnostics; `--hard-labels` gives ROC, precision–recall
   and enrichment — of the model's **blended** output, which is what `predict` emits, not the ground-truth
@@ -867,7 +1008,16 @@ def validate_cmd(model_onnx, soft_labels, hard_labels, out_dir):
   from olinda.report import validate_model
 
   try:
-    report = validate_model(model_onnx, soft_labels=soft_labels, hard_labels=hard_labels, out_dir=out_dir)
+    report = validate_model(
+      model_onnx,
+      soft_labels=soft_labels,
+      hard_labels=hard_labels,
+      out_dir=out_dir,
+      soft_smiles_column=soft_smiles_column,
+      soft_label_columns=_columns(soft_label_columns),
+      hard_smiles_column=hard_smiles_column,
+      hard_label_columns=_columns(hard_label_columns),
+    )
   except (RDKitVersionMismatch, RuntimeError, ValueError, FileNotFoundError) as exc:
     raise click.ClickException(str(exc)) from exc
 

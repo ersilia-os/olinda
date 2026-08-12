@@ -139,3 +139,36 @@ def test_a_non_olinda_onnx_is_refused(tmp_path, monkeypatch):
   onnx.save(m, str(path))
   with pytest.raises(ValueError, match="no olinda metadata"):
     describe_graph(path)
+
+
+# ── the figure style contract ────────────────────────────────────────────────
+
+
+def test_every_figure_the_report_draws_has_a_title_and_caption():
+  """The page reads its captions from this registry, so a new plot without an entry ships bare.
+
+  Guards the pairing rather than the wording: `render` names files `<task>_<figure>` and both
+  halves contain underscores, so the lookup matches the longest key the name ends with.
+  """
+  from olinda.report import plots
+
+  for key, (title, text) in plots.FIGURES.items():
+    assert title and text, f"{key} has an empty title or caption"
+    assert plots.caption(f"some_task_name_{key}") == (title, text), f"{key} is not reachable"
+
+  # the ambiguous pair the longest-match rule exists for
+  assert plots.caption("t_soft_calibration")[0] == "Surrogate correction"
+  assert plots.caption("t_calibration")[0] == "Calibration"
+
+
+def test_the_page_and_the_figures_take_their_colours_from_one_table():
+  """`html.py` paints its colour key from `style.hexcol`, which must agree with what plots draw."""
+  import stylia
+
+  from olinda import style
+
+  for role, name in style.ROLES.items():
+    from_plot = stylia.ArticleColors().hex[name]
+    assert style.hexcol(role).lower() == from_plot.lower(), f"{role} disagrees with stylia"
+    # the offline copy is what the page uses when the report extra is absent
+    assert style._PAPER_FALLBACK[name].lower() == from_plot.lower(), f"{name} fallback is stale"

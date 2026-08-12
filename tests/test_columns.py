@@ -5,7 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from olinda.data.reference import MAX_COLUMNS, check_column_budget, match_hard_columns
+from olinda.data.reference import (
+  MAX_COLUMNS,
+  check_column_budget,
+  match_hard_columns,
+  resolve_smiles_frame,
+  smiles_column_index,
+)
 from olinda.data.split import split_reference_to_indices
 
 
@@ -75,6 +81,74 @@ def test_soft_only_columns_are_simply_absent():
   mapping = match_hard_columns(["a_probability", "b_probability"], ["a"])
   assert mapping == {"a": "a_probability"}
   assert "b_probability" not in mapping.values()
+
+
+# ── which column holds the SMILES, and which hold the labels ─────────────────
+
+
+def _frame(**columns):
+  import pandas as pd
+
+  return pd.DataFrame(columns)
+
+
+def test_smiles_column_is_found_under_either_name():
+  """`smiles` and Ersilia's `input` are both recognised, whatever the case."""
+  assert smiles_column_index(_frame(smiles=["CCO"], v=[1.0])) == 0
+  assert smiles_column_index(_frame(key=["k"], input=["CCO"], v=[1.0])) == 1
+  assert smiles_column_index(_frame(KEY=["k"], SMILES=["CCO"], v=[1.0])) == 1
+
+
+def test_no_recognised_name_is_not_an_error_by_itself():
+  """Callers decide: value-bearing files fall back to column 0, `predict` refuses."""
+  assert smiles_column_index(_frame(compound=["CCO"], v=[1.0])) is None
+
+
+def test_a_named_smiles_column_wins_over_the_convention():
+  frame = _frame(smiles=["CCO"], other=["CCC"], v=[1.0])
+  smiles, values = resolve_smiles_frame(frame, smiles_column="other")
+  assert list(smiles) == ["CCC"]
+  assert list(values.columns) == ["v"]
+
+
+def test_naming_a_smiles_column_that_is_absent_raises_and_lists_what_is_there():
+  with pytest.raises(ValueError, match=r"no column named 'nope'.*compound"):
+    resolve_smiles_frame(_frame(compound=["CCO"], v=[1.0]), smiles_column="nope")
+
+
+def test_the_ersilia_key_input_layout_drops_the_key():
+  """`key` is an id, not a label — it must never reach the model as a value column."""
+  smiles, values = resolve_smiles_frame(_frame(key=["k"], input=["CCO"], activity=[1.0]))
+  assert list(smiles) == ["CCO"]
+  assert list(values.columns) == ["activity"]
+
+
+def test_label_columns_select_and_order():
+  frame = _frame(smiles=["CCO"], a=[1.0], b=[2.0], c=[3.0])
+  _, values = resolve_smiles_frame(frame, label_columns=["c", "a"])
+  assert list(values.columns) == ["c", "a"]
+
+
+def test_label_columns_reach_a_column_before_the_smiles_one():
+  """Selecting by name makes position irrelevant — otherwise `a` here would be unreachable."""
+  frame = _frame(a=[1.0], smiles=["CCO"], b=[2.0])
+  smiles, values = resolve_smiles_frame(frame, label_columns=["a"])
+  assert list(smiles) == ["CCO"]
+  assert list(values.columns) == ["a"]
+
+
+def test_asking_for_a_label_column_that_is_absent_raises():
+  """A silent drop here would train a narrower model than the user asked for."""
+  frame = _frame(smiles=["CCO"], a=[1.0])
+  with pytest.raises(ValueError, match=r"not found: \['b'\]"):
+    resolve_smiles_frame(frame, label_columns=["a", "b"])
+
+
+def test_selecting_one_column_of_a_wide_file():
+  frame = _frame(key=["k"], input=["CCO"], tox=[1.0], sol=[2.0])
+  smiles, values = resolve_smiles_frame(frame, label_columns=["sol"])
+  assert list(smiles) == ["CCO"]
+  assert list(values.columns) == ["sol"]
 
 
 # ── per-column value-stratified split ────────────────────────────────────────
