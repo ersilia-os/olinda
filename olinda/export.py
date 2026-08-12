@@ -647,12 +647,18 @@ def _fuse(model_dir: Path):
     for op in m.opset_import:
       opset[op.domain] = max(opset.get(op.domain, 0), op.version)
 
-  ident = lambda src, dst: helper.make_node("Identity", [src], [dst], name=f"br_{dst}")  # noqa: E731
-  cast_d = lambda src, dst: helper.make_node("Cast", [src], [dst], to=TensorProto.DOUBLE, name=f"br_{dst}")  # noqa: E731
+  def ident(src: str, dst: str):
+    return helper.make_node("Identity", [src], [dst], name=f"br_{dst}")
+
+  def cast_d(src: str, dst: str):
+    return helper.make_node("Cast", [src], [dst], to=TensorProto.DOUBLE, name=f"br_{dst}")
+
   # Tree ONNX outputs are (N,1); flatten to (N,) so they line up with the (N,) calibration/gate stages.
   # Added once for the whole graph — a per-column copy would collide on name and fail the checker.
   inits.append(helper.make_tensor("flat_shape", TensorProto.INT64, [1], [-1]))
-  flat = lambda src, dst: helper.make_node("Reshape", [src, "flat_shape"], [dst], name=f"fl_{dst}")  # noqa: E731
+
+  def flat(src: str, dst: str):
+    return helper.make_node("Reshape", [src, "flat_shape"], [dst], name=f"fl_{dst}")
 
   featurizer: dict = {}
   featurizer_class = "MorganCountFeaturizer"
