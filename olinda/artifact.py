@@ -218,6 +218,7 @@ class OlindaArtifact:
 
     @property
     def n_columns(self) -> int:
+        """How many tasks this model predicts."""
         return len(self._columns)
 
     @property
@@ -227,6 +228,7 @@ class OlindaArtifact:
 
     @property
     def olinda_version(self) -> str | None:
+        """The olinda release that fused this artifact, if it recorded one."""
         return self.metadata.get("olinda_version")
 
     @property
@@ -270,6 +272,7 @@ class OlindaArtifact:
 
     @property
     def n_features(self) -> int:
+        """Fingerprint width the graph expects, read from the embedded featurizer config."""
         return int((self.metadata.get("featurizer") or {}).get("fp_size", 2048))
 
     def to_json(self, indent: int = 2) -> str:

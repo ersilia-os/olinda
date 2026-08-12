@@ -526,6 +526,7 @@ class LiveTable:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self, item) -> None:
+        """Mark *item* as running and begin timing it."""
         item = str(item)
         self._state[item].update(status="running", started=time.time())
         if self._live is None:
@@ -534,6 +535,7 @@ class LiveTable:
         self._refresh()
 
     def update(self, item, **values) -> None:
+        """Set named cells on *item*'s row without changing its status."""
         self._state[str(item)]["values"].update(values)
         self._refresh()
 
@@ -553,6 +555,7 @@ class LiveTable:
         self._refresh()
 
     def finish(self, item, ok: bool = True, **values) -> None:
+        """Close *item* out as done or failed, stamping its elapsed time and final *values*."""
         item = str(item)
         s = self._state[item]
         s["status"] = "done" if ok else "failed"

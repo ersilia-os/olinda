@@ -501,6 +501,11 @@ class TanimotoRegressor:
 
     @classmethod
     def load(cls, directory: str | Path) -> "TanimotoRegressor":
+        """Load T from *directory*, restoring the ramp knees and ceiling it was fitted with.
+
+        Those three numbers are part of the gate, not tuning knobs: reading them back is what makes a
+        reloaded T produce the same blend weight as the run that fitted it.
+        """
         directory = Path(directory)
         with open(directory / _META_NAME) as fp:
             meta = json.load(fp)

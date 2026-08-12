@@ -64,6 +64,12 @@ class MorganCountFeaturizer:
     name: str = "morgan_count"
 
     def transform(self, smiles: list[str]) -> np.ndarray:
+        """Featurize *smiles* into an ``(n, fp_size)`` float32 array of clipped Morgan counts.
+
+        A SMILES RDKit cannot parse yields an all-zero row rather than an error, so callers can spot
+        it (every real fingerprint has nonzero bits) and decide what it means. Counts are clipped at
+        :attr:`count_clip` to match how ``erl0_morgan.h5`` was built.
+        """
         gen = rdFingerprintGenerator.GetMorganGenerator(
             radius=self.radius, fpSize=self.fp_size
         )
@@ -79,6 +85,7 @@ class MorganCountFeaturizer:
         return out
 
     def to_dict(self) -> dict:
+        """The config as plain JSON, which travels inside ``model.onnx`` so it can be rebuilt."""
         return {
             "radius": int(self.radius),
             "fp_size": int(self.fp_size),
@@ -88,6 +95,7 @@ class MorganCountFeaturizer:
 
     @classmethod
     def from_dict(cls, d: dict):
+        """Rebuild a featurizer from :meth:`to_dict` output, defaulting anything absent."""
         return cls(
             radius=int(d.get("radius", 3)),
             fp_size=int(d.get("fp_size", 2048)),

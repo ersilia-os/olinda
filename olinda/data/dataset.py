@@ -311,16 +311,24 @@ class IndexDataIter(xgb.DataIter):
 
     @property
     def n_rows(self) -> int:
+        """How many rows this iterator will yield in total."""
         return self._n
 
     @property
     def n_cols(self) -> int:
+        """Fingerprint width, taken from the underlying matrix."""
         return int(self.matrix.n_cols)
 
     def reset(self) -> None:
+        """Rewind to the first batch. XGBoost calls this between passes over the data."""
         self._pos = 0
 
     def next(self, input_data) -> bool:  # type: ignore[override]
+        """Hand XGBoost the next batch through *input_data*; return False once exhausted.
+
+        Gathers only this batch as float32 — with per-bin weights attached when the run is reweighted —
+        so peak memory stays at the resident uint8 library plus one batch.
+        """
         if self._pos >= self._n:
             return False
         j = min(self._pos + self.batch_rows, self._n)
@@ -335,4 +343,5 @@ class IndexDataIter(xgb.DataIter):
         return True
 
     def close(self) -> None:
+        """Nothing to release: the matrix is owned by the caller and outlives this iterator."""
         return None

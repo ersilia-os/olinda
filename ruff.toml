@@ -75,9 +75,7 @@ extend-select = [
 # whole repo again.
 preview = true
 
-# TODO: drop D101 and D102 once the 47 missing class/method docstrings are written. They are parked
-# here only so the canonical config could land as a reviewable mechanical commit.
-ignore = ["D101", "D102", "D104", "D105", "D107"]
+ignore = ["D104", "D105", "D107"]
 fixable = ["ALL", "D"]
 unfixable = []
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"

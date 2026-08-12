@@ -85,6 +85,13 @@ def get_backend(name: str, device: str):
 
 @dataclass
 class TrainResult:
+    """What a finished fit reports, in engine-neutral terms.
+
+    ``best_iteration`` and ``best_score`` are where early stopping settled, and ``metric`` names the
+    quantity ``best_score`` is in — the two engines call the same squared-error metric ``rmse`` and
+    ``l2``, so the caller has to be told which it received rather than assume.
+    """
+
     model: object
     best_iteration: int
     best_score: float
@@ -115,17 +122,27 @@ def _row_values(
 # XGBoost
 # --------------------------------------------------------------------------------------------------
 class XGBoostBackend:
+    """The XGBoost engine: the GPU path, and what `learn-soft` uses when CUDA is present.
+
+    One of the two implementations of the engine protocol — see :func:`select_backend` for how one is
+    chosen and :data:`CANONICAL_DEFAULTS` for the parameter names both accept. Every method below is
+    the XGBoost half of a pair; :class:`LightGBMBackend` has the same surface.
+    """
+
     name = "xgboost"
     model_file = "xgb.json"
 
     def __init__(self, device: str = "cpu") -> None:
+        """Select the device this engine will train on."""
         self.device = device
 
     def objective_params(self) -> dict:
+        """The objective and eval metric, fixed rather than configurable — see the comment below."""
         # squared error only — well-conditioned, ONNX-exportable (identity link), safe for bounded targets
         return {"objective": "reg:squarederror", "eval_metric": "rmse"}
 
     def translate(self, canonical: dict) -> dict:
+        """Map olinda's canonical parameter names onto this engine's native ones."""
         c = {**CANONICAL_DEFAULTS, **canonical}
         return {
             "tree_method": "hist",
@@ -172,6 +189,7 @@ class XGBoostBackend:
         train_weighted,
         val_eval=None,
     ):
+        """Fit the booster with early stopping, reporting progress, and return a :class:`TrainResult`."""
         from olinda.train.reference import train_regression
 
         booster, evals, best_it = train_regression(
@@ -195,6 +213,7 @@ class XGBoostBackend:
 
     # -- tune path (in-RAM subset, per-round pruning hook) --
     def dataset(self, X, y, weight, max_bin, reference=None):
+        """Wrap in-memory arrays as this engine's dataset type, reusing *reference*'s binning if given."""
         import xgboost as xgb
 
         return xgb.QuantileDMatrix(
@@ -204,6 +223,7 @@ class XGBoostBackend:
     def train_trial(
         self, dtrain, dval, native_params, num_boost_round, early_stopping, on_iteration
     ):
+        """Fit one tuning trial and report its best score, with pruning wired to the study."""
         import xgboost as xgb
 
         p = dict(native_params)
@@ -235,14 +255,17 @@ class XGBoostBackend:
 
     # -- persistence / inference --
     def predict(self, model, X):
+        """Score *X* with a fitted model of this engine's type."""
         import xgboost as xgb
 
         return np.asarray(model.predict(xgb.DMatrix(X)))
 
     def save(self, model, model_dir):
+        """Write the fitted model into *model_dir* under :attr:`model_file`."""
         model.save_model(str(Path(model_dir) / self.model_file))
 
     def load(self, model_dir):
+        """Read back a model written by :meth:`save`."""
         import xgboost as xgb
 
         b = xgb.Booster()
@@ -250,6 +273,7 @@ class XGBoostBackend:
         return b
 
     def to_onnx(self, model, path, input_dim):
+        """Convert the fitted booster to ONNX at *path*, which is what the fuse consumes."""
         from olinda.models.exporters import export_xgb_onnx
 
         export_xgb_onnx(model, path, input_dim)
@@ -259,17 +283,26 @@ class XGBoostBackend:
 # LightGBM
 # --------------------------------------------------------------------------------------------------
 class LightGBMBackend:
+    """The LightGBM engine: the CPU path, and grows leaf-wise rather than depth-wise.
+
+    The other implementation of the engine protocol. It pins itself to CPU regardless of the requested
+    device, because its GPU build cannot use the sparse fingerprint features olinda trains on.
+    """
+
     name = "lightgbm"
     model_file = "model.lgb"
 
     def __init__(self, device: str = "cpu") -> None:
+        """Select the device this engine will train on."""
         self.device = "cpu"  # LightGBM only ever runs on CPU here (its GPU can't use sparse features)
 
     def objective_params(self) -> dict:
+        """The objective and eval metric, fixed rather than configurable — see the comment below."""
         # squared error only (L2) — ONNX-exportable and well-conditioned; single metric for clean early stopping
         return {"objective": "regression", "metric": "l2"}
 
     def translate(self, canonical: dict) -> dict:
+        """Map olinda's canonical parameter names onto this engine's native ones."""
         c = {**CANONICAL_DEFAULTS, **canonical}
         md = int(c["max_depth"])
         return {
@@ -293,9 +326,11 @@ class LightGBMBackend:
         }
 
     def params(self, canonical: dict) -> dict:
+        """Full native params: the structural translation plus the objective."""
         return {**self.translate(canonical), **self.objective_params()}
 
     def _metric_name(self, native_params) -> str:
+        """The single early-stopping metric name, unwrapped when the engine reports a list."""
         m = native_params.get("metric", "l2")
         return m[-1] if isinstance(m, (list, tuple)) else m
 
@@ -338,6 +373,7 @@ class LightGBMBackend:
         train_weighted,
         val_eval=None,
     ):
+        """Fit the booster with early stopping, reporting progress, and return a :class:`TrainResult`."""
         import time as _time
 
         import lightgbm as lgb
@@ -412,6 +448,7 @@ class LightGBMBackend:
 
     # -- tune path (in-RAM subset, per-round pruning hook) --
     def dataset(self, X, y, weight, max_bin, reference=None):
+        """Wrap in-memory arrays as this engine's dataset type, reusing *reference*'s binning if given."""
         import lightgbm as lgb
 
         return lgb.Dataset(
@@ -426,6 +463,7 @@ class LightGBMBackend:
     def train_trial(
         self, dtrain, dval, native_params, num_boost_round, early_stopping, on_iteration
     ):
+        """Fit one tuning trial and report its best score, with pruning wired to the study."""
         import lightgbm as lgb
 
         metric = self._metric_name(native_params)
@@ -451,20 +489,24 @@ class LightGBMBackend:
 
     # -- persistence / inference --
     def predict(self, model, X):
+        """Score *X* with a fitted model of this engine's type."""
         return np.asarray(model.predict(X))
 
     def save(self, model, model_dir):
+        """Write the fitted model into *model_dir* under :attr:`model_file`."""
         # Persist only up to best_iteration → the loaded model predicts with exactly the selected trees.
         model.save_model(
             str(Path(model_dir) / self.model_file), num_iteration=model.best_iteration
         )
 
     def load(self, model_dir):
+        """Read back a model written by :meth:`save`."""
         import lightgbm as lgb
 
         return lgb.Booster(model_file=str(Path(model_dir) / self.model_file))
 
     def to_onnx(self, model, path, input_dim):
+        """Convert the fitted booster to ONNX at *path*, which is what the fuse consumes."""
         import onnxmltools
         from onnxmltools.convert.common.data_types import FloatTensorType
 

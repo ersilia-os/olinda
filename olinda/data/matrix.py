@@ -83,6 +83,7 @@ class ReferenceMatrix:
         return out
 
     def nbytes(self) -> int:
+        """Resident size of the fingerprint block, for the memory lines in the run summary."""
         return int(self.x.nbytes)
 
     def assert_matches(self, reference: dict) -> None:

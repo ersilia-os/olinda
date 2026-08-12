@@ -87,6 +87,7 @@ class IsotonicCalibrator:
 
     @property
     def is_fitted(self) -> bool:
+        """True once :meth:`fit` (or :meth:`load`) has supplied the knots to interpolate over."""
         return self._x is not None
 
     def fit(
