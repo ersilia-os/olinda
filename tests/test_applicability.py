@@ -1,13 +1,14 @@
-"""Learned applicability gate: Tanimoto-NN labeling, Bernoulli-NB, and the bucket→weight mapping."""
+"""Learned applicability gate: exact Tanimoto-NN labelling, and the similarity → blend-weight ramp."""
 
 import numpy as np
+import pytest
 
 from olinda.applicability import (
-  A_HIGH,
-  A_LOW,
-  ApplicabilityClassifier,
-  BernoulliNB,
+  A_CEILING,
+  SIM_HI,
+  SIM_LO,
   prepare_gt_bits,
+  ramp,
   tanimoto_nn,
 )
 
@@ -46,78 +47,6 @@ def _counts(bits, y):
   return cn, on
 
 
-def test_bernoulli_nb_learns_separable_feature():
-  # feature 0 on ⇒ class 1, off ⇒ class 0.
-  bits = np.array([[1, 0], [1, 0], [0, 1], [0, 1]], dtype=np.float32)
-  y = np.array([1, 1, 0, 0])
-  nb = BernoulliNB.from_counts(*_counts(bits, y))
-  assert nb.predict(np.array([[1, 0]]))[0] == 1
-  assert nb.predict(np.array([[0, 1]]))[0] == 0
-
-
-def test_bernoulli_nb_uniform_prior_beats_imbalance():
-  # 1000 negatives, 5 positives — an empirical prior would never predict positive, but a query matching the
-  # positive feature profile must still be classified positive under the uniform prior.
-  d = 6
-  neg = np.zeros((1000, d), dtype=np.float32)
-  neg[:, 0] = 1  # negatives carry feature 0
-  pos = np.zeros((5, d), dtype=np.float32)
-  pos[:, 1] = 1  # positives carry feature 1
-  bits = np.vstack([neg, pos])
-  y = np.array([0] * 1000 + [1] * 5)
-  nb = BernoulliNB.from_counts(*_counts(bits, y))
-  assert nb.predict(np.array([[0, 1, 0, 0, 0, 0]]))[0] == 1
-
-
-def test_bernoulli_nb_roundtrips():
-  bits = np.array([[1, 0], [0, 1]], dtype=np.float32)
-  nb = BernoulliNB.from_counts(*_counts(bits, np.array([1, 0])))
-  nb2 = BernoulliNB.from_dict(nb.to_dict())
-  q = np.array([[1, 0], [0, 1]])
-  assert np.array_equal(nb.predict(q), nb2.predict(q))
-
-
-# ── ApplicabilityClassifier (bucket → weight) ─────────────────────────────────
-
-
-class _ConstNB:
-  """Stub NB that always predicts a fixed class — to test the ordinal bucket→weight logic."""
-
-  def __init__(self, cls):
-    self._cls = cls
-
-  def predict(self, bits):
-    return np.full(len(bits), self._cls)
-
-
-def test_weight_bucket_mapping_and_high_precedence():
-  bits = np.zeros((1, 3))
-  # HIGH fires (regardless of low) → A_HIGH
-  assert ApplicabilityClassifier(_ConstNB(1), _ConstNB(1)).weight(bits)[0] == A_HIGH
-  # only LOW fires → A_LOW
-  assert ApplicabilityClassifier(_ConstNB(1), _ConstNB(0)).weight(bits)[0] == A_LOW
-  # neither fires → 0
-  assert ApplicabilityClassifier(_ConstNB(0), _ConstNB(0)).weight(bits)[0] == 0.0
-  # HIGH takes precedence even if the (nominally nested) low classifier says 0
-  assert ApplicabilityClassifier(_ConstNB(0), _ConstNB(1)).weight(bits)[0] == A_HIGH
-
-
-def test_applicability_classifier_roundtrips(tmp_path):
-  bits = np.array([[1, 0], [0, 1]], dtype=np.float32)
-  low = BernoulliNB.from_counts(*_counts(bits, np.array([0, 1])))
-  high = BernoulliNB.from_counts(*_counts(bits, np.array([0, 1])))
-  clf = ApplicabilityClassifier(low, high, a_low=A_LOW, a_high=A_HIGH)
-  p = tmp_path / "ad.json"
-  clf.save(p)
-  reloaded = ApplicabilityClassifier.load(p)
-  q = np.array([[1, 0], [0, 1]])
-  assert np.allclose(reloaded.weight(q), clf.weight(q))
-  assert (reloaded.a_low, reloaded.a_high) == (A_LOW, A_HIGH)
-
-
-# ── the blocked nearest-neighbour search must not change any number ───────────
-
-
 def _unblocked_reference(query_bits, prepared):
   """The pre-optimisation formulation: one full (queries x labelled) pass, explicit 0/0 guard."""
   q = (np.asarray(query_bits) > 0).astype(np.float32)
@@ -149,3 +78,33 @@ def test_degenerate_fingerprints_score_zero():
   assert np.array_equal(tanimoto_nn(empty, prepared=prepare_gt_bits(labelled)), np.zeros(3))
   assert np.array_equal(tanimoto_nn(empty, prepared=prepare_gt_bits(empty)), np.zeros(3))
   assert np.array_equal(tanimoto_nn(labelled[:4], prepared=prepare_gt_bits(np.zeros((0, 256)))), np.zeros(4))
+
+
+# ── the ramp (similarity → blend weight) ─────────────────────────────────────
+
+
+def test_ramp_is_zero_below_the_lower_knee():
+  """Far from the labelled chemistry the hard head must not speak at all."""
+  assert ramp([0.0, 0.1, SIM_LO - 1e-9]).tolist() == [0.0, 0.0, 0.0]
+
+
+def test_ramp_saturates_at_the_ceiling():
+  assert ramp([SIM_HI, 0.9, 1.0]).tolist() == [A_CEILING] * 3
+
+
+def test_ramp_is_continuous_across_the_knees():
+  """The bucketed gate this replaced jumped 0.33 → 0.66 across sim_hi; nothing may jump now."""
+  s = np.linspace(0.0, 1.0, 2001)
+  a = ramp(s)
+  assert np.all(np.diff(a) >= -1e-12), "the ramp must be non-decreasing"
+  assert np.max(np.diff(a)) < 0.01, "no step should be visible at this resolution"
+
+
+def test_ramp_is_linear_between_the_knees():
+  mid = (SIM_LO + SIM_HI) / 2
+  assert ramp([mid])[0] == pytest.approx(A_CEILING / 2)
+
+
+def test_a_max_of_zero_disables_the_blend_everywhere():
+  """A hard head that has not earned any weight must be switched off, however similar the query."""
+  assert ramp([0.0, 0.5, 1.0], a_max=0.0).tolist() == [0.0, 0.0, 0.0]

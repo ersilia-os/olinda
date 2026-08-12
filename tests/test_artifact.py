@@ -155,8 +155,7 @@ def test_importing_olinda_does_not_check_rdkit(tmp_path, monkeypatch):
   import sys
 
   code = (
-    "import rdkit; rdkit.__version__ = '0.0.0-not-real';"
-    "import olinda; print(olinda.OlindaArtifact.__name__)"
+    "import rdkit; rdkit.__version__ = '0.0.0-not-real';import olinda; print(olinda.OlindaArtifact.__name__)"
   )
   out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
   assert out.returncode == 0, out.stderr

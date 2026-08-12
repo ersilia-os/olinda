@@ -333,9 +333,9 @@ def test_an_interrupted_learn_hard_does_not_brick_the_run(tmp_path, monkeypatch)
 
 def test_parity_probe_exercises_the_hard_blend(tmp_path, monkeypatch):
   """Fixed probe molecules may all score zero applicability, leaving the hard head unchecked."""
+  from olinda.applicability import SimilarityRegressor
   from olinda.export import _parity_probe
-  from olinda.applicability import ApplicabilityClassifier
-  from olinda.ground_truth import APPLICABILITY_NAME, GT_DIRNAME
+  from olinda.ground_truth import APPLICABILITY_DIRNAME, GT_DIRNAME
 
   md = _fit_with_hard(tmp_path, monkeypatch)
   from olinda.export import _column_plan
@@ -344,7 +344,7 @@ def test_parity_probe_exercises_the_hard_blend(tmp_path, monkeypatch):
   probe = _parity_probe(plan)
   assert len(probe) > 5, "the probe must add labelled compounds, not just the fixed molecules"
 
-  clf = ApplicabilityClassifier.load(md / "columns" / "c0" / GT_DIRNAME / APPLICABILITY_NAME)
+  clf = SimilarityRegressor.load(md / "columns" / "c0" / GT_DIRNAME / APPLICABILITY_DIRNAME)
   assert (np.asarray(clf.weight(probe > 0)) > 0).any(), "blend never exercised — hard head unchecked"
 
 

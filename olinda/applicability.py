@@ -9,13 +9,24 @@ labeled chemistry:
     prediction = (1 - a) * surrogate + a * ground_truth_soft
 
 Rather than search the labeled set for each query at predict time, the gate is **learned once** at
-``learn-hard`` time: every reference-library compound is bucketed by its 1-NN Tanimoto similarity to the
-labeled set into NOT SIMILAR / LOW / HIGH, and two simple Bernoulli **Naive-Bayes** classifiers are fit on
-binarized Morgan features — ``clf_low`` ("at least LOW") and ``clf_high`` ("HIGH"). At predict time the two
-classifiers place a query in a bucket (two dot products, no fingerprint comparison), which sets ``a``.
+``learn-hard`` time: :func:`tanimoto_nn` gives every reference-library compound its exact 1-NN Tanimoto
+to the labeled set, and a small gradient-boosted :class:`SimilarityRegressor` learns to predict that
+number from the fingerprint alone. At predict time one tree ensemble estimates the similarity and a
+linear ramp turns it into ``a`` — no fingerprint comparison, and the labeled set never leaves the run.
 
-:func:`tanimoto_nn` is the training-time labeling helper. :class:`BernoulliNB` is the tiny NB engine and
-:class:`ApplicabilityClassifier` bundles the two classifiers plus the bucket→weight mapping.
+``a`` is a product of two measured quantities:
+
+    a = a_max * ramp(predicted similarity)
+
+The ramp says *where* the hard signal may speak; ``a_max`` says *how loudly*, and is earned by the hard
+head beating the surrogate out-of-fold on the labelled compounds (:mod:`olinda.ground_truth`). A head
+that loses gets ``a_max = 0`` and the model ships soft-only.
+
+This replaced a pair of Bernoulli Naive-Bayes classifiers over similarity *buckets*. Measured on a real
+run, that gate opened the hard channel on 32.6% of the library against a true rate of ~7%, with 0.013
+precision on its top bucket: "within 0.4 Tanimoto of any of 7,684 compounds" is a union of balls, and a
+Naive-Bayes decision is one linear boundary. Regressing the similarity keeps the magnitude, drops the
+thresholds, and makes ``a`` continuous.
 """
 
 from __future__ import annotations
@@ -25,13 +36,15 @@ from pathlib import Path
 
 import numpy as np
 
-# Similarity buckets (1-NN Tanimoto to the labeled set): HIGH >= SIM_HI, LOW in [SIM_LO, SIM_HI),
-# NOT SIMILAR < SIM_LO. Weights favour the surrogate everywhere except close to the labeled chemistry.
+# Knees of the ramp, in 1-NN Tanimoto to the labelled set: a = 0 below SIM_LO, rising linearly to
+# a_max at SIM_HI. Same constants the bucket edges used, so the intent is unchanged — what goes is the
+# cliff between them.
 SIM_LO: float = 0.4
 SIM_HI: float = 0.7
-A_LOW: float = 0.33
-A_HIGH: float = 0.66
-NB_ALPHA: float = 1.0  # Laplace smoothing for the Bernoulli likelihoods
+
+# Ceiling on the blend weight. Even an exact match keeps a third of the surrogate, because the hard head
+# is trained on far less data and the surrogate carries the teacher's whole view of the library.
+A_CEILING: float = 0.66
 
 # Labelled-set columns per similarity block. Only the row-wise maximum survives, so scoring the whole
 # labelled set at once would build several (queries x labelled) arrays — measured at 6.9 GB for one
@@ -89,132 +102,112 @@ def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray = None, *, prepared=
   return best.astype(np.float64)
 
 
-class BernoulliNB:
-  """A minimal two-class Bernoulli Naive-Bayes over binary features.
+# Capacity of the similarity regressor. Chosen by measurement against the real eos3804 artifact, not
+# inherited from CANONICAL_DEFAULTS: 300 rounds x 64 leaves reaches R² 0.46 for 1.4 MB and 2.6 µs per
+# molecule, against a surrogate that already costs 42.5 MB and 35 µs. Doubling the leaves buys R² 0.51
+# for twice the size, which is not worth it for a weight that only decides how much to trust another
+# model. Depth rather than a leaf count because that is the canonical knob both backends translate —
+# LightGBM derives num_leaves = min(2**max_depth - 1, 255), so 6 gives 63.
+GATE_ROUNDS: int = 300
+GATE_MAX_DEPTH: int = 6
+GATE_MAX_BIN: int = 64
 
-  Fit from sufficient statistics (per-class row counts and per-class feature-on counts) so it can be
-  trained by streaming — no full feature matrix is held in memory. Uniform class priors by default, so a
-  heavily imbalanced negative class does not swamp the rare positives; the decision is then driven by the
-  class-conditional feature likelihoods.
+_META_NAME = "gate_meta.json"
+
+
+def ramp(similarity, *, a_max: float = A_CEILING, sim_lo: float = SIM_LO, sim_hi: float = SIM_HI):
+  """Map predicted similarity onto a blend weight: 0 below ``sim_lo``, ``a_max`` at ``sim_hi``.
+
+  Linear in between, so two compounds either side of a knee no longer receive very different weights —
+  the bucketed gate this replaced jumped from 0.33 to 0.66 across ``sim_hi``.
   """
-
-  def __init__(self, log_prior: np.ndarray, log_theta: np.ndarray, log_neg_theta: np.ndarray) -> None:
-    self.log_prior_ = np.asarray(log_prior, dtype=np.float64)  # (2,)
-    self.log_theta_ = np.asarray(log_theta, dtype=np.float64)  # (2, d) log P(x_j=1 | c)
-    self.log_neg_theta_ = np.asarray(log_neg_theta, dtype=np.float64)  # (2, d) log P(x_j=0 | c)
-
-  @classmethod
-  def from_counts(
-    cls,
-    class_counts: np.ndarray,
-    feat_on_counts: np.ndarray,
-    *,
-    alpha: float = NB_ALPHA,
-    uniform_prior: bool = True,
-  ) -> "BernoulliNB":
-    """Build the classifier from streamed sufficient statistics.
-
-    Parameters
-    ----------
-    class_counts : np.ndarray
-        ``(2,)`` number of training rows in class 0 and class 1.
-    feat_on_counts : np.ndarray
-        ``(2, d)`` number of rows in each class for which feature ``j`` is on.
-    alpha : float
-        Laplace smoothing added to on/off counts.
-    uniform_prior : bool
-        ``True`` uses a uniform class prior (imbalance-robust); ``False`` uses the empirical prior.
-    """
-    n = np.asarray(class_counts, dtype=np.float64)  # (2,)
-    on = np.asarray(feat_on_counts, dtype=np.float64)  # (2, d)
-    theta = (on + alpha) / (n[:, None] + 2.0 * alpha)  # P(x_j=1 | c), smoothed
-    theta = np.clip(theta, 1e-12, 1.0 - 1e-12)
-    if uniform_prior:
-      log_prior = np.log(np.full(2, 0.5))
-    else:
-      total = float(n.sum()) or 1.0
-      log_prior = np.log(np.clip(n / total, 1e-12, 1.0))
-    return cls(log_prior, np.log(theta), np.log1p(-theta))
-
-  def _log_posterior(self, bits: np.ndarray) -> np.ndarray:
-    x = (np.asarray(bits) > 0).astype(np.float64)  # (m, d)
-    # log P(c) + Σ_j [x_j log θ_cj + (1-x_j) log(1-θ_cj)]
-    return self.log_prior_[None, :] + x @ self.log_theta_.T + (1.0 - x) @ self.log_neg_theta_.T
-
-  def predict(self, bits: np.ndarray) -> np.ndarray:
-    """Predicted class (0/1) per row, ``argmax`` of the log-posterior."""
-    return self._log_posterior(bits).argmax(axis=1)
-
-  def to_dict(self) -> dict:
-    return {
-      "log_prior": self.log_prior_.tolist(),
-      "log_theta": self.log_theta_.tolist(),
-      "log_neg_theta": self.log_neg_theta_.tolist(),
-    }
-
-  @classmethod
-  def from_dict(cls, d: dict) -> "BernoulliNB":
-    return cls(d["log_prior"], d["log_theta"], d["log_neg_theta"])
+  s = np.asarray(similarity, dtype=np.float64).ravel()
+  span = max(float(sim_hi) - float(sim_lo), 1e-9)
+  return float(a_max) * np.clip((s - float(sim_lo)) / span, 0.0, 1.0)
 
 
-class ApplicabilityClassifier:
-  """Two Bernoulli-NB classifiers + the bucket→weight mapping that gates the hard signal.
+class SimilarityRegressor:
+  """Predicts a compound's 1-NN Tanimoto to the labelled set, and turns it into a blend weight.
 
-  ``clf_high`` predicts HIGH similarity, ``clf_low`` predicts at-least-LOW. A query is HIGH if ``clf_high``
-  fires (HIGH takes precedence), else LOW if ``clf_low`` fires, else NOT SIMILAR — mapping to blend weights
-  ``a_high`` / ``a_low`` / ``0``.
+  The model is a small gradient-boosted regressor over the same binarised Morgan features everything
+  else uses, trained on the reference library with :func:`tanimoto_nn` as the target. It is a *stand-in*
+  for a nearest-neighbour search: approximate by construction, but it keeps the labelled fingerprints
+  out of the shipped artifact and costs one tree ensemble per query instead of a scan.
+
+  Attributes
+  ----------
+  model : object
+      The trained booster, in the backend's native form.
+  backend : str
+      Which engine trained it, so it can be reloaded and converted to ONNX.
+  a_max : float
+      Ceiling on the blend weight — earned from the hard head's out-of-fold margin over the surrogate,
+      so a head that does not beat the surrogate yields 0 and disables the blend entirely.
   """
 
   def __init__(
     self,
-    clf_low: BernoulliNB,
-    clf_high: BernoulliNB,
+    model,
+    backend: str,
     *,
-    a_low: float = A_LOW,
-    a_high: float = A_HIGH,
+    a_max: float = A_CEILING,
     sim_lo: float = SIM_LO,
     sim_hi: float = SIM_HI,
+    metrics: dict | None = None,
   ) -> None:
-    self.clf_low = clf_low
-    self.clf_high = clf_high
-    self.a_low = float(a_low)
-    self.a_high = float(a_high)
+    self.model = model
+    self.backend = str(backend)
+    self.a_max = float(a_max)
     self.sim_lo = float(sim_lo)
     self.sim_hi = float(sim_hi)
+    self.metrics = dict(metrics or {})
+
+  def predict_similarity(self, bits: np.ndarray) -> np.ndarray:
+    """Estimated 1-NN Tanimoto per row, clipped to [0, 1] — the target's own range."""
+    from olinda.train.backend import get_backend
+
+    x = (np.asarray(bits) > 0).astype(np.float32)
+    raw = get_backend(self.backend, "cpu").predict(self.model, x)
+    return np.clip(np.asarray(raw, dtype=np.float64).ravel(), 0.0, 1.0)
 
   def weight(self, bits: np.ndarray) -> np.ndarray:
-    """Blend weight ``a`` per row: ``a_high`` if HIGH, else ``a_low`` if LOW, else ``0`` (float64)."""
-    high = self.clf_high.predict(bits) == 1
-    low = self.clf_low.predict(bits) == 1
-    return np.where(high, self.a_high, np.where(low, self.a_low, 0.0)).astype(np.float64)
+    """Blend weight ``a`` per row (float64)."""
+    return ramp(self.predict_similarity(bits), a_max=self.a_max, sim_lo=self.sim_lo, sim_hi=self.sim_hi)
 
-  def to_dict(self) -> dict:
-    return {
-      "type": "bernoulli_nb_2clf",
-      "sim_lo": self.sim_lo,
-      "sim_hi": self.sim_hi,
-      "a_low": self.a_low,
-      "a_high": self.a_high,
-      "clf_low": self.clf_low.to_dict(),
-      "clf_high": self.clf_high.to_dict(),
-    }
+  def save(self, directory: str | Path) -> None:
+    """Write the booster plus the ramp parameters into *directory*."""
+    from olinda.train.backend import get_backend
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    get_backend(self.backend, "cpu").save(self.model, directory)
+    with open(directory / _META_NAME, "w") as fp:
+      json.dump(
+        {
+          "type": "similarity_regressor",
+          "backend": self.backend,
+          "a_max": self.a_max,
+          "sim_lo": self.sim_lo,
+          "sim_hi": self.sim_hi,
+          "metrics": self.metrics,
+        },
+        fp,
+        indent=2,
+      )
 
   @classmethod
-  def from_dict(cls, d: dict) -> "ApplicabilityClassifier":
+  def load(cls, directory: str | Path) -> "SimilarityRegressor":
+    from olinda.train.backend import get_backend
+
+    directory = Path(directory)
+    with open(directory / _META_NAME) as fp:
+      meta = json.load(fp)
+    backend = meta.get("backend", "lightgbm")
     return cls(
-      BernoulliNB.from_dict(d["clf_low"]),
-      BernoulliNB.from_dict(d["clf_high"]),
-      a_low=d.get("a_low", A_LOW),
-      a_high=d.get("a_high", A_HIGH),
-      sim_lo=d.get("sim_lo", SIM_LO),
-      sim_hi=d.get("sim_hi", SIM_HI),
+      get_backend(backend, "cpu").load(directory),
+      backend,
+      a_max=meta.get("a_max", A_CEILING),
+      sim_lo=meta.get("sim_lo", SIM_LO),
+      sim_hi=meta.get("sim_hi", SIM_HI),
+      metrics=meta.get("metrics"),
     )
-
-  def save(self, path: str | Path) -> None:
-    with open(Path(path), "w") as fp:
-      json.dump(self.to_dict(), fp)
-
-  @classmethod
-  def load(cls, path: str | Path) -> "ApplicabilityClassifier":
-    with open(Path(path)) as fp:
-      return cls.from_dict(json.load(fp))

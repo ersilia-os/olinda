@@ -44,7 +44,7 @@ GT_DIRNAME = "_ground_truth"
 GT_MODEL_SUBDIR = "gt"
 G_REFERENCE_NAME = "g_reference.h5"  # G's score for every reference-library compound (aligned to erl0_morgan)
 CALIBRATOR_NAME = "g_to_soft.json"  # isotonic map from G's output onto the soft-label scale
-APPLICABILITY_NAME = "applicability_nb.json"  # two Bernoulli-NB classifiers gating the hard signal
+APPLICABILITY_DIRNAME = "applicability"  # the similarity regressor gating the hard signal
 GT_META_NAME = "ground_truth_meta.json"
 GT_EVAL_NAME = "gt_eval.json"
 
@@ -152,90 +152,94 @@ def _pearson(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _fit_applicability(gt_bits, n_features, matrix, sim_lo: float, sim_hi: float, chunk: int = 50_000):
-  """Learn the applicability gate: bucket the reference by Tanimoto-NN to the labeled set, fit two NB models.
+  """Learn the applicability gate: regress each reference compound's 1-NN Tanimoto to the labelled set.
 
-  Streams the reference library once, computing each compound's 1-NN Tanimoto similarity to the labeled set
-  (``gt_bits``) and accumulating the Bernoulli-NB sufficient statistics for two binary targets — ``sim >=
-  sim_lo`` (at-least-LOW) and ``sim >= sim_hi`` (HIGH). The labeled compounds themselves are HIGH by
-  definition, so they are folded in as guaranteed positives (this also relieves the HIGH-class imbalance).
+  Streams the library once, computing the exact similarity per chunk (:func:`~olinda.applicability.tanimoto_nn`)
+  and keeping it as a continuous target, then fits a small gradient-boosted regressor on the same binarised
+  Morgan features the rest of the pipeline uses. The regressor stands in for a nearest-neighbour search at
+  predict time: approximate, but it keeps the labelled fingerprints out of the shipped artifact.
+
+  Labelled compounds that are themselves in the library land at similarity 1.0 naturally; those outside
+  it are not seen by the regressor, which is why its quality is reported against a held-out library slice
+  rather than assumed.
 
   Returns
   -------
   tuple
-      ``(clf, counts)`` where ``clf`` is an :class:`~olinda.applicability.ApplicabilityClassifier` and
-      ``counts`` is ``{"n_ref", "n_high", "n_low", "n_not", "n_gt"}`` for reporting.
+      ``(regressor, stats)`` where ``regressor`` is a :class:`~olinda.applicability.SimilarityRegressor`
+      and ``stats`` reports the target distribution and the fit's held-out quality.
   """
-
   from olinda.applicability import (
-    A_HIGH,
-    A_LOW,
-    ApplicabilityClassifier,
-    BernoulliNB,
+    A_CEILING,
+    GATE_MAX_BIN,
+    GATE_MAX_DEPTH,
+    GATE_ROUNDS,
+    SimilarityRegressor,
     prepare_gt_bits,
     tanimoto_nn,
   )
-
-  d = int(n_features)
-  # Bernoulli-NB sufficient statistics per target: rows-per-class (2,) and feature-on counts (2, d).
-  low_n = np.zeros(2, dtype=np.float64)
-  low_on = np.zeros((2, d), dtype=np.float64)
-  high_n = np.zeros(2, dtype=np.float64)
-  high_on = np.zeros((2, d), dtype=np.float64)
-  n_high = n_low = 0
-
-  def _accumulate(bits, y, class_n, feat_on, col_total):
-    """Add one chunk's Bernoulli-NB sufficient statistics for a binary target.
-
-    The per-class feature counts come from a matvec rather than ``bits[mask].sum(0)``: masking
-    materialises a copy of up to the whole chunk, four times per chunk. Both classes are exact —
-    the features are 0/1, so the sums are integers well inside float32's exact range.
-    """
-    n_pos = int(y.sum())
-    on_pos = y.astype(np.float32) @ bits
-    class_n[1] += n_pos
-    class_n[0] += int(len(y) - n_pos)
-    feat_on[1] += on_pos
-    feat_on[0] += col_total - on_pos
+  from olinda.metrics import regression_metrics
+  from olinda.train.backend import get_backend, select_backend
 
   gt_prepared = prepare_gt_bits(gt_bits)  # built once, reused for every chunk
   n = matrix.n_rows
+  sim = np.empty(n, dtype=np.float32)
   with sweep_progress("scanning", n) as tick:
     for start in range(0, n, chunk):
-      bits = (matrix.x[start : start + chunk] > 0).astype(np.float32)
-      sim = tanimoto_nn(bits, prepared=gt_prepared)
-      y_low = (sim >= sim_lo).astype(np.int64)
-      y_high = (sim >= sim_hi).astype(np.int64)
-      col_total = bits.sum(axis=0)  # shared by both targets' class-0 counts
-      _accumulate(bits, y_low, low_n, low_on, col_total)
-      _accumulate(bits, y_high, high_n, high_on, col_total)
-      n_low += int(y_low.sum())
-      n_high += int(y_high.sum())
-      tick(min(start + chunk, n))
+      stop = min(start + chunk, n)
+      bits = (matrix.x[start:stop] > 0).astype(np.float32)
+      sim[start:stop] = tanimoto_nn(bits, prepared=gt_prepared)
+      tick(stop)
 
-  # Fold the labeled compounds in as guaranteed positives (HIGH ⇒ also ≥ LOW).
-  gb = (np.asarray(gt_bits) > 0).astype(np.float32)
-  n_gt = int(gb.shape[0])
-  low_n[1] += n_gt
-  low_on[1] += gb.sum(axis=0)
-  high_n[1] += n_gt
-  high_on[1] += gb.sum(axis=0)
+  n_gt = int(np.asarray(gt_bits).shape[0])
+  backend_name, device, _ = select_backend()
+  be = get_backend(backend_name, device)
 
-  clf = ApplicabilityClassifier(
-    BernoulliNB.from_counts(low_n, low_on),
-    BernoulliNB.from_counts(high_n, high_on),
-    a_low=A_LOW,
-    a_high=A_HIGH,
+  # Hold out a slice of the library to report honest quality; the labelled compounds go in training,
+  # where they anchor the top of the similarity range.
+  rng = np.random.default_rng(42)
+  order = rng.permutation(n)
+  n_val = min(50_000, max(1, n // 10))
+  val_idx, train_idx = np.sort(order[:n_val]), np.sort(order[n_val:])
+
+  params = {
+    **be.translate({"max_bin": GATE_MAX_BIN, "max_depth": GATE_MAX_DEPTH, "learning_rate": 0.1}),
+    **be.objective_params(),
+  }
+  dtrain, dval = be.build_train_val_indexed(matrix, sim, train_idx, val_idx, GATE_MAX_BIN, None, None)
+  xval = matrix.gather(val_idx)
+  res = be.train(
+    dtrain,
+    dval,
+    params,
+    num_boost_round=GATE_ROUNDS,
+    early_stopping=max(20, GATE_ROUNDS // 10),
+    train_weighted=False,
+    val_eval=(xval, sim[val_idx].astype(np.float32)),
+  )
+  metrics = regression_metrics(sim[val_idx], be.predict(res.model, xval))
+  del xval
+
+  regressor = SimilarityRegressor(
+    res.model,
+    backend_name,
+    a_max=A_CEILING,
     sim_lo=sim_lo,
     sim_hi=sim_hi,
+    metrics={k: metrics[k] for k in ("n", "r2", "spearman", "rmse")},
   )
-  counts = {
-    "n_ref": n,
-    "n_high": n_high,
-    "n_low": n_low - n_high,  # exclusively LOW (HIGH ⊂ ≥LOW)
-    "n_not": n - n_low,
+  stats = {
+    "n_ref": int(n),
     "n_gt": n_gt,
+    "sim_median": float(np.median(sim)),
+    "sim_p99": float(np.quantile(sim, 0.99)),
+    "sim_max": float(sim.max()),
+    "frac_above_lo": float((sim >= sim_lo).mean()),
+    "frac_above_hi": float((sim >= sim_hi).mean()),
+    "n_trees": int(res.n_trees),
+    **{f"fit_{k}": v for k, v in regressor.metrics.items()},
   }
-  return clf, counts
+  return regressor, stats
 
 
 def prepare_hard_labels(input_csv: str | Path, out_dir: str | Path, *, task: str = "auto") -> dict:
@@ -516,24 +520,26 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     for p in plots:
       echo(f"  plot → {p.relative_to(gt_root)}", "run")
 
-    # === Step 4/4 — learn the applicability gate (two NB classifiers) ======
-    from olinda.applicability import A_HIGH, A_LOW, SIM_HI, SIM_LO
+    # === Step 4/4 — learn the applicability gate (similarity regressor) ====
+    from olinda.applicability import A_CEILING, SIM_HI, SIM_LO
 
-    echo("Step 4/4 · learning applicability classifiers (NOT / LOW / HIGH) from the reference", "run")
+    echo("Step 4/4 · learning the applicability gate — regressing similarity to the labelled set", "run")
     gt_bits = (X > 0).astype(np.float32)
     ad_clf, ad_counts = _fit_applicability(gt_bits, X.shape[1], matrix, SIM_LO, SIM_HI)
-    ad_clf.save(gt_root / APPLICABILITY_NAME)
+    ad_clf.save(gt_root / APPLICABILITY_DIRNAME)
     echo(
-      f"  buckets over {ad_counts['n_ref']:,} reference compounds · "
-      f"HIGH {ad_counts['n_high']:,} · LOW {ad_counts['n_low']:,} · NOT {ad_counts['n_not']:,} "
-      f"(+{ad_counts['n_gt']:,} labeled compounds folded in as HIGH)",
+      f"  true similarity over {ad_counts['n_ref']:,} reference compounds · "
+      f"median {ad_counts['sim_median']:.3f} · {ad_counts['frac_above_lo']:.1%} above {SIM_LO} · "
+      f"{ad_counts['frac_above_hi']:.1%} above {SIM_HI}",
       "run",
     )
     echo(
-      f"  fitted 2 Bernoulli-NB (sim_lo={SIM_LO}, sim_hi={SIM_HI} · weights LOW={A_LOW}, HIGH={A_HIGH}) "
-      f"→ {APPLICABILITY_NAME}",
+      f"  regressor R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} "
+      f"on {ad_counts['fit_n']:,} held-out compounds · {ad_counts['n_trees']:,} trees "
+      f"→ {APPLICABILITY_DIRNAME}/",
       "run",
     )
+    echo(f"  blend weight ramps 0 → {A_CEILING} across similarity {SIM_LO} → {SIM_HI}", "run")
 
   # --- persist metadata + eval ---------------------------------------------
   import lazyqsar as _lq
@@ -545,16 +551,12 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     "n_reference": int(len(gv)),
   }
   applicability = {
-    "signal": "bernoulli_nb_2clf",
+    "signal": "similarity_regressor",
     "sim_lo": SIM_LO,
     "sim_hi": SIM_HI,
-    "a_low": A_LOW,
-    "a_high": A_HIGH,
-    "n_gt": ad_counts["n_gt"],
-    "n_high": ad_counts["n_high"],
-    "n_low": ad_counts["n_low"],
-    "n_not": ad_counts["n_not"],
-    "artifact": APPLICABILITY_NAME,
+    "a_max": A_CEILING,
+    "artifact": APPLICABILITY_DIRNAME,
+    **ad_counts,
   }
   meta = {
     "task": "binary",
@@ -565,8 +567,8 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     "gt_dir": GT_MODEL_SUBDIR,
     "g_reference": G_REFERENCE_NAME,
     "calibrator": CALIBRATOR_NAME,
-    # Applicability gate is learned here and applied at predict time (two NB classifiers, no similarity
-    # search). Blend: prediction = (1-a)*surrogate + a*ground_truth_soft.
+    # Applicability gate is learned here and applied at predict time (a similarity regressor, no
+    # similarity search). Blend: prediction = (1-a)*surrogate + a*ground_truth_soft.
     "applicability": applicability,
     "lazyqsar_version": getattr(_lq, "__version__", "unknown"),
   }
@@ -589,8 +591,8 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     ),
     (
       "Applicability",
-      f"HIGH [bold]{ad_counts['n_high']:,}[/] · LOW [bold]{ad_counts['n_low']:,}[/] · "
-      f"NOT [bold]{ad_counts['n_not']:,}[/] → [dim]{APPLICABILITY_NAME}[/]",
+      f"similarity R² [bold]{ad_counts['fit_r2']:.3f}[/] · "
+      f"{ad_counts['frac_above_lo']:.1%} of the library above {SIM_LO} → [dim]{APPLICABILITY_DIRNAME}/[/]",
     ),
     ("Saved", f"[dim]{gt_root}[/]"),
   ]

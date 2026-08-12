@@ -836,7 +836,7 @@ def predict_cmd(model_onnx, input_path, out_path):
   help="Held-out teacher values (SMILES + value columns). Any size, any order.",
 )
 @click.option("--hard-labels", "-h", default=None, help="Held-out measurements (SMILES + binary columns).")
-@click.option("--out-dir", "-o", "out_dir", default="report", show_default=True, help="Report directory.")
+@click.option("--output-dir", "-o", "out_dir", default="report", show_default=True, help="Report directory.")
 def validate_cmd(model_onnx, soft_labels, hard_labels, out_dir):
   """Measure a finished `model.onnx` on data of your choosing and write a report.
 

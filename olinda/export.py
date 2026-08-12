@@ -29,7 +29,7 @@ import numpy as np
 from olinda.console import STEP_COLORS, echo, path as cpath, rule, success, summary_panel
 from olinda.metrics import json_safe
 from olinda.ground_truth import (
-  APPLICABILITY_NAME,
+  APPLICABILITY_DIRNAME,
   HARD_H5_NAME,
   CALIBRATOR_NAME,
   GT_DIRNAME,
@@ -208,52 +208,68 @@ def isotonic_to_onnx(cal, out_path: Path, *, in_name: str = "input", out_name: s
 # ── applicability NB gate → ONNX ──────────────────────────────────────────────
 
 
-def _nb_linear(nb):
-  """(W (d,2), B (2,)) such that argmax(bits @ W + B) == BernoulliNB.predict(bits)."""
-  W = (nb.log_theta_ - nb.log_neg_theta_).T
-  B = nb.log_prior_ + nb.log_neg_theta_.sum(axis=1)
-  return W.astype(np.float64), B.astype(np.float64)
-
-
 def _applicability_model(clf, n_features: int, in_name: str, out_name: str):
-  """ONNX ``ModelProto``: fp(float32) → blend weight ``a`` (double) via two linear NB scorers + bucket."""
+  """ONNX ``ModelProto``: fp(float32) → blend weight ``a`` (double).
+
+  The gate is a similarity regressor followed by a linear ramp, so the graph is the booster's own tree
+  ensemble plus five element-wise ops. The regressor's output is clipped to [0, 1] first — trees can
+  extrapolate past the target's range, and a similarity above 1 would otherwise push ``a`` past its
+  ceiling.
+  """
+  import onnx
   from onnx import TensorProto, helper
 
-  Wl, Bl = _nb_linear(clf.clf_low)
-  Wh, Bh = _nb_linear(clf.clf_high)
+  from olinda.train.backend import get_backend
+
+  with tempfile.TemporaryDirectory() as td:
+    path = Path(td) / "gate.onnx"
+    get_backend(clf.backend, "cpu").to_onnx(clf.model, path, n_features)
+    tree = onnx.load(str(path))
+
+  # Splice the ramp onto the booster's own graph rather than composing two models: one output tensor,
+  # one place for the arithmetic, and no prefix juggling for a five-node tail.
+  tree_out = tree.graph.output[0].name
+  span = max(float(clf.sim_hi) - float(clf.sim_lo), 1e-9)
   ct = helper.make_tensor
-  init = [
-    ct("Wl", TensorProto.DOUBLE, list(Wl.shape), Wl.ravel()),
-    ct("Bl", TensorProto.DOUBLE, [2], Bl),
-    ct("Wh", TensorProto.DOUBLE, list(Wh.shape), Wh.ravel()),
-    ct("Bh", TensorProto.DOUBLE, [2], Bh),
-    ct("zero", TensorProto.FLOAT, [1], [0.0]),
-    ct("a_low", TensorProto.DOUBLE, [1], [clf.a_low]),
-    ct("a_high", TensorProto.DOUBLE, [1], [clf.a_high]),
-    ct("a_zero", TensorProto.DOUBLE, [1], [0.0]),
-  ]
-  nodes = [
-    helper.make_node("Greater", [in_name, "zero"], ["onb"]),
-    helper.make_node("Cast", ["onb"], ["x"], to=TensorProto.DOUBLE),
-    helper.make_node("MatMul", ["x", "Wl"], ["sl0"]),
-    helper.make_node("Add", ["sl0", "Bl"], ["sl"]),
-    helper.make_node("ArgMax", ["sl"], ["low_c"], axis=1, keepdims=0),
-    helper.make_node("MatMul", ["x", "Wh"], ["sh0"]),
-    helper.make_node("Add", ["sh0", "Bh"], ["sh"]),
-    helper.make_node("ArgMax", ["sh"], ["high_c"], axis=1, keepdims=0),
-    helper.make_node("Cast", ["high_c"], ["highb"], to=TensorProto.BOOL),
-    helper.make_node("Cast", ["low_c"], ["lowb"], to=TensorProto.BOOL),
-    helper.make_node("Where", ["lowb", "a_low", "a_zero"], ["a_low_or_0"]),
-    helper.make_node("Where", ["highb", "a_high", "a_low_or_0"], [out_name]),
-  ]
-  g = helper.make_graph(
-    nodes,
-    "applicability",
-    [helper.make_tensor_value_info(in_name, TensorProto.FLOAT, ["B", int(n_features)])],
-    [helper.make_tensor_value_info(out_name, TensorProto.DOUBLE, ["B"])],
-    initializer=init,
-  )
-  return helper.make_model(g, opset_imports=[helper.make_opsetid("", _OPSET)])
+  tree.graph.initializer.extend([
+    ct("ap_zero", TensorProto.DOUBLE, [1], [0.0]),
+    ct("ap_one", TensorProto.DOUBLE, [1], [1.0]),
+    ct("ap_lo", TensorProto.DOUBLE, [1], [float(clf.sim_lo)]),
+    ct("ap_span", TensorProto.DOUBLE, [1], [span]),
+    ct("ap_max", TensorProto.DOUBLE, [1], [float(clf.a_max)]),
+  ])
+  tree.graph.node.extend([
+    helper.make_node("Cast", [tree_out], ["ap_simd"], to=TensorProto.DOUBLE),
+    helper.make_node("Reshape", ["ap_simd", "ap_flat"], ["ap_sim1"]),
+    helper.make_node("Clip", ["ap_sim1", "ap_zero", "ap_one"], ["ap_sim"]),
+    helper.make_node("Sub", ["ap_sim", "ap_lo"], ["ap_shift"]),
+    helper.make_node("Div", ["ap_shift", "ap_span"], ["ap_frac0"]),
+    helper.make_node("Clip", ["ap_frac0", "ap_zero", "ap_one"], ["ap_frac"]),
+    helper.make_node("Mul", ["ap_frac", "ap_max"], [out_name]),
+  ])
+  tree.graph.initializer.append(ct("ap_flat", TensorProto.INT64, [1], [-1]))
+  del tree.graph.output[:]
+  tree.graph.output.append(helper.make_tensor_value_info(out_name, TensorProto.DOUBLE, ["B"]))
+  if tree.graph.input[0].name != in_name:
+    _rename_input(tree, in_name)
+  # Raise ONLY the default domain: the converter emits it at 8, and Clip takes its bounds as inputs
+  # from 11 onward. ai.onnx.ml carries TreeEnsembleRegressor and tops out far below _OPSET — setting
+  # that one to 16 is what makes onnxruntime reject the node as deprecated.
+  default = next((o for o in tree.opset_import if o.domain in ("", "ai.onnx")), None)
+  if default is None:
+    default = tree.opset_import.add()
+    default.domain = ""
+  default.version = _OPSET
+  tree.ir_version = _IR_VERSION
+  return tree
+
+
+def _rename_input(model, new_name: str) -> None:
+  """Point a converted booster's graph at ``new_name`` so the fuse can wire it up like any other stage."""
+  old = model.graph.input[0].name
+  model.graph.input[0].name = new_name
+  for node in model.graph.node:
+    node.input[:] = [new_name if i == old else i for i in node.input]
 
 
 def applicability_to_onnx(clf, n_features: int, out_path: Path, *, in_name: str = "input") -> dict:
@@ -520,7 +536,7 @@ def _fuse(model_dir: Path):
   from onnx import TensorProto, helper
   from onnx.compose import add_prefix
 
-  from olinda.applicability import ApplicabilityClassifier
+  from olinda.applicability import SimilarityRegressor
   from olinda.calibrate import IsotonicCalibrator
   from olinda.featurizer import featurizer_from_meta
   from olinda.models.bundle import StudentModel
@@ -593,7 +609,7 @@ def _fuse(model_dir: Path):
       nodes.append(ident(g_src, f"{p}hc__in"))
       nodes.append(ident(f"{p}hc__out", f"{p}ground_truth_soft"))
 
-      clf = ApplicabilityClassifier.load(gt_root / APPLICABILITY_NAME)
+      clf = SimilarityRegressor.load(gt_root / APPLICABILITY_DIRNAME)
       collect(_applicability_model(clf, n_features, "input", "applicability"), f"{p}ap")
       nodes.append(ident("input", f"{p}ap__input"))
       nodes.append(ident(f"{p}ap__applicability", f"{p}applicability"))
@@ -670,13 +686,13 @@ def build_bundle(model_dir: str | Path) -> dict:
 
     from lazyqsar.base.xgboost import BaseXGBArtifact
 
-    from olinda.applicability import ApplicabilityClassifier
+    from olinda.applicability import SimilarityRegressor
     from olinda.calibrate import IsotonicCalibrator
 
     gt_root = entry["dir"] / GT_DIRNAME
     g = np.asarray(BaseXGBArtifact.load(str(gt_root / GT_MODEL_SUBDIR)).run(fp))[:, 1].astype(np.float64)
     gsoft = np.asarray(IsotonicCalibrator.load(gt_root / CALIBRATOR_NAME).transform(g)).ravel()
-    a = np.asarray(ApplicabilityClassifier.load(gt_root / APPLICABILITY_NAME).weight(fp > 0)).ravel()
+    a = np.asarray(SimilarityRegressor.load(gt_root / APPLICABILITY_DIRNAME).weight(fp > 0)).ravel()
     if not (a > 0).any():
       raise RuntimeError(
         f"parity probe for column {entry['name']!r} scored zero applicability on every molecule, so "
