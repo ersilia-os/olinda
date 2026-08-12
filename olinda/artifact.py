@@ -218,16 +218,6 @@ class OlindaArtifact:
     """The RDKit build the featurizer must match."""
     return (self.metadata.get("featurizer") or {}).get("rdkit_version")
 
-  def channels_for(self, task: str) -> dict:
-    """``{role: output name}`` for one task's internal channels, empty if it has none.
-
-    A blended column exposes four: ``s`` (the surrogate), ``h`` (the hard-label model), ``h_s`` (``h``
-    carried onto ``s``'s scale) and ``a`` (the blend weight), alongside its prediction. A soft-only
-    column exposes none — its ``s`` *is* its prediction. Artifacts fused before these were declared
-    also return empty, which is why callers should ask rather than build the names themselves.
-    """
-    return dict(self._column(task).get("channels") or {})
-
   def _column(self, task: str) -> dict:
     for c in self._columns:
       if c["name"] == task:
@@ -292,29 +282,43 @@ class OlindaArtifact:
     # The featurizer already allocates float32, so this is a view rather than a copy.
     return np.asarray(self._featurizer.transform([str(s) for s in smiles]), dtype=np.float32)
 
-  def run_channels(self, smiles, batch_size: int = _BATCH, progress: bool | None = None) -> dict:
-    """Every named output of the graph, as a dict of 1-D arrays keyed by output name.
+  def run(self, smiles, batch_size: int = _BATCH, progress: bool | None = None):
+    """Predict for a list of SMILES. This is the only way to run the model.
 
-    Most callers want :meth:`run`, which is this plus a DataFrame. A blended column also declares its
-    intermediate channels as graph outputs — ``S``, ``H``, ``H_S`` and the blend weight ``a`` — so they
-    appear here too, under the names :meth:`channels_for` reports.
-    Ask for them by that route rather than assembling the names: a soft-only column has none, and so
-    does an artifact fused before the channels were declared.
+    Parameters
+    ----------
+    smiles : sequence of str
+        The molecules to score.
+    batch_size : int, optional
+        Rows per forward pass. Bounds memory on large inputs; does not change results.
+    progress : bool, optional
+        Show a progress bar on stderr. Defaults to showing one for multi-batch inputs on a terminal,
+        so redirected output and notebooks stay clean.
 
-    ``progress`` shows a bar on stderr; the default shows one only for inputs larger than a single
-    batch, and only when stderr is a terminal.
+    Returns
+    -------
+    pandas.DataFrame
+        A ``smiles`` column followed by **one column per task** — the prediction, which for a blended
+        column already folds in the hard-label model at the weight it earned. The graph declares
+        nothing else: the pieces behind that number are internal to it by design.
 
-    Molecules RDKit cannot parse yield ``NaN`` in every channel rather than a number. Their
-    fingerprint is all-zero, which the graph happily scores — the trees take every "bit absent"
-    branch and the gate's first layer sees nothing but its own bias — so an unparseable input would
-    otherwise come back looking like a confident prediction.
+    Notes
+    -----
+    Molecules RDKit cannot parse come back as ``NaN``, and a single warning names how many. Their
+    fingerprint is all-zero, which the graph happily scores — the trees take every "bit absent" branch
+    and ``T``'s first layer sees nothing but its own bias — so without this an unparseable input would
+    return a confident-looking number.
     """
     import warnings
+
+    import pandas as pd
 
     smiles = _as_smiles_list(smiles)
     batch_size = int(batch_size)
     if batch_size < 1:
       raise ValueError(f"batch_size must be at least 1, got {batch_size}")
+
+    wanted = [c["output"] for c in self._columns]
     chunks: list[dict] = []
     n_invalid = 0
     with _Progress(len(smiles), enabled=progress) as bar:
@@ -337,34 +341,11 @@ class OlindaArtifact:
         RuntimeWarning,
         stacklevel=2,
       )
-    if not chunks:
-      return {n: np.array([], dtype=np.float64) for n in self._output_names}
-    return {n: np.concatenate([c[n] for c in chunks]) for n in self._output_names}
-
-  def run(self, smiles, batch_size: int = _BATCH, progress: bool | None = None):
-    """Predict for a list of SMILES.
-
-    Parameters
-    ----------
-    smiles : sequence of str
-        The molecules to score.
-    batch_size : int, optional
-        Rows per forward pass. Bounds memory on large inputs; does not change results.
-    progress : bool, optional
-        Show a progress bar on stderr. Defaults to showing one for multi-batch inputs on a terminal.
-
-    Returns
-    -------
-    pandas.DataFrame
-        A ``smiles`` column followed by **one column per task** — the final blended prediction,
-        which already folds in the blend weight ``a``. The intermediate channels behind it
-        are available from :meth:`run_channels`.
-    """
-    import pandas as pd
-
-    smiles = _as_smiles_list(smiles)
-    channels = self.run_channels(smiles, batch_size=batch_size, progress=progress)  # already str
-    values = {c["name"]: channels[c["output"]] for c in self._columns}
+    if chunks:
+      scored = {n: np.concatenate([c[n] for c in chunks]) for n in wanted}
+    else:
+      scored = {n: np.array([], dtype=np.float64) for n in wanted}
+    values = {c["name"]: scored[c["output"]] for c in self._columns}
     return pd.DataFrame({"smiles": smiles, **values})
 
   def __len__(self) -> int:

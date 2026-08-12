@@ -5,9 +5,11 @@ graph that runs on onnxruntime alone. Two shapes:
 
 - **soft-only**: ``fp → soft_model → [soft_correction] → prediction`` (= ``S``).
 - **hard present**: fuse ``S``, ``H → h_correction`` (``H_S``), ``T → ramp`` (the weight ``a``) and the
-  blender, ``(1-a)·S + a·H_S``. A column named ``assay`` then declares five outputs: ``assay`` (the
-  prediction) plus ``assay__s``, ``assay__h``, ``assay__h_s`` and ``assay__a`` — the pieces behind it,
-  named for the symbols in :mod:`olinda.hard`.
+  blender, ``(1-a)·S + a·H_S``.
+
+Either way a column declares **one output, its prediction**, named after the teacher column. ``S``,
+``H_S`` and ``a`` stay internal tensors: they are how the answer is computed, not part of the answer,
+and declaring them would let callers depend on a wiring that has already changed once.
 
 The **featurizer config + provenance travel inside ``model.onnx`` metadata** (``metadata_props["olinda"]``),
 so the file is self-describing — a consumer reads the Morgan config (and RDKit version) to build the 2048-count
@@ -40,9 +42,6 @@ from olinda.hard import (
 )
 
 MODEL_NAME = "model.onnx"
-# Separates a column's name from the channel it exposes: "assay_probability__h_s". Doubled
-# so it cannot be mistaken for part of a task name, which routinely contains single underscores.
-CHANNEL_SEP = "__"
 # One schema, versioned from here on. Nothing in the wild predates it, so there is no legacy shape to
 # read: OlindaArtifact refuses a bundle it does not recognise and says to re-run `olinda export`.
 BUNDLE_SCHEMA = "olinda.bundle.v1"
@@ -440,7 +439,7 @@ def _bundle_metadata(manifest: dict, plan: list, featurizer: dict, featurizer_cl
   one-element case. Within a column, every model that contributes is an entry in ``heads``, each
   carrying its own ``task`` — so a classification surrogate, or a regression hard head, needs a
   different ``type`` and no new keys. How the heads combine is *not* described here: the graph is the
-  only statement of that, and ``channels`` records which of its outputs are exposed.
+  only statement of that, and its single output per column is the only thing a consumer reads.
 
   Nothing derivable is stored. ``n_columns``, the flat output list and "does this have a hard head"
   are all properties of ``columns``, and duplicating them here is how they come to disagree with it.
@@ -659,7 +658,6 @@ def _fuse(model_dir: Path):
   featurizer_class = "MorganCountFeaturizer"
   n_features = 2048
   outputs: list[str] = []
-  channels: dict[str, dict[str, str]] = {}
 
   for entry in plan:
     p = entry["id"] + "_"  # every node and tensor of this column is namespaced by it
@@ -697,7 +695,6 @@ def _fuse(model_dir: Path):
         collect(_prob1_model("p", "g"), f"{p}pr")
         nodes.append(ident(f"{p}hm__probabilities", f"{p}pr__p"))
         g_src = f"{p}pr__g"
-      nodes.append(cast_d(g_src, f"{p}h"))
 
       gcal = IsotonicCalibrator.load(hard_root / H_TO_S_NAME)
       collect(_isotonic_model(gcal, "in", "out"), f"{p}hc")
@@ -720,22 +717,10 @@ def _fuse(model_dir: Path):
     nodes.append(ident(f"{p}prediction", entry["output"]))
     outputs.append(entry["output"])
 
-    # Declare the pieces behind a blended prediction as outputs of their own. They already exist as
-    # internal tensors; without this they are unreachable, so `validate` could show the isotonic map
-    # recovered from the initialisers but never what the hard-label head actually predicts on real
-    # compounds. Only for blended columns — for a soft-only one the surrogate *is* the prediction.
-    if entry["has_hard"]:
-      chans = {}
-      for role in ("s", "h", "h_s", "a"):
-        public = f"{entry['output']}{CHANNEL_SEP}{role}"
-        nodes.append(ident(f"{p}{role}", public))
-        chans[role] = public
-      channels[entry["name"]] = chans
-
-  out_vi = [
-    helper.make_tensor_value_info(n, TensorProto.DOUBLE, ["B"])
-    for n in outputs + [c for spec in channels.values() for c in spec.values()]
-  ]
+  # One output per column and nothing else. ``S``, ``H_S`` and ``a`` remain as internal tensors — the
+  # blender consumes them — but they are working, not product: declaring them would invite callers to
+  # depend on a wiring we need to stay free to change.
+  out_vi = [helper.make_tensor_value_info(n, TensorProto.DOUBLE, ["B"]) for n in outputs]
   graph = helper.make_graph(
     _toposort(nodes, {"input"} | {i.name for i in inits}),
     "olinda_model",
@@ -745,10 +730,6 @@ def _fuse(model_dir: Path):
   )
   model = helper.make_model(graph, opset_imports=[helper.make_opsetid(d, v) for d, v in opset.items()])
   md = _bundle_metadata(manifest, plan, featurizer, featurizer_class)
-  # Which of the graph's outputs this column exposes beyond its prediction. Recorded rather than
-  # constructed by consumers: a soft-only column has none, and the names are the graph's to choose.
-  for col in md["columns"]:
-    col["channels"] = channels.get(col["name"], {})
 
   # Standard ONNX provenance, so the file identifies itself to any tool (Netron, hub tooling, the
   # onnx CLI) without them having to know about the custom metadata key below.

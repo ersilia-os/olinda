@@ -88,7 +88,7 @@ matches `abaumannii_inhibition_probability`. Anything ambiguous is an error, not
 
 Olinda then trains a model on your labels, calibrates it onto the teacher's scale (learning the
 direction from the data), and learns where to trust it. Three models, one letter each — the same names
-appear in the code, in the run directory and in the fused graph's channels:
+appear in the code and in the run directory:
 
 | | |
 |---|---|

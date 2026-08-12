@@ -75,7 +75,7 @@ def test_fit_soft_only_then_predict(tmp_path, monkeypatch):
   assert len(df) == 5
 
 
-def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
+def test_fit_with_hard_labels_blends_behind_one_output(tmp_path, monkeypatch):
   home = tmp_path / "home"
   home.mkdir()
   soft = _stage_reference(home, tmp_path, monkeypatch)
@@ -85,7 +85,7 @@ def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
   xu = MorganCountFeaturizer().transform(_SM)
   lab = (xu[:, :100].sum(1) > np.median(xu[:, :100].sum(1))).astype(int)
   pd.DataFrame({"smiles": _SM, "y": lab}).to_csv(gt, index=False)  # matches the soft column
-  onnx = tmp_path / "model.onnx"
+  onnx_path = tmp_path / "model.onnx"
 
   r = _run([
     "fit",
@@ -94,7 +94,7 @@ def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
     "-h",
     str(gt),
     "-m",
-    str(onnx),
+    str(onnx_path),
     "--val-frac",
     "0.2",
     "--num-boost-round",
@@ -104,21 +104,20 @@ def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
 
   from olinda import OlindaArtifact
 
-  model = OlindaArtifact(onnx)
+  model = OlindaArtifact(onnx_path)
   assert model.has_hard is True
   assert model.columns == ["y"]
-  # A blended column publishes its prediction *and* the pieces behind it, so validate can show what
-  # the hard-label head actually said rather than only the isotonic map read off the initialisers.
-  channels = model.run_channels(_SM[:4])
-  assert set(channels) == {"y", "y__s", "y__h", "y__h_s", "y__a"}
-  assert model.channels_for("y")["a"] == "y__a"
+  # A blended column declares exactly one output. S, H_S and the weight a are how that number is
+  # computed, not part of it, so the graph keeps them to itself.
+  import onnx
 
-  # The published prediction must *be* the blend of the channels beside it — otherwise the exposed
-  # pieces describe some other computation than the one that produced the answer.
-  a = channels["y__a"]
-  np.testing.assert_allclose(
-    channels["y"],
-    (1.0 - a) * channels["y__s"] + a * channels["y__h_s"],
-    atol=1e-9,
-  )
+  from tests.conftest import peek_internals
+
+  assert [o.name for o in onnx.load(str(onnx_path)).graph.output] == ["y"]
+
+  # ...and that one number must *be* the blend. Read the parts by promoting them on a copy: this is
+  # the assertion that would catch a cross-wired branch, and it costs the artifact nothing.
+  ch = peek_internals(onnx_path, _SM[:4], ("c0_s", "c0_h_s", "c0_a"))
+  a = ch["c0_a"]
+  np.testing.assert_allclose(ch["y"], (1.0 - a) * ch["c0_s"] + a * ch["c0_h_s"], atol=1e-9)
   assert model.roles_for("y") == ["soft", "hard"]

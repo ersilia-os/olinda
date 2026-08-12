@@ -64,10 +64,6 @@ FIGURES = {
     "Score distributions",
     "What the model predicts against what the teacher says, as distributions rather than pairs.",
   ),
-  "h_s_vs_teacher": (
-    "H_S against the teacher",
-    "What the calibrated hard-label model says against the teacher, on these compounds.",
-  ),
 }
 
 # Footprint on the 3 cm reference grid, (rows, cols). Square data spaces stay square; a
@@ -354,20 +350,3 @@ def score_distributions(ax, st, y, p) -> None:
     ylabel="Compounds",
     title=f"spread {p.std():.3f} vs teacher {y.std():.3f}",
   )
-
-
-def h_s_vs_teacher(ax, st, y, h_s, *, pearson: float) -> None:
-  """The calibrated hard-label head against the teacher, with the y=x line.
-
-  ``learn-hard`` drew this over the reference library, where it measured how well the isotonic map
-  had done its job. Here the same comparison runs on whatever compounds were passed to ``validate``,
-  which makes it the more useful version: the map was fitted on the library, so the library was
-  always the optimistic case.
-  """
-  ys, gs = subsample([np.asarray(y, dtype=np.float64), np.asarray(h_s, dtype=np.float64)], MAX_SCATTER, 0)
-  if len(ys) < 3:
-    return False
-  density(ax, st, ys, gs, role="hard")
-  lo, hi = limits(ax, ys, gs)
-  reference(ax, st, "diagonal", lo=lo, hi=hi)
-  st.label(ax, xlabel="Teacher value", ylabel="H_S", title=f"r = {pearson:.3f}")
