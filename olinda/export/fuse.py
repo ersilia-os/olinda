@@ -88,6 +88,7 @@ def _fuse(model_dir: Path):
     opset: dict = {"": _OPSET}
 
     def collect(model, prefix: str) -> None:
+        """Absorb one stage's nodes and initializers, namespaced by *prefix* so columns cannot collide."""
         m = add_prefix(model, prefix + "__")
         nodes.extend(m.graph.node)
         inits.extend(m.graph.initializer)
@@ -95,9 +96,11 @@ def _fuse(model_dir: Path):
             opset[op.domain] = max(opset.get(op.domain, 0), op.version)
 
     def ident(src: str, dst: str):
+        """A pass-through edge, which is how one stage's output becomes the next one's input."""
         return helper.make_node("Identity", [src], [dst], name=f"br_{dst}")
 
     def cast_d(src: str, dst: str):
+        """Widen to float64: the calibration and blend stages all compute in double."""
         return helper.make_node(
             "Cast", [src], [dst], to=TensorProto.DOUBLE, name=f"br_{dst}"
         )
@@ -107,6 +110,7 @@ def _fuse(model_dir: Path):
     inits.append(helper.make_tensor("flat_shape", TensorProto.INT64, [1], [-1]))
 
     def flat(src: str, dst: str):
+        """Reshape a tree's (N,1) output to (N,), so it lines up with the downstream stages."""
         return helper.make_node("Reshape", [src, "flat_shape"], [dst], name=f"fl_{dst}")
 
     featurizer: dict = {}
