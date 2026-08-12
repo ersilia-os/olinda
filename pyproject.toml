@@ -15,33 +15,39 @@ dependencies = [
 
 [project.optional-dependencies]
 # Reading a model and reporting on it: `olinda validate`, and the figures training writes along the
-# way. Enough to inspect a model.onnx you were handed, without any of the training stack — onnx to
-# read the graph's own calibration curves, stylia/matplotlib to draw. Plots go through stylia;
-# matplotlib is pinned rather than left to stylia's floor because it is what actually renders the
-# figures, and a drifting version changes them.
+# way. Enough to inspect a model.onnx you were handed, without any of the *learning* stack — no
+# xgboost, lightgbm, optuna, lazyqsar or h5py. onnx reads the graph's own calibration curves and
+# stylia/matplotlib draw; matplotlib is pinned rather than left to stylia's floor because it is what
+# actually renders the figures, and a drifting version changes them.
+#
+# The rest of this list is load-bearing, not decoration: `olinda validate` is a click command that
+# prints through olinda.console (rich), and the paths it takes to reach the reference library and read
+# a label file pull in olinda.helpers (loguru), the download progress bar (tqdm) and pandas' parquet
+# engine (pyarrow). All small and pure-Python, so the tier stays light — and CI installs exactly this
+# list and then runs `olinda validate`, so a missing one is a failing build, not a user's traceback.
 report = [
+    "click==8.4.2",
+    "loguru==0.7.3",
     "matplotlib==3.11.0",
     "onnx==1.22.0",
+    "pyarrow==24.0.0",
+    "rich==14.1.0",
+    "rich-click==1.9.8",
     "stylia==1.0.1",
+    "tqdm==4.68.3",
 ]
-# Everything needed to distil a model and to use the `olinda` CLI. Includes [report], since a
-# training run draws its own validation figures.
+# Everything needed to distil a model. Includes [report], since a training run draws its own
+# validation figures and the fuse reads the graph back through the same reader.
 # NOTE: lazyqsar[fit]==3.4.2 hard-pins numpy, onnxruntime, pandas, h5py, psutil, loguru, onnxmltools
 # and xgboost — the versions here match what it forces, so changing one means checking lazyqsar first.
 train = [
     "olinda[report]",
-    "click==8.4.2",
     "h5py==3.14.0",
     "lazyqsar[fit]==3.4.2",
     "lightgbm==4.6.0",
-    "loguru==0.7.3",
     "onnxmltools==1.16.0",
     "optuna==4.9.0",
     "psutil==7.0.0",
-    "pyarrow==24.0.0",  # pandas' parquet engine; olinda reads teacher/query files as .parquet
-    "rich==14.1.0",
-    "rich-click==1.9.8",
-    "tqdm==4.68.3",
     "xgboost==3.2.0",
 ]
 dev = [

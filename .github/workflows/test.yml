@@ -44,3 +44,35 @@ jobs:
           pip install pytest
       - name: Test the inference path
         run: pytest -q tests/test_inference_install.py
+
+  # `pip install "olinda[report]"` promises you can validate a model you were handed. The `test` job
+  # cannot check that: it has the training stack, so every import resolves whether the extra declares
+  # it or not. This one builds a model with [train] in one venv, then scores it with ONLY [report] in
+  # another — the same reason `inference-install` exists, one tier up.
+  report-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build a fixture model with the training stack
+        run: |
+          python -m venv /tmp/trainenv
+          /tmp/trainenv/bin/pip install --upgrade pip
+          /tmp/trainenv/bin/pip install ".[train]"
+          /tmp/trainenv/bin/python -c "
+          from tests.conftest import build_tiny_model
+          build_tiny_model('/tmp/fixture')
+          "
+      - name: Install (report extra only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[report]"
+      - name: Validate with the reporting extra alone
+        run: |
+          olinda validate -m /tmp/fixture/model.onnx \
+            -s /tmp/fixture/soft.csv -h /tmp/fixture/hard.csv -o /tmp/report
+          test -f /tmp/report/report.html
+          test -f /tmp/report/metrics.json
+          test -f /tmp/report/performance_table.csv
