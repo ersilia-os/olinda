@@ -213,3 +213,41 @@ def test_the_ceiling_is_monotone_in_alignment():
 
   values = [_blend_ceiling(r2) for r2 in np.linspace(-0.5, 1.0, 200)]
   assert all(b <= a for a, b in zip(values[1:], values[:-1]))
+
+
+# ── the ceiling needs a reachable gate, not just a well-aligned head ─────────
+
+
+def test_an_unreachable_gate_earns_no_ceiling_however_well_the_head_aligns():
+  """A gate that can never open must not carry a positive blend weight.
+
+  `export.build_bundle` refuses to fuse a model whose ceiling is positive while the gate scores zero
+  applicability on every probe molecule — otherwise a cross-wired hard branch would ship unverified.
+  Its assumption is that a column's own labelled compounds sit high in the gate, which holds only
+  while those compounds are in the scored view. Under `--max-samples` they need not be: on the real
+  example only 5 of 7,684 labelled compounds fall in the first 1,000 library rows.
+
+  The two inputs are independent — alignment is measured against the teacher, reachability against
+  the labelled set — so a high alignment with an unreachable gate is expressible, and that is exactly
+  the combination that used to turn a subsampled run into a failed fuse. Alignment is passed in here
+  rather than fitted, which is what makes the case constructible at all.
+  """
+  from olinda.data.matrix import ReferenceMatrix
+  from olinda.hard import _fit_tanimoto
+
+  n_features = 64
+  # Library and labelled set occupy disjoint halves of the fingerprint, so every 1-NN Tanimoto is 0.
+  library = np.zeros((300, n_features), dtype=np.uint8)
+  library[:, :32] = (np.random.default_rng(0).random((300, 32)) < 0.3).astype(np.uint8)
+  labelled = np.zeros((16, n_features), dtype=np.float32)
+  labelled[:, 32:] = (np.random.default_rng(1).random((16, 32)) < 0.3).astype(np.float32)
+
+  _, stats = _fit_tanimoto(labelled, n_features, ReferenceMatrix(library), T_LO, T_HI, alignment_r2=0.9)
+  assert stats["sim_max"] == 0.0, "the fixture must be genuinely unreachable"
+  assert stats["a_max"] == 0.0, "an unreachable gate must earn no weight"
+
+  # ...whereas the same alignment with a reachable gate does earn one, so this is not just a floor
+  reachable = ReferenceMatrix(np.concatenate([library, (labelled > 0).astype(np.uint8)]))
+  _, ok = _fit_tanimoto(labelled, n_features, reachable, T_LO, T_HI, alignment_r2=0.9)
+  assert ok["sim_max"] == 1.0
+  assert ok["a_max"] == min(A_CEILING, 0.9) > A_MIN

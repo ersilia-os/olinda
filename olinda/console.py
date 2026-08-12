@@ -328,6 +328,52 @@ def sweep_progress(verb: str, total: int, *, width: int = 24):
   echo(f"  {verb} complete · [bold]{total:,}[/] compounds [dim]· {elapsed(time.time() - started)}[/]", "info")
 
 
+@contextmanager
+def epoch_progress(verb: str, total: int, *, width: int = 24):
+  """Yield a ``report(epoch, loss, rmse, improved, waited, patience)`` for an iterative fit, on ONE line.
+
+  The same reasoning as :func:`sweep_progress`, applied to epochs instead of chunks: fifteen lines
+  differing only in their fourth decimal bury the steps around them, and the reader's question is not
+  "what was epoch 11" but "did it converge, and to what". So the per-epoch detail repaints in place
+  on a terminal and collapses to a single closing line that names the best loss and whether early
+  stopping fired. When the output is piped there is no live region, so nothing is printed until that
+  closing line — an epoch is seconds, not minutes, and a stalled fit shows up in the step above.
+  """
+  started = time.time()
+  total = max(1, int(total))
+  state: dict = {"best": None, "epochs": 0}
+
+  with live_status() as update:
+
+    def report(epoch, loss, rmse, improved, waited=0, patience=None):
+      state["epochs"] = int(epoch)
+      if improved or state["best"] is None:
+        state["best"] = (float(loss), float(rmse))
+      if not console.is_terminal or live_region_taken():
+        return
+      frac = epoch / total
+      filled = int(round(frac * width))
+      bar = "━" * filled + "[dim]━[/]" * (width - filled)
+      note = "best" if improved else f"no gain ({waited}/{patience})" if patience else "no gain"
+      update(
+        f"  [{active_color()}]{spinner(int(time.time() * 8))} {verb}[/] {bar} "
+        f"[bold]{frac:>4.0%}[/] [dim]·[/] epoch {epoch}/{total} "
+        f"[dim]· val MSE {loss:.6f} · ±{rmse:.3f} · {note}[/]"
+      )
+
+    yield report
+
+  loss, rmse = state["best"] or (float("nan"), float("nan"))
+  ran = state["epochs"]
+  # Early stopping is worth a word: a fit that used its whole budget may simply have run out of it.
+  reach = f"[bold]{ran}[/] epochs" if ran >= total else f"stopped early at [bold]{ran}[/]/{total}"
+  echo(
+    f"  {verb} complete · {reach} · best val MSE {loss:.6f} [dim]· ±{rmse:.3f} similarity "
+    f"· {elapsed(time.time() - started)}[/]",
+    "info",
+  )
+
+
 class _Dynamic:
   """Renderable proxy that re-renders its owner every time Rich asks for a frame."""
 

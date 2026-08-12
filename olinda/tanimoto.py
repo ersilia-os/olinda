@@ -33,7 +33,6 @@ thresholds, and makes ``a`` continuous.
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import numpy as np
@@ -349,7 +348,7 @@ class TanimotoRegressor:
     self._session = None
 
   @classmethod
-  def fit(cls, batches, n_features: int, validation, *, seed: int = 0, echo=None, **kwargs):
+  def fit(cls, batches, n_features: int, validation, *, seed: int = 0, progress=None, **kwargs):
     """Train the gate by streaming mini-batches, and keep the result as ONNX.
 
     Parameters
@@ -362,6 +361,10 @@ class TanimotoRegressor:
         Fingerprint width, needed to declare the ONNX input.
     validation : tuple
         ``(bits, similarity)`` held out for early stopping. Materialised, so keep it modest.
+    progress : callable, optional
+        ``progress(epoch, loss, rmse, improved, waited, patience)`` after each epoch. Reporting is
+        injected rather than printed here so this module stays free of the console — see
+        :func:`olinda.console.epoch_progress` for the one the CLI passes.
 
     The target is the similarity itself, not the ramp applied to it. Regressing the ramp output looks
     tempting — it is what the gate actually needs — but it is zero for ~91% of the library, so the net
@@ -374,7 +377,6 @@ class TanimotoRegressor:
     net = _MLP(int(n_features), T_HIDDEN, lr=T_LEARNING_RATE, seed=seed)
     rng = np.random.default_rng(seed)
     best, best_state, waited = np.inf, None, 0
-    started = time.time()
     for epoch in range(T_MAX_EPOCHS):
       for bits, target in batches(rng):
         # One read off the library, several optimiser steps: see T_SGD_BATCH for why the two sizes
@@ -388,22 +390,15 @@ class TanimotoRegressor:
       # whole library in memory. Keep the best weights rather than the last: Adam can step past a good
       # solution, and the epoch that stops the run is by definition not the best one.
       improved = loss < best - 1e-7
-      if echo:
-        rmse = np.sqrt(loss)  # in similarity units, which is the number a reader can actually judge
-        echo(
-          f"  epoch {epoch + 1:>2}/{T_MAX_EPOCHS} · val MSE {loss:.6f} · ±{rmse:.3f} similarity"
-          f"{' · best' if improved else f' · no gain ({waited + 1}/{T_PATIENCE})'}"
-          f" [dim]· {time.time() - started:.0f}s[/]",
-          "info",
-        )
+      if progress:
+        # rmse is in similarity units, which is the number a reader can actually judge
+        progress(epoch + 1, loss, float(np.sqrt(loss)), improved, waited + 1, T_PATIENCE)
       if improved:
         best, waited = loss, 0
         best_state = net.state()
       else:
         waited += 1
         if waited >= T_PATIENCE:
-          if echo:
-            echo(f"  stopped early · no improvement for {T_PATIENCE} epochs", "info")
           break
     if best_state is not None:
       net.restore(best_state)

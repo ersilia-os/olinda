@@ -36,7 +36,7 @@ from pathlib import Path
 
 import numpy as np
 
-from olinda.console import echo, step, summary_panel, sweep_progress
+from olinda.console import echo, epoch_progress, step, summary_panel, sweep_progress
 from olinda.featurizer import MorganCountFeaturizer
 
 # Layout under <model_dir>/
@@ -225,6 +225,7 @@ def _fit_tanimoto(
   """
   from olinda.tanimoto import (
     T_BATCH,
+    T_MAX_EPOCHS,
     TanimotoRegressor,
     prepare_hard_bits,
     ramp,
@@ -265,15 +266,16 @@ def _fit_tanimoto(
   # `export.build_bundle` refuses to fuse, so leaving it ungated turns a degenerate gate into a failed
   # run. Reachable is the norm on the full library; a subsampled view is where this bites.
   reachable = float(sim.max()) >= sim_lo
-  regressor = TanimotoRegressor.fit(
-    batches,
-    matrix.n_cols,
-    (matrix.gather(val_idx), sim[val_idx]),
-    echo=echo,
-    a_max=_blend_ceiling(alignment_r2) if reachable else 0.0,
-    sim_lo=sim_lo,
-    sim_hi=sim_hi,
-  )
+  with epoch_progress("learning T", T_MAX_EPOCHS) as report:
+    regressor = TanimotoRegressor.fit(
+      batches,
+      matrix.n_cols,
+      (matrix.gather(val_idx), sim[val_idx]),
+      progress=report,
+      a_max=_blend_ceiling(alignment_r2) if reachable else 0.0,
+      sim_lo=sim_lo,
+      sim_hi=sim_hi,
+    )
 
   xval = matrix.gather(val_idx)
   predicted = regressor.predict_tanimoto(xval)
@@ -569,10 +571,13 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         else f"R²(calibrated H_S, soft)={alignment_r2:.3f} — the hard head does not reproduce the "
         "teacher's scale well enough to be worth mixing in"
       )
-      echo(f"  blend DISABLED · {reason}", "warning")
+      # No leading indent on either of these: they are the step's conclusion, not one of its
+      # details, and `echo` supplies the glyph. Indenting them while keeping the ▪/⚠ that mark a
+      # top-level line is what made this read as a step nudged out of column.
+      echo(f"blend DISABLED · {reason}", "warning")
     else:
       echo(
-        f"  blend weight ramps 0 → [bold]{ad_counts['a_max']:.3f}[/] across similarity {T_LO} → "
+        f"blend weight ramps 0 → [bold]{ad_counts['a_max']:.3f}[/] across similarity {T_LO} → "
         f"{T_HI} · ceiling from R²={alignment_r2:.3f}, capped at {A_CEILING}",
         "run",
       )
