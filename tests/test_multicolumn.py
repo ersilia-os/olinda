@@ -496,3 +496,91 @@ def _fit_with_hard(tmp_path, monkeypatch):
     tmp_path / "hard.csv", index=False
   )
   return _steps(soft, tmp_path / "run", tmp_path / "hard.csv")
+
+
+# ── a hard head that earns no weight must still produce a usable model ───────
+
+
+def _channels(artifact_path, smiles):
+  """Every internal channel of the fused graph, so the blend can be checked against its parts."""
+  import onnx
+  import onnxruntime as ort
+  from onnx import TensorProto, helper
+
+  from olinda.featurizer import MorganCountFeaturizer
+
+  model = onnx.load(str(artifact_path))
+  have = {o.name for o in model.graph.output}
+  for name in ("c0_surrogate", "c0_applicability"):
+    if name not in have:
+      model.graph.output.append(helper.make_tensor_value_info(name, TensorProto.DOUBLE, ["B"]))
+  tmp = artifact_path.parent / "_channels.onnx"
+  onnx.save(model, str(tmp))
+
+  options = ort.SessionOptions()
+  options.log_severity_level = 3
+  sess = ort.InferenceSession(str(tmp), options, providers=["CPUExecutionProvider"])
+  fp = MorganCountFeaturizer().transform([str(s) for s in smiles]).astype(np.float32)
+  outs = sess.run(None, {"input": fp})
+  return {o.name: np.asarray(v).ravel() for o, v in zip(sess.get_outputs(), outs)}
+
+
+def test_a_hard_head_that_earns_no_weight_still_fuses_and_predicts(tmp_path, monkeypatch):
+  """A_MIN drops a weak ceiling to zero; the fuse must then ship a working, surrogate-only model.
+
+  The parity probe used to reject `a == 0` everywhere as a broken gate. Now it is a legitimate
+  outcome, and the graph must still build, load and predict — otherwise a weak hard head bricks the
+  run instead of simply being ignored.
+  """
+  from olinda.applicability import SimilarityRegressor
+  from olinda.ground_truth import APPLICABILITY_DIRNAME, GT_DIRNAME
+
+  md = _fit_with_hard(tmp_path, monkeypatch)
+  gate_dir = md / "columns" / "c0" / GT_DIRNAME / APPLICABILITY_DIRNAME
+  gate = SimilarityRegressor.load(gate_dir)
+  gate.a_max = 0.0  # as _blend_ceiling would set it for a poorly aligned head
+  gate.save(gate_dir)
+
+  assert _run(["export", "-m", str(md)]).exit_code == 0, "a disabled blend must not break the fuse"
+
+  model = OlindaArtifact(md)
+  probe = _SM[:6]
+  ch = _channels(md / "model.onnx", probe)
+  assert np.all(ch["c0_applicability"] == 0.0), "the ceiling is zero, so no weight may be assigned"
+  # With a == 0 the blend is exactly the surrogate — the hard branch contributes nothing.
+  np.testing.assert_allclose(model.run(probe)[model.columns[0]].to_numpy(), ch["c0_surrogate"], atol=1e-12)
+
+
+def test_a_near_constant_teacher_column_disables_the_blend(tmp_path, monkeypatch):
+  """R² is undefined when the teacher has no variance to explain; that must disable, not crash."""
+  import h5py
+
+  import olinda.data as D
+  import olinda.data.fetch as F
+  from olinda.featurizer import MorganCountFeaturizer
+
+  home = tmp_path / "home"
+  home.mkdir()
+  monkeypatch.setenv("OLINDA_BACKEND", "xgboost")
+  monkeypatch.setattr(F, "OLINDA_HOME", home)
+  monkeypatch.setattr(D, "OLINDA_HOME", home)
+
+  smiles = (_SM * 20)[:320]
+  x = MorganCountFeaturizer().transform(smiles).astype(np.uint8)
+  with h5py.File(home / "erl0_morgan.h5", "w") as f:
+    f.create_dataset("data", data=x)
+    f.create_dataset("input", data=np.array([s.encode() for s in smiles]))
+  # A teacher that says the same thing about every compound.
+  soft = tmp_path / "flat.csv"
+  pd.DataFrame({"smiles": smiles, "assay0_probability": np.full(len(smiles), 0.42)}).to_csv(soft, index=False)
+  hard_smiles = _SM * 4
+  score = x[: len(hard_smiles), :200].sum(1)
+  hard = tmp_path / "hard.csv"
+  pd.DataFrame({"smiles": hard_smiles, "assay0": (score > np.median(score)).astype(int)}).to_csv(
+    hard, index=False
+  )
+
+  md = _steps(soft, tmp_path / "run", hard)
+  meta = json.loads((md / "columns" / "c0" / "_ground_truth" / "ground_truth_meta.json").read_text())
+  assert meta["applicability"]["a_max"] == 0.0, "no variance to explain ⇒ no weight earned"
+  assert OlindaArtifact(md).run(_SM[:4])[["assay0_probability"]].notna().all().all()

@@ -151,7 +151,52 @@ def _pearson(a: np.ndarray, b: np.ndarray) -> float:
   return float("nan") if d == 0 else float((ac * bc).sum() / d)
 
 
-def _fit_applicability(gt_bits, n_features, matrix, sim_lo: float, sim_hi: float, chunk: int = 50_000):
+def _blend_ceiling(alignment_r2: float) -> float:
+  """Cap the blend weight by how closely the calibrated hard signal reproduces the teacher's scale.
+
+  Takes **R²**, not a correlation. Pearson is invariant to affine transformation, so a signal that is
+  systematically shifted or rescaled would score 1.0 while dragging the blend off-centre; R² is
+  computed against the identity line, so bias and scale error both reduce it. That makes it a measure
+  of 1-to-1 agreement rather than of covariation, and ``r² - R²`` is exactly the misalignment penalty
+  (``R² <= r²`` always, with equality iff the signal is already its own best affine rescaling).
+
+  Lin's concordance is the textbook agreement statistic and is deliberately *not* used: an MSE-optimal
+  predictor is always under-dispersed relative to its target — a property of conditional means — and
+  CCC penalises precisely that shrinkage, so it would mark down a correctly calibrated head and reward
+  an over-confident one.
+
+  A spurious ``G`` leaves isotonic regression nothing to fit, so the map comes out nearly flat, the
+  calibrated signal nearly constant, and R² collapses — switching the blend off, which is the property
+  worth having. Below zero the signal is worse than predicting the teacher's mean, so the blend is
+  disabled rather than inverted. Non-finite (a constant teacher column, a hard set too small for the
+  fit to mean anything) is treated the same way.
+
+  Anything under :data:`~olinda.applicability.A_MIN` is also dropped to zero: a few percent of a weakly
+  aligned signal cannot shift a prediction enough to be worth the chance of shifting it the wrong way,
+  so such a model ships soft-only instead of carrying a token hard branch.
+
+  Two limits, both general rather than dataset-specific:
+
+  * R² here is measured on the reference library, which is the data the isotonic map was fitted to —
+    an in-sample estimate, so the ceiling errs high.
+  * Agreement with the *teacher* is necessary but not sufficient. It cannot separate a head that is
+    genuinely better than the teacher (and so disagrees) from one that is simply worse, nor catch a
+    head that tracks the teacher acceptably while losing to the surrogate at predicting real labels.
+    Comparing the head out-of-fold against the surrogate is what answers that. Until then this only
+    ever lowers the ceiling, never raises it.
+  """
+  from olinda.applicability import A_CEILING, A_MIN
+
+  r2 = float(alignment_r2)
+  if not np.isfinite(r2):
+    return 0.0
+  ceiling = min(A_CEILING, max(0.0, r2))
+  return float(ceiling) if ceiling >= A_MIN else 0.0
+
+
+def _fit_applicability(
+  gt_bits, n_features, matrix, sim_lo: float, sim_hi: float, alignment_r2: float, chunk: int = 50_000
+):
   """Learn the applicability gate: regress each reference compound's 1-NN Tanimoto to the labelled set.
 
   Streams the library once, computing the exact similarity per chunk (:func:`~olinda.applicability.tanimoto_nn`)
@@ -163,6 +208,12 @@ def _fit_applicability(gt_bits, n_features, matrix, sim_lo: float, sim_hi: float
   it are not seen by the regressor, which is why its quality is reported against a held-out library slice
   rather than assumed.
 
+  Parameters
+  ----------
+  alignment_r2 : float
+      ``R²(calibrated G, soft)`` over the reference library, which caps the blend weight — see
+      :func:`_blend_ceiling`.
+
   Returns
   -------
   tuple
@@ -170,7 +221,6 @@ def _fit_applicability(gt_bits, n_features, matrix, sim_lo: float, sim_hi: float
       and ``stats`` reports the target distribution and the fit's held-out quality.
   """
   from olinda.applicability import (
-    A_CEILING,
     GATE_MAX_BIN,
     GATE_MAX_DEPTH,
     GATE_ROUNDS,
@@ -220,15 +270,18 @@ def _fit_applicability(gt_bits, n_features, matrix, sim_lo: float, sim_hi: float
   metrics = regression_metrics(sim[val_idx], be.predict(res.model, xval))
   del xval
 
+  a_max = _blend_ceiling(alignment_r2)
   regressor = SimilarityRegressor(
     res.model,
     backend_name,
-    a_max=A_CEILING,
+    a_max=a_max,
     sim_lo=sim_lo,
     sim_hi=sim_hi,
     metrics={k: metrics[k] for k in ("n", "r2", "spearman", "rmse")},
   )
   stats = {
+    "a_max": a_max,
+    "alignment_r2": float(alignment_r2),
     "n_ref": int(n),
     "n_gt": n_gt,
     "sim_median": float(np.median(sim)),
@@ -242,7 +295,14 @@ def _fit_applicability(gt_bits, n_features, matrix, sim_lo: float, sim_hi: float
   return regressor, stats
 
 
-def prepare_hard_labels(input_csv: str | Path, out_dir: str | Path, *, task: str = "auto") -> dict:
+def prepare_hard_labels(
+  input_csv: str | Path,
+  out_dir: str | Path,
+  *,
+  task: str = "auto",
+  smiles_column: str | None = None,
+  label_column: str | None = None,
+) -> dict:
   """Featurize a hard-label file into ``<out_dir>/hard.h5`` for a later ``learn-hard`` step.
 
   Reads a SMILES column + one label column, featurizes with :class:`MorganCountFeaturizer` (dropping
@@ -259,6 +319,10 @@ def prepare_hard_labels(input_csv: str | Path, out_dir: str | Path, *, task: str
       Directory the ``hard.h5`` is written into (the run's model dir).
   task : {"auto", "binary", "regression"}
       ``"auto"`` (default) infers the task from the labels.
+  smiles_column : str, optional
+      Name of the SMILES column (default: ``smiles``/``input``, else the first column).
+  label_column : str, optional
+      Name of the label column (default: the first column after the SMILES one).
 
   Returns
   -------
@@ -269,7 +333,9 @@ def prepare_hard_labels(input_csv: str | Path, out_dir: str | Path, *, task: str
 
   from olinda.data.reference import _read_table, resolve_smiles_value
 
-  smiles, y_raw = resolve_smiles_value(_read_table(input_csv))
+  smiles, y_raw = resolve_smiles_value(
+    _read_table(input_csv), smiles_column=smiles_column, label_column=label_column
+  )
   y_raw = np.asarray(y_raw, dtype=np.float64)
   featurizer = MorganCountFeaturizer()
   X, valid = _featurize(smiles, featurizer)
@@ -312,7 +378,12 @@ MIN_PER_CLASS = 2  # below this a class-stratified train/val split is impossible
 
 
 def prepare_hard_labels_wide(
-  input_path: str | Path, run_dir: str | Path, mapping: dict, *, task: str = "auto"
+  input_path: str | Path,
+  run_dir: str | Path,
+  mapping: dict,
+  *,
+  task: str = "auto",
+  smiles_column: str | None = None,
 ) -> dict:
   """Featurize a wide hard-label file once and write one ``hard.h5`` per matched column.
 
@@ -330,6 +401,9 @@ def prepare_hard_labels_wide(
       ``{hard_column: column_id}`` — which hard column feeds which prepared column.
   task : {"auto", "binary", "regression"}
       ``"auto"`` resolves the task per column.
+  smiles_column : str, optional
+      Name of the SMILES column (default: ``smiles``/``input``, else the first column). Which value
+      columns are used is already decided by *mapping*.
 
   Returns
   -------
@@ -347,7 +421,7 @@ def prepare_hard_labels_wide(
   from olinda.data.reference import _read_table, resolve_smiles_frame
   from olinda.run import column_dir
 
-  smiles, values = resolve_smiles_frame(_read_table(input_path))
+  smiles, values = resolve_smiles_frame(_read_table(input_path), smiles_column=smiles_column)
   featurizer = MorganCountFeaturizer()
   X, parsed = _featurize(smiles, featurizer)
   if (~parsed).any():
@@ -504,10 +578,17 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     spearman = calibrator.rank_correlation
     if spearman is None:  # only when a caller fixed the direction instead of detecting it
       spearman = _spearman_sign(gv, sv)
-    pearson_after = _pearson(calibrator.transform(gv), sv)
+    from olinda.metrics import _r2
+
+    calibrated = calibrator.transform(gv)
+    pearson_after = _pearson(calibrated, sv)
+    # R², not the correlation, is what bounds the blend — see _blend_ceiling. The gap between r² and
+    # R² is the part of the disagreement that a shift or a rescaling would explain.
+    alignment_r2 = _r2(sv, calibrated)
     echo(
       f"  calibrated ({direction}) on {len(gv):,} reference compounds · "
-      f"Spearman(G,soft)={spearman:+.3f} · Pearson(calibrated,soft)={pearson_after:.3f}",
+      f"Spearman(G,soft)={spearman:+.3f} · Pearson(calibrated,soft)={pearson_after:.3f} · "
+      f"R²={alignment_r2:.3f}",
       "run",
     )
 
@@ -525,7 +606,7 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
 
     echo("Step 4/4 · learning the applicability gate — regressing similarity to the labelled set", "run")
     gt_bits = (X > 0).astype(np.float32)
-    ad_clf, ad_counts = _fit_applicability(gt_bits, X.shape[1], matrix, SIM_LO, SIM_HI)
+    ad_clf, ad_counts = _fit_applicability(gt_bits, X.shape[1], matrix, SIM_LO, SIM_HI, pearson_after)
     ad_clf.save(gt_root / APPLICABILITY_DIRNAME)
     echo(
       f"  true similarity over {ad_counts['n_ref']:,} reference compounds · "
@@ -539,7 +620,18 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
       f"→ {APPLICABILITY_DIRNAME}/",
       "run",
     )
-    echo(f"  blend weight ramps 0 → {A_CEILING} across similarity {SIM_LO} → {SIM_HI}", "run")
+    if ad_counts["a_max"] <= 0.0:
+      echo(
+        f"  blend DISABLED · R²(calibrated G, soft)={alignment_r2:.3f} — the hard head does not "
+        "reproduce the teacher's scale well enough to be worth mixing in",
+        "warning",
+      )
+    else:
+      echo(
+        f"  blend weight ramps 0 → [bold]{ad_counts['a_max']:.3f}[/] across similarity {SIM_LO} → "
+        f"{SIM_HI} · ceiling from R²={alignment_r2:.3f}, capped at {A_CEILING}",
+        "run",
+      )
 
   # --- persist metadata + eval ---------------------------------------------
   import lazyqsar as _lq
@@ -548,14 +640,20 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     "direction": direction,
     "spearman_g_soft": spearman,
     "pearson_calibrated_soft": pearson_after,
+    "r2_calibrated_soft": alignment_r2,
+    # r² - R² is the share of the disagreement a shift or rescaling would account for; ~0 means the
+    # calibrated signal is already 1-to-1 with the teacher rather than merely correlated with it.
+    "misalignment_gap": float(pearson_after**2 - alignment_r2)
+    if np.isfinite(pearson_after) and np.isfinite(alignment_r2)
+    else None,
     "n_reference": int(len(gv)),
   }
   applicability = {
     "signal": "similarity_regressor",
     "sim_lo": SIM_LO,
     "sim_hi": SIM_HI,
-    "a_max": A_CEILING,
     "artifact": APPLICABILITY_DIRNAME,
+    "a_max_ceiling": A_CEILING,
     **ad_counts,
   }
   meta = {

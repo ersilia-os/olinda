@@ -5,6 +5,7 @@ import pytest
 
 from olinda.applicability import (
   A_CEILING,
+  A_MIN,
   SIM_HI,
   SIM_LO,
   prepare_gt_bits,
@@ -108,3 +109,42 @@ def test_ramp_is_linear_between_the_knees():
 def test_a_max_of_zero_disables_the_blend_everywhere():
   """A hard head that has not earned any weight must be switched off, however similar the query."""
   assert ramp([0.0, 0.5, 1.0], a_max=0.0).tolist() == [0.0, 0.0, 0.0]
+
+
+# ── the blend ceiling (how far the hard head is trusted at all) ──────────────
+
+
+def test_a_barely_aligned_head_is_not_merged_at_all():
+  """Under A_MIN there is no point mixing it in — a token weight risks more than it can add."""
+  from olinda.ground_truth import _blend_ceiling
+
+  assert _blend_ceiling(0.0) == 0.0
+  assert _blend_ceiling(1e-4) == 0.0
+  assert _blend_ceiling(A_MIN - 1e-9) == 0.0
+  assert _blend_ceiling(A_MIN) == pytest.approx(A_MIN)  # the floor itself still merges
+
+
+def test_a_negative_r2_disables_rather_than_inverts():
+  """Worse than predicting the teacher's mean is a reason to switch off, not to run backwards."""
+  from olinda.ground_truth import _blend_ceiling
+
+  assert _blend_ceiling(-0.4) == 0.0
+  assert _blend_ceiling(-99.0) == 0.0  # R² is unbounded below
+  assert _blend_ceiling(float("nan")) == 0.0  # constant teacher column, or a hard set too small
+
+
+def test_the_ceiling_can_only_lower_trust():
+  """R² caps A_CEILING; it never licenses more weight than the hard ceiling allows."""
+  from olinda.ground_truth import _blend_ceiling
+
+  assert _blend_ceiling(0.3) == pytest.approx(0.3)
+  assert _blend_ceiling(0.99) == pytest.approx(A_CEILING)
+  assert _blend_ceiling(1.0) == pytest.approx(A_CEILING)
+
+
+def test_the_ceiling_is_monotone_in_alignment():
+  """Better agreement must never buy less trust."""
+  from olinda.ground_truth import _blend_ceiling
+
+  values = [_blend_ceiling(r2) for r2 in np.linspace(-0.5, 1.0, 200)]
+  assert all(b <= a for a, b in zip(values[1:], values[:-1]))

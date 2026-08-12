@@ -692,8 +692,13 @@ def build_bundle(model_dir: str | Path) -> dict:
     gt_root = entry["dir"] / GT_DIRNAME
     g = np.asarray(BaseXGBArtifact.load(str(gt_root / GT_MODEL_SUBDIR)).run(fp))[:, 1].astype(np.float64)
     gsoft = np.asarray(IsotonicCalibrator.load(gt_root / CALIBRATOR_NAME).transform(g)).ravel()
-    a = np.asarray(SimilarityRegressor.load(gt_root / APPLICABILITY_DIRNAME).weight(fp > 0)).ravel()
-    if not (a > 0).any():
+    gate = SimilarityRegressor.load(gt_root / APPLICABILITY_DIRNAME)
+    a = np.asarray(gate.weight(fp > 0)).ravel()
+    # a == 0 everywhere has two very different causes. If the ceiling itself is zero the hard head did
+    # not earn any weight, the blend is off by design, and the fused output simply *is* the surrogate —
+    # there is nothing left to cross-check. If the ceiling is positive and the gate still never fires,
+    # the gate is broken and the hard branch would ship unverified.
+    if gate.a_max > 0 and not (a > 0).any():
       raise RuntimeError(
         f"parity probe for column {entry['name']!r} scored zero applicability on every molecule, so "
         "the blend collapses to the surrogate and the hard head would go unchecked. This should not "

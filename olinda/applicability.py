@@ -36,15 +36,33 @@ from pathlib import Path
 
 import numpy as np
 
-# Knees of the ramp, in 1-NN Tanimoto to the labelled set: a = 0 below SIM_LO, rising linearly to
-# a_max at SIM_HI. Same constants the bucket edges used, so the intent is unchanged — what goes is the
-# cliff between them.
+# Knees of the ramp, in **raw** 1-NN Tanimoto to the labelled set: a = 0 below SIM_LO, rising linearly
+# to a_max at SIM_HI. Same constants the bucket edges used, so the intent is unchanged — what goes is
+# the cliff between them.
+#
+# Raw, deliberately, though the case for transforming is real and worth restating before anyone
+# reopens it. Baldi & Nasr (JCIM 2010, doi:10.1021/ci100010v) show the Tanimoto distribution is not
+# invariant — it depends on how many bits the query sets — and that the *maximum* over a set, which is
+# exactly what tanimoto_nn returns, follows an extreme-value distribution that shifts with the size of
+# that set. So a fixed 0.4 does not mean the same thing for a model with 500 labelled compounds as for
+# one with 50,000.
+#
+# Mapping onto the library's own similarity percentiles would fix that for free (the gate sweep already
+# computes the full distribution) but trades one flaw for a worse one: a percentile always promotes the
+# top of whatever is present, so a labelled set with no relationship to the query chemistry would still
+# hand full weight to its least-unrelated tail. Absolute Tanimoto fails the safe way — it simply stays
+# quiet — and keeps the knees legible to a chemist reading the metadata.
 SIM_LO: float = 0.4
 SIM_HI: float = 0.7
 
 # Ceiling on the blend weight. Even an exact match keeps a third of the surrogate, because the hard head
 # is trained on far less data and the surrogate carries the teacher's whole view of the library.
 A_CEILING: float = 0.66
+
+# Below this the hard head is not mixed in at all. A few percent of a weakly aligned signal cannot move
+# a prediction enough to be worth the risk of moving it the wrong way, so the dead zone (0, A_MIN)
+# collapses to zero and the model ships soft-only rather than carrying a token hard branch.
+A_MIN: float = 0.1
 
 # Labelled-set columns per similarity block. Only the row-wise maximum survives, so scoring the whole
 # labelled set at once would build several (queries x labelled) arrays — measured at 6.9 GB for one
@@ -102,12 +120,19 @@ def tanimoto_nn(query_bits: np.ndarray, gt_bits: np.ndarray = None, *, prepared=
   return best.astype(np.float64)
 
 
-# Capacity of the similarity regressor. Chosen by measurement against the real eos3804 artifact, not
-# inherited from CANONICAL_DEFAULTS: 300 rounds x 64 leaves reaches R² 0.46 for 1.4 MB and 2.6 µs per
-# molecule, against a surrogate that already costs 42.5 MB and 35 µs. Doubling the leaves buys R² 0.51
-# for twice the size, which is not worth it for a weight that only decides how much to trust another
-# model. Depth rather than a leaf count because that is the canonical knob both backends translate —
-# LightGBM derives num_leaves = min(2**max_depth - 1, 255), so 6 gives 63.
+# Capacity of the similarity regressor — an upper bound, not a fixed cost. These are the point where
+# accuracy stops paying for size on a full-library run: measured there, 300 rounds at this depth gave
+# R² 0.46 for 1.4 MB and 2.6 µs/molecule, where doubling the leaves bought R² 0.51 for twice the size.
+#
+# The *proportion* of the artifact this represents is not general — it was a few percent beside a
+# 42.5 MB surrogate, but a small run (`--max-samples`, or a small library) produces a small surrogate
+# and the gate would loom much larger against it. What keeps that in hand is early stopping rather
+# than these constants: with little data the fit converges in a handful of rounds, and a toy fixture
+# produces a single-tree gate. So read these as "no larger than", and check the fitted tree count in
+# the run's metadata if size matters.
+#
+# Depth rather than a leaf count because that is the canonical knob both backends translate — LightGBM
+# derives num_leaves = min(2**max_depth - 1, 255), so 6 gives 63.
 GATE_ROUNDS: int = 300
 GATE_MAX_DEPTH: int = 6
 GATE_MAX_BIN: int = 64
