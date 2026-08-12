@@ -122,6 +122,39 @@ def _arrow(ax, start, end, *, color=None, dashed=False, elbow=None, label=None, 
     )
 
 
+def _ramp(ax, *, x0, x1, y0, y1):
+  """An inset plot of the blend weight against predicted similarity, drawn in canvas coordinates.
+
+  The gate's output is the one part of the pipeline a box cannot state honestly: what matters is that
+  ``a`` is *continuous* — zero below SIM_LO, rising linearly to ``a_max`` at SIM_HI — which is exactly
+  what the bucketed gate this replaced got wrong. So draw the function.
+  """
+  lo, hi = 0.4, 0.7  # olinda.applicability.SIM_LO / SIM_HI
+
+  def px(t):  # similarity 0..1 → canvas x
+    return x0 + t * (x1 - x0)
+
+  def py(a):  # weight 0..1 → canvas y
+    return y0 + a * (y1 - y0)
+
+  ax.plot([x0, x1], [y0, y0], color=NC.gray, linewidth=0.9, zorder=2)  # axes
+  ax.plot([x0, x0], [y0, y1], color=NC.gray, linewidth=0.9, zorder=2)
+  ax.plot(
+    [px(0), px(lo), px(hi), px(1)],
+    [py(0), py(0), py(0.66), py(0.66)],
+    color=GATE,
+    linewidth=1.6,
+    solid_capstyle="round",
+    zorder=3,
+  )
+  for t, label in ((lo, "0.4"), (hi, "0.7")):
+    ax.plot([px(t), px(t)], [y0, py(0.66)], color=GATE, linewidth=0.7, linestyle=":", zorder=2)
+    _note(ax, px(t), y0 - 3.4, label, color=DATA)
+  _note(ax, x0 - 2.5, py(0.66), "a_max", color=GATE, ha="right")
+  _note(ax, x0 - 2.5, y0, "0", color=DATA, ha="right")
+  _note(ax, (x0 + x1) / 2, y0 - 8, "predicted 1-NN Tanimoto", color=DATA)
+
+
 def _note(ax, x, y, text, *, color=None, ha="center", italic=True):
   """Small free-standing annotation."""
   ax.text(
@@ -288,7 +321,7 @@ def draw_model_onnx(ax) -> None:
   # three heads, fed from the same fingerprint
   _box(ax, 36, 66, 17, 13, "soft model\nGBM surrogate", STUDENT, bold_first=True)
   _box(ax, 36, 44, 17, 13, "hard model\nG", TEACHER, bold_first=True)
-  _box(ax, 36, 24, 17, 13, "gate\n2 × Bernoulli NB", GATE, bold_first=True)
+  _box(ax, 36, 24, 17, 13, "gate\nsimilarity MLP", GATE, bold_first=True)
   for y in (66, 44, 24):
     _arrow(ax, (21.5, 46), (27, y), color=DATA)
 
@@ -321,7 +354,8 @@ def draw_model_onnx(ax) -> None:
     ax,
     52,
     9,
-    "one graph output per teacher column, named after it — the channels above stay inside",
+    "one graph output per teacher column, named after it — plus the channels above, so a report can "
+    "show them",
     color=DATA,
   )
   _note(
@@ -347,7 +381,7 @@ def draw_ground_truth(ax) -> None:
     "1 · train G\non your hard labels",
     "2 · score G\nacross the library",
     "3 · calibrate\nisotonic → soft scale",
-    "4 · fit the gate\nsimilarity buckets",
+    "4 · fit the gate\nsimilarity regressor",
   ]
   xs = [14, 38, 62, 86]
   for text, x in zip(steps, xs):
@@ -356,31 +390,25 @@ def draw_ground_truth(ax) -> None:
     _arrow(ax, (x0 + 10.5, 80), (x1 - 10.5, 80))
   _note(ax, 50, 68, "the isotonic direction is learned — a low G may map to a high soft label", color=DATA)
 
-  # the gate: one arrow into a similarity ladder, so nothing is drawn through a box
-  _box(ax, 14, 48, 22, 17, "nearest-neighbour\nTanimoto to your\nlabelled compounds", GATE, bold_first=True)
-  _arrow(ax, (25.5, 48), (33.5, 48), color=GATE)
-  buckets = [("NOT SIMILAR", "a = 0"), ("LOW", "a = 0.33"), ("HIGH", "a = 0.66")]
-  bx = [44, 64, 84]
-  for (name, weight), x in zip(buckets, bx):
-    _box(ax, x, 48, 19, 17, f"{name}\n{weight}", GATE, bold_first=True)
-
-  ax.annotate(
-    "",
-    xy=(93.5, 35),
-    xytext=(34.5, 35),
-    arrowprops={"arrowstyle": "-|>", "color": DATA, "linewidth": 1.1},
-    zorder=1,
-  )
-  _note(ax, 64, 31, "increasing similarity to your labelled chemistry", color=DATA)
+  # The gate learns to stand in for a nearest-neighbour search, so the labelled fingerprints never
+  # have to ship: exact Tanimoto labels the library once, here, and an MLP reproduces it from bits.
+  _box(ax, 15, 48, 25, 17, "exact 1-NN Tanimoto\nto your labelled\ncompounds", GATE, bold_first=True)
+  _arrow(ax, (27.5, 48), (35, 48), color=GATE, label="target", label_dy=1.6)
+  _box(ax, 47, 50, 22, 17, "similarity MLP\n2048 → 256 → 64 → 1", GATE, bold_first=True)
+  _arrow(ax, (58, 50), (65, 50), color=GATE)
+  _ramp(ax, x0=68, x1=95, y0=44, y1=59)
 
   _note(
     ax,
     50,
-    22,
-    "at predict time two Bernoulli NB classifiers reproduce the bucket — no similarity search",
+    31,
+    "at predict time two matrix multiplies estimate the similarity — no search, and your compounds "
+    "stay out of the artifact",
     color=NC.black,
     italic=False,
   )
+  _note(ax, 50, 26, "how high the ramp may reach is earned: a head that cannot reproduce", color=DATA)
+  _note(ax, 50, 22, "the teacher's scale is capped low, and one that loses is dropped", color=DATA)
   _box(
     ax,
     50,

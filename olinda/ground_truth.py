@@ -8,20 +8,23 @@ the same endpoint are available, ``learn-hard`` runs four steps, each printed cl
    count fingerprints (:class:`~olinda.featurizer.MorganCountFeaturizer`). Output is raw ``predict_proba`` —
    lazy-qsar's internal probability calibrator is off. (Continuous hard labels are a raises-for-now
    placeholder — see :func:`_new_gt_model`.)
-2. **Score ``G`` across the full reference library** (``erl0_morgan.h5``) → one hard score per reference
+2. **Score ``G`` across the reference library** (``erl0_morgan.h5``) → one hard score per reference
    compound, saved to ``g_reference.h5``.
 3. **Calibrate** ``G`` onto the soft-label scale — a monotonic isotonic map fit on the reference library
    (where both ``G``'s score and the teacher's soft label exist), with the **direction learned from the
    data** (a low hard score may map to a high soft label). Saved as ``g_to_soft.json``.
-4. **Learn the applicability gate** — bucket every reference compound by its 1-NN Tanimoto similarity to the
-   labeled set (NOT SIMILAR / LOW / HIGH) and fit two Bernoulli Naive-Bayes classifiers on Morgan features
-   (saved as ``applicability_nb.json``). At predict time these place a query in a bucket with no similarity
-   search — see :mod:`olinda.applicability`.
+4. **Learn the applicability gate** — label every reference compound with its exact 1-NN Tanimoto similarity
+   to the labeled set, then fit a small MLP that predicts that number from the fingerprint alone (saved
+   under ``applicability/`` as ``gate.onnx`` + ``gate_meta.json``). At predict time two matrix multiplies
+   estimate the similarity and a linear ramp turns it into ``a``, so nothing searches the labeled set and
+   the labeled fingerprints never leave the run — see :mod:`olinda.applicability`.
 
 The end goal is to predict the soft-label distribution informed by the hard labels. Artifacts land under
 ``<model_dir>/_ground_truth/``. The gate decides *where* to trust ``G``: the blend
-``prediction = (1-a)·S + a·G_soft`` leans on the hard signal only near the labeled chemistry. All stages are
-fused into a single ``model.onnx`` (see :mod:`olinda.export`) and served by
+``prediction = (1-a)·S + a·G_soft`` leans on the hard signal only near the labeled chemistry, and how far it
+can ever lean is capped by ``a_max``, which the head earns from how well its calibrated output reproduces
+the teacher's scale (:func:`_blend_ceiling`) — a head that loses to the surrogate earns zero and the model
+ships soft-only. All stages are fused into a single ``model.onnx`` (see :mod:`olinda.export`) and served by
 :class:`~olinda.artifact.OlindaArtifact`.
 """
 
@@ -255,12 +258,19 @@ def _fit_applicability(
       take = np.sort(idx[start : start + GATE_BATCH])
       yield matrix.gather(take), sim[take]
 
+  # A ceiling is only meaningful if the gate can ever legitimately open. If nothing in the view reaches
+  # the ramp's lower knee, the labelled set has no neighbours here: the target is flat near zero, the
+  # gate stays shut everywhere, and a positive ceiling is a number with nothing behind it. That same
+  # combination — a_max > 0 with zero applicability on every probe molecule — is what
+  # `export.build_bundle` refuses to fuse, so leaving it ungated turns a degenerate gate into a failed
+  # run. Reachable is the norm on the full library; a subsampled view is where this bites.
+  reachable = float(sim.max()) >= sim_lo
   regressor = SimilarityRegressor.fit(
     batches,
     matrix.n_cols,
     (matrix.gather(val_idx), sim[val_idx]),
     echo=echo,
-    a_max=_blend_ceiling(alignment_r2),
+    a_max=_blend_ceiling(alignment_r2) if reachable else 0.0,
     sim_lo=sim_lo,
     sim_hi=sim_hi,
   )
@@ -414,7 +424,7 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
 
   Reads that column's ``hard.h5`` (written by :func:`prepare_hard_labels_wide`), then writes ``G``
   (ONNX), its scores over the reference library, the ``G``→soft calibrator, and the applicability gate
-  (two Bernoulli-NB classifiers) under ``<col_dir>/_ground_truth/``. The gate is learned here from the
+  (a similarity-regressing MLP) under ``<col_dir>/_ground_truth/``. The gate is learned here from the
   reference but *applied* at predict time (no similarity search) — see :mod:`olinda.applicability`.
 
   Parameters
@@ -478,7 +488,7 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     selection = _selection_report(gt_model)
     echo(f"  ready · {selection['preset']} preset · {selection['best_iteration']} trees", "info")
 
-    # === Step 2/4 — score G across the full reference library ==============
+    # === Step 2/4 — score G across the reference library ===================
     step(2, 4, "scoring G across the reference library")
     g_ref = _score_reference(gt_model, "binary", X.shape[1], matrix)
     with h5py.File(gt_root / G_REFERENCE_NAME, "w") as f:
@@ -489,8 +499,16 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
     from olinda.calibrate import IsotonicCalibrator, _spearman_sign
 
     step(3, 4, "calibrating G onto the soft-label scale")
-    m = min(len(g_ref), len(soft))
-    gv, sv = g_ref[:m].astype(np.float64), soft[:m]
+    # `g_ref` covers the loaded view of the library while `soft` is always the full reference-aligned
+    # target, so under `--max-samples` the two differ in length. Pairing the head of each is correct
+    # because the limit truncates the head — but state that, rather than leaving a `min()` to absorb
+    # any future change to what the flag selects, which would silently mispair rows with labels.
+    if len(g_ref) > len(soft):
+      raise RuntimeError(
+        f"scored {len(g_ref):,} reference rows but the target vector has {len(soft):,} — "
+        "the run directory does not match this library"
+      )
+    gv, sv = g_ref.astype(np.float64), soft[: len(g_ref)]
     mask = np.isfinite(gv) & np.isfinite(sv)
     gv, sv = gv[mask], sv[mask]
     calibrator = IsotonicCalibrator().fit(gv, sv, increasing="auto")
@@ -544,11 +562,14 @@ def train_ground_truth(model_dir: str | Path, soft=None, matrix=None) -> dict:
       "info",
     )
     if ad_counts["a_max"] <= 0.0:
-      echo(
-        f"  blend DISABLED · R²(calibrated G, soft)={alignment_r2:.3f} — the hard head does not "
-        "reproduce the teacher's scale well enough to be worth mixing in",
-        "warning",
+      reason = (
+        f"nothing in the scored reference reaches similarity {SIM_LO} — the labelled compounds have "
+        "no neighbours here, so the gate could never open"
+        if ad_counts["sim_max"] < SIM_LO
+        else f"R²(calibrated G, soft)={alignment_r2:.3f} — the hard head does not reproduce the "
+        "teacher's scale well enough to be worth mixing in"
       )
+      echo(f"  blend DISABLED · {reason}", "warning")
     else:
       echo(
         f"  blend weight ramps 0 → [bold]{ad_counts['a_max']:.3f}[/] across similarity {SIM_LO} → "

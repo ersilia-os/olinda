@@ -459,9 +459,9 @@ def _parity_probe(plan: list) -> np.ndarray:
 
   A handful of fixed molecules is not enough on its own: the applicability gate may score them all
   zero, in which case the blend collapses to the surrogate and the hard model, its calibrator and the
-  gate are compared against nothing — a cross-wired column would pass. Each hard column's own
-  labelled compounds are guaranteed to sit in the gate's HIGH bucket, so a few of them are appended
-  to force the whole blend to be exercised.
+  gate are compared against nothing — a cross-wired column would pass. A hard column's own labelled
+  compounds are at Tanimoto 1.0 from the labelled set, which is the top of the gate's ramp, so a few
+  of them are appended to force the whole blend to be exercised.
   """
   import h5py
 

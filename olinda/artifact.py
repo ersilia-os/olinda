@@ -263,18 +263,19 @@ class OlindaArtifact:
   def run_channels(self, smiles, batch_size: int = _BATCH, progress: bool | None = None) -> dict:
     """Every named output of the graph, as a dict of 1-D arrays keyed by output name.
 
-    Most callers want :meth:`run`, which is this plus a DataFrame. Note that a fused artifact
-    currently exposes only its final per-column prediction: the surrogate, the calibrated ground
-    truth and the applicability weight exist inside the graph but are not declared as outputs, so
-    they do not appear here. Use ``olinda validate`` to see those.
+    Most callers want :meth:`run`, which is this plus a DataFrame. A blended column also declares its
+    intermediate channels as graph outputs — the surrogate, the calibrated ground truth and the
+    applicability weight — so they appear here too, under the names :meth:`channels_for` reports.
+    Ask for them by that route rather than assembling the names: a soft-only column has none, and so
+    does an artifact fused before the channels were declared.
 
     ``progress`` shows a bar on stderr; the default shows one only for inputs larger than a single
     batch, and only when stderr is a terminal.
 
     Molecules RDKit cannot parse yield ``NaN`` in every channel rather than a number. Their
-    fingerprint is all-zero, which the graph happily scores — and the applicability gate places an
-    empty fingerprint in its *most*-trusted bucket — so an unparseable input would otherwise come
-    back looking like a confident prediction.
+    fingerprint is all-zero, which the graph happily scores — the trees take every "bit absent"
+    branch and the gate's first layer sees nothing but its own bias — so an unparseable input would
+    otherwise come back looking like a confident prediction.
     """
     import warnings
 
