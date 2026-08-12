@@ -11,8 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
-from olinda.helpers import logger
 from olinda.style import density, figure, import_stylia, limits, reference, subsample
+from olinda.utils.logging import logger
 
 
 def _close(fig) -> None:

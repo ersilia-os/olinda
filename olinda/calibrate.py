@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from olinda.helpers import logger
+from olinda.utils.logging import logger
 
 
 def _pava_increasing(y: np.ndarray, w: np.ndarray) -> np.ndarray:

@@ -23,7 +23,7 @@ from rdkit import Chem, RDLogger
 from rdkit.Chem import rdFingerprintGenerator
 from tqdm import tqdm
 
-from olinda.helpers import logger
+from olinda.utils.logging import logger
 
 RDLogger.DisableLog("rdApp.*")
 

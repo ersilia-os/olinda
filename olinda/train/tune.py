@@ -361,7 +361,13 @@ def run_tuning(
         "info",
     )
     body = ",\n".join(f"  {k!r}: {v!r}" for k, v in paste.items())
-    print(f"CANONICAL_DEFAULTS = {{\n{body},\n}}")
+    # Through the shared console so it interleaves with the live regions, but markup off: a tuned
+    # value can be a list, and `[0.1, 0.2]` would otherwise be eaten as a Rich tag. This is meant to
+    # be copied into source verbatim, so it must not be a logger call either — the console handler
+    # sits at WARNING and would drop it.
+    console.print(
+        f"CANONICAL_DEFAULTS = {{\n{body},\n}}", markup=False, highlight=False
+    )
 
     echo(
         "Tuned on a subsample; best_params.json holds only learning_rate + min_split_gain — `learn-soft` applies "

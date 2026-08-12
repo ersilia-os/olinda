@@ -2,7 +2,7 @@
 
 A single ``Console(highlight=False)``, Ersilia-style status glyphs, left-aligned themed rules,
 borderless detail blocks, rounded summary panels, and a minimal live progress bar. Diagnostic
-logging stays in :mod:`olinda.helpers` (loguru); this module is for user-facing output.
+logging stays in :mod:`olinda.utils.logging` (loguru); this module is for user-facing output.
 """
 
 from __future__ import annotations

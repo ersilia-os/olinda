@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from olinda.console import echo
-from olinda.helpers import logger
+from olinda.utils.logging import logger
 
 _VERIFY_CHUNK = 100_000
 _SMILES_NAMES = ("smiles", "input")

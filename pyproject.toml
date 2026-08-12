@@ -36,7 +36,7 @@ classifiers = [
 # shipped an `olinda` command that could not start, which is exactly how a user found this. The cost
 # is ~4 MB of pure Python against ~320 MB of numpy/pandas/rdkit/onnxruntime, so the tier is still
 # "inference only" in every sense that matters. `olinda --help` imports rich-click and nothing else;
-# `setup` and `predict` additionally reach olinda.console (rich), olinda.helpers (loguru) and the
+# `setup` and `predict` additionally reach olinda.console (rich), olinda.utils.logging (loguru) and the
 # download bar (tqdm). Commands that need more say so themselves — see require_train_extra().
 dependencies = [
     "click==8.4.2",

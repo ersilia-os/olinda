@@ -4,10 +4,14 @@ User-facing output belongs to :mod:`olinda.console` — steps, panels, progress,
 other half: silent DEBUG diagnostics, and genuine warnings and errors that surface. Both write through
 the one shared Console, so they interleave correctly with the live progress regions.
 
-    from olinda.helpers import logger
+    from olinda.utils.logging import logger
 
     logger.debug("gathered %d rows", n)
     logger.warning("skipping invalid SMILES: %s", smi)
+
+Note the console handler is attached at WARNING, so ``debug``, ``info`` and ``success`` are silent
+by design — they exist for their side effect on a ``-v`` future and for the record, not to print.
+Anything a user should read goes through :mod:`olinda.console`.
 """
 
 from __future__ import annotations
@@ -45,21 +49,27 @@ class Logger:
     """The usual levels plus ``success()``, following the Ersilia logging convention."""
 
     def debug(self, msg: str) -> None:
+        """Record *msg* for diagnosis. Below the console handler's level, so nothing is printed."""
         _loguru.debug(msg)
 
     def info(self, msg: str) -> None:
+        """Record *msg*. Also below the handler's level — user-facing status is console's job."""
         _loguru.info(msg)
 
     def warning(self, msg: str) -> None:
+        """Report something suspect that did not stop the run. The quietest level that prints."""
         _loguru.warning(msg)
 
     def error(self, msg: str) -> None:
+        """Report a failure the caller is expected to handle or surface."""
         _loguru.error(msg)
 
     def critical(self, msg: str) -> None:
+        """Report a failure that ends the run."""
         _loguru.critical(msg)
 
     def success(self, msg: str) -> None:
+        """Record completion of a step. Silent for the same reason as :meth:`info`."""
         _loguru.success(msg)
 
     @contextmanager

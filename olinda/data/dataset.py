@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import xgboost as xgb
 
-from olinda.helpers import logger
+from olinda.utils.logging import logger
 
 
 def detect_imbalance_from_y(
