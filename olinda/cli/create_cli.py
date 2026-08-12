@@ -1212,7 +1212,3 @@ def validate_cmd(
         border_style=STEP_COLORS["validate"],
         icon="✓",
     )
-
-
-if __name__ == "__main__":
-    cli()
