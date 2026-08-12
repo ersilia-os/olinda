@@ -106,7 +106,7 @@ def test_fit_and_predict_on_lightgbm(tmp_path, monkeypatch):
 
   model = OlindaArtifact(onnx)
   assert model.columns == ["assay0_probability", "assay1_probability"]
-  assert model.metadata["backend"] == "lightgbm"
+  assert model.metadata["run"]["backend"] == "lightgbm"
   values = model.run(_SM[:6])[model.columns].to_numpy()
   assert np.isfinite(values).all()
   assert not np.allclose(values[:, 0], values[:, 1])  # independent models, not one broadcast

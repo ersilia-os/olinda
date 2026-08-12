@@ -22,6 +22,10 @@ import numpy as np
 
 MODEL_NAME = "model.onnx"
 
+# The metadata layout this code understands. Kept here, next to the reader, rather than imported from
+# olinda.export: the export module belongs to the [train] extra and inference must not reach into it.
+BUNDLE_SCHEMA = "olinda.bundle.v1"
+
 
 class RDKitVersionMismatch(RuntimeError):
   """Raised when the installed RDKit differs from the build that produced ``model.onnx``."""
@@ -154,6 +158,16 @@ class OlindaArtifact:
         "self-describing bundles. Rebuild it with `olinda export`."
       )
     self.metadata = json.loads(raw)
+    schema = self.metadata.get("schema")
+    if schema != BUNDLE_SCHEMA:
+      # Checked rather than assumed. The bundle carried a version from the start but nothing read it,
+      # so a file written to any other layout would have been parsed as though it were this one and
+      # gone wrong field by field. Refusing is the only honest answer: the graph is fine, but this
+      # code cannot say what its metadata means.
+      raise ValueError(
+        f"{path} declares metadata schema {schema!r}, but this olinda reads {BUNDLE_SCHEMA!r}. "
+        "Rebuild it with `olinda export`, or install the olinda that wrote it."
+      )
     if check_rdkit:
       _check_rdkit_version(self.metadata)
 
@@ -165,16 +179,10 @@ class OlindaArtifact:
     self._input_name = self._session.get_inputs()[0].name
     self._output_names = [o.name for o in self._session.get_outputs()]
 
-    # A single-task model is just the one-column case, so normalise here and let everything
-    # downstream treat every artifact identically. The fallback covers bundles fused before
-    # columns were recorded, which named their blended output "prediction".
-    self._columns = self.metadata.get("columns") or [
-      {
-        "name": "prediction",
-        "output": "prediction",
-        "has_hard": bool(self.metadata.get("has_hard")),
-      }
-    ]
+    # A single-task model is just the one-column case, so nothing downstream distinguishes them.
+    self._columns = self.metadata.get("columns") or []
+    if not self._columns:
+      raise ValueError(f"{path} records no columns — rebuild it with `olinda export`.")
 
     # Fail here rather than with a bare KeyError deep inside run() if the embedded column list and
     # the graph disagree — which is what a hand-edited or mismatched artifact looks like.
@@ -218,15 +226,39 @@ class OlindaArtifact:
     column exposes none — its ``s`` *is* its prediction. Artifacts fused before these were declared
     also return empty, which is why callers should ask rather than build the names themselves.
     """
+    return dict(self._column(task).get("channels") or {})
+
+  def _column(self, task: str) -> dict:
     for c in self._columns:
       if c["name"] == task:
-        return dict(c.get("channels") or {})
+        return c
     raise KeyError(f"{task!r} is not a task of this model; it predicts {self.columns}")
+
+  def heads_for(self, task: str) -> list[dict]:
+    """The models behind one task, in the order they were added — the surrogate first.
+
+    Each entry carries its own ``role``, ``task``, ``source``, ``training`` and ``metrics``, so asking
+    "is this head a classifier?" is a lookup rather than a guess from which metrics are present. A
+    soft-only column has one head; a blended one has two.
+    """
+    return [dict(h) for h in (self._column(task).get("heads") or [])]
+
+  def task_for(self, task: str) -> dict:
+    """``{"type", "range", "units"}`` for what one task predicts."""
+    return dict(self._column(task).get("task") or {})
+
+  def roles_for(self, task: str) -> list[str]:
+    """Just the head roles behind one task, e.g. ``["soft", "hard"]``."""
+    return [h.get("role") for h in (self._column(task).get("heads") or [])]
 
   @property
   def has_hard(self) -> bool:
-    """True if any task blends in a hard-label head, so predictions use measured data."""
-    return any(c.get("has_hard") for c in self._columns)
+    """True if any task blends in a hard-label head, so predictions use measured data.
+
+    Derived from the heads rather than stored: a boolean beside the list it summarises is a second
+    source of truth, and the two can disagree.
+    """
+    return any("hard" in self.roles_for(c["name"]) for c in self._columns)
 
   @property
   def n_features(self) -> int:

@@ -121,4 +121,4 @@ def test_fit_with_hard_labels_adds_channels(tmp_path, monkeypatch):
     (1.0 - a) * channels["y__s"] + a * channels["y__h_s"],
     atol=1e-9,
   )
-  assert model.metadata["columns"][0]["has_hard"] is True
+  assert model.roles_for("y") == ["soft", "hard"]

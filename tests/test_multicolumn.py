@@ -166,8 +166,12 @@ def test_sparse_hard_labels_apply_only_to_matched_columns(tmp_path, monkeypatch)
   assert by_name["assay1_probability"]["hard"] is None  # soft-only, silently
 
   model = OlindaArtifact(md)
-  flags = {c["name"]: c["has_hard"] for c in model.metadata["columns"]}
-  assert flags == {"assay0_probability": True, "assay1_probability": False, "assay2_probability": True}
+  roles = {name: model.roles_for(name) for name in model.columns}
+  assert roles == {
+    "assay0_probability": ["soft", "hard"],
+    "assay1_probability": ["soft"],
+    "assay2_probability": ["soft", "hard"],
+  }
   assert model.has_hard is True
   assert list(model.run(_SM[:4]).columns) == ["smiles", *model.columns]
 
@@ -682,3 +686,94 @@ def test_only_the_gate_branch_binarises_the_fingerprint(tmp_path, monkeypatch):
   soft_feed = next(n for n in m.graph.node if n.output and n.output[0].endswith("sm__input"))
   assert soft_feed.input[0] == "input", "the surrogate must read the shared count fingerprint directly"
   assert produced_by.get(soft_feed.input[0]) is None, "nothing may transform the input before the surrogate"
+
+
+# ── --max-samples bounds the whole run, not just the split ───────────────────
+
+
+def _hard_from(smiles, x, column="assay0"):
+  """A binary hard-label frame over the given compounds, split at the median of a feature block."""
+  score = x[: len(smiles), :200].sum(1)
+  return pd.DataFrame({"smiles": list(smiles), column: (score > np.median(score)).astype(int)})
+
+
+def test_a_limited_run_only_touches_the_first_n_reference_rows(tmp_path, monkeypatch):
+  """--max-samples says "the first N reference compounds" — learn-hard has to obey it too.
+
+  It used to bound only the student's train/val split, so learn-hard still scored all 1.36M library
+  rows, calibrated on them and trained the gate over them: a "fast" dev run cost the better part of
+  an hour. The manifest already carried the limit; nothing read it back.
+  """
+  from olinda import run as runlib
+  from olinda.hard import HARD_DIRNAME, HARD_EVAL_NAME, HARD_META_NAME
+
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, smiles, x = _stage(home, tmp_path, monkeypatch, n_columns=1)
+  limit = 120  # of the 320 staged rows
+
+  hard = tmp_path / "hard.csv"
+  # labelled compounds from inside the limited view, so the gate has neighbours to learn from
+  _hard_from(smiles[:limit], x[:limit]).to_csv(hard, index=False)
+
+  md = tmp_path / "run"
+  args = ["prepare", "-s", str(soft), "-h", str(hard), "-m", str(md), "--val-frac", "0.2"]
+  assert (r := _run(args + ["--max-samples", str(limit)])).exit_code == 0, r.output
+  assert runlib.row_limit(runlib.read_manifest(md)) == limit
+  # the library on disk is untouched, and the manifest still records its true size
+  assert runlib.read_manifest(md)["reference_library"]["n_rows"] == len(smiles)
+
+  assert (r := _run(["learn-soft", "-m", str(md), "--num-boost-round", "30"])).exit_code == 0, r.output
+  assert (r := _run(["learn-hard", "-m", str(md)])).exit_code == 0, r.output
+
+  root = md / "columns" / "c0" / HARD_DIRNAME
+  # the gate scanned exactly the limited view...
+  assert json.loads((root / HARD_META_NAME).read_text())["tanimoto"]["n_ref"] == limit
+  # ...and the isotonic map was fitted on it, not on the whole library
+  assert json.loads((root / HARD_EVAL_NAME).read_text())["calibration"]["n_reference"] <= limit
+
+
+def test_an_unlimited_run_still_reads_the_whole_library(tmp_path, monkeypatch):
+  """The limit is opt-in: with no --max-samples every step sees every row, exactly as before."""
+  from olinda import run as runlib
+  from olinda.hard import HARD_DIRNAME, HARD_META_NAME
+
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, smiles, x = _stage(home, tmp_path, monkeypatch, n_columns=1)
+  hard = tmp_path / "hard.csv"
+  _hard_from(smiles[:64], x[:64]).to_csv(hard, index=False)
+
+  md = _steps(soft, tmp_path / "run", hard)
+  assert runlib.row_limit(runlib.read_manifest(md)) is None
+  meta = json.loads((md / "columns" / "c0" / HARD_DIRNAME / HARD_META_NAME).read_text())
+  assert meta["tanimoto"]["n_ref"] == len(smiles)
+
+
+def test_a_limited_run_with_distant_labels_still_finishes(tmp_path, monkeypatch):
+  """A limited view whose labelled compounds have no neighbours must fuse, not raise.
+
+  `export.build_bundle` refuses a model whose blend ceiling is positive while the gate opens for
+  nothing. Its assumption is that a column's own labelled compounds sit high in the gate, which holds
+  only while they are in the scored view — under --max-samples they need not be. On the real example
+  only 5 of 7,684 labelled compounds fall in the first 1,000 library rows.
+  """
+  home = tmp_path / "home"
+  home.mkdir()
+  soft, _, _ = _stage(home, tmp_path, monkeypatch, n_columns=1)
+
+  # noble gases share no Morgan bits with the staged library, so similarity is 0 across the view
+  alien = ["[Xe]", "[Kr]", "[Ar]", "[He]", "[Ne]", "[Rn]"] * 4
+  hard = tmp_path / "hard.csv"
+  pd.DataFrame({"smiles": alien, "assay0": [0, 1] * (len(alien) // 2)}).to_csv(hard, index=False)
+
+  art = tmp_path / "run.onnx"
+  r = _run(
+    ["fit", "-s", str(soft), "-m", str(art), "-h", str(hard)]
+    + ["--val-frac", "0.2", "--num-boost-round", "30", "--max-samples", "120"]
+  )
+  assert r.exit_code == 0, r.output
+  assert art.is_file(), "the run must fuse rather than dying at the parity check"
+  assert "blend DISABLED" in _plain(r)
+  model = OlindaArtifact(art)  # a soft-only artifact is the honest outcome, and it still predicts
+  assert np.isfinite(model.run(_SM[:4])[model.columns].to_numpy()).all()

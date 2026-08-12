@@ -141,7 +141,8 @@ def _hard_head_warning(kind: str, artifact, n_rows: int) -> list[str]:
     return []
   notes = []
   for column in artifact.metadata.get("columns", []):
-    trained_on = (column.get("hard") or {}).get("n_train")
+    hard = next((h for h in (column.get("heads") or []) if h.get("role") == "hard"), None)
+    trained_on = (hard or {}).get("training", {}).get("n")
     if not trained_on:
       continue
     if trained_on == n_rows:
@@ -253,7 +254,7 @@ def validate_model(
 
   report: dict = {
     "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    "model": {**artifact.describe(), "backend": artifact.metadata.get("backend")},
+    "model": {**artifact.describe(), "backend": (artifact.metadata.get("run") or {}).get("backend")},
     "notes": [],
     "figures": {"soft": [], "hard": [], "internals": []},
   }
