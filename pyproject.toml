@@ -1,6 +1,6 @@
 [project]
 name = "olinda"
-version = "1.0.0"
+version = "1.1.0"
 description = "Distil a slow chemistry model into one fast, self-describing ONNX file"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -78,7 +78,7 @@ report = [
 # NOTE: lazyqsar[fit]==3.4.2 hard-pins numpy, onnxruntime, pandas, h5py, psutil, loguru, onnxmltools
 # and xgboost — the versions here match what it forces, so changing one means checking lazyqsar first.
 train = [
-    "olinda[report]",
+    "olinda[report]==1.1.0",  # keep in lockstep with [project].version above
     "h5py==3.14.0",
     "lazyqsar[fit]==3.4.2",
     "lightgbm==4.6.0",
@@ -91,8 +91,12 @@ dev = [
     "pytest==9.1.1",
     "ruff==0.15.20",
 ]
+
 [project.scripts]
 olinda = "olinda._entry:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["olinda*"]

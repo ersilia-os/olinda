@@ -178,6 +178,19 @@ inside the artifact, and how the hard-label head is calibrated and gated.
 They are drawn by [`scripts/make_diagrams.py`](scripts/make_diagrams.py) — regenerate them if you
 change the pipeline.
 
+## Where this sits
+
+Olinda distils models from the [Ersilia Model Hub](https://github.com/ersilia-os/ersilia): score a hub
+model over the reference library, and olinda gives you a student that runs in milliseconds without the
+model's environment. It was built for the **AI2050 for TB Modelling** project, where the teachers are
+*M. tuberculosis* activity predictors that are far too slow to screen a full library with.
+
+The reference library, `erl0_morgan.h5`, is 1.36M compounds fingerprinted with the same Morgan settings
+as the hub model [`eos5axz`](https://github.com/ersilia-os/eos5axz), which is what lets a teacher's
+predictions and a student's features line up row for row.
+
 ## About the Ersilia Open Source Initiative
 
-The [Ersilia Open Source Initiative](https://ersilia.io) is a tech non-profit organization with the mission to equip laboratories, universities, and clinics in the Global South with AI/ML tools for infectious disease research. We work on the principles of open science, decolonized research, and egalitarian access to knowledge and research outputs. You can support Ersilia by clicking [here](https://www.ersilia.io/donate).
+The [Ersilia Open Source Initiative](https://ersilia.io) is a tech-nonprofit organization fueling sustainable research in the Global South. Ersilia's main asset is the [Ersilia Model Hub](https://github.com/ersilia-os/ersilia), an open-source repository of AI/ML models for antimicrobial drug discovery. You can support Ersilia by clicking [here](https://www.ersilia.io/donate).
+
+![Ersilia Logo](assets/Ersilia_Plum.png)

@@ -1,74 +1,114 @@
-# Ersilia Python Package — Developer Guide
+# olinda — developer guide
 
-This is the developer guide for a Python package built from the Ersilia Open Source Initiative's package template. The rules below apply to any code, docs, or release work in this repository.
+Olinda distils a slow chemistry model into one fast, self-describing ONNX file. A teacher model is
+scored once over a 1.36M-compound reference library; a compact gradient-boosting student learns to
+reproduce it; everything fuses into a single `model.onnx` that runs on onnxruntime alone.
 
-## Working with the user
+This guide covers what is non-obvious about working here. The Ersilia house rules apply
+([`eos-python-package`](https://github.com/ersilia-os/eos-python-package)); what follows is where this
+repository differs, and why.
 
-- **Ask, don't assume.** For any non-trivial decision — which approach to take, what to name something, whether to add a dependency, how to handle an ambiguous case — use the `AskUserQuestion` tool BEFORE editing. A couple of short questions up front beat a wrong-direction change.
-- **Plans are mandatory.** Anything beyond a one-line fix or pure read-only investigation must go through plan mode. Be insistent: if invoked outside plan mode for non-trivial work, propose a plan in chat and stop until the user confirms. Do not skip planning to "save time".
-- **Surface uncertainty.** When you have multiple reasonable options or are unsure about intent, name them and ask. Don't pick silently.
+## The three models, and their letters
 
-## Package layout
+The same names appear in the code, the run directory, the diagrams and the README. Learn them first —
+almost every module refers to them.
 
-- **Rename the package folder.** As soon as real code lands, rename `src/my_package/` to the actual package name (snake_case, matching `[project].name` in `pyproject.toml`). Never leave `my_package` in place once the template is being used.
-- **Remove `core.py` if untouched.** The templated `src/<package>/core.py` exists only to make the layout valid. If it has not been modified, delete it rather than letting placeholder code linger.
-- **Favour submodules.** Group code into submodules (`io/`, `utils/`, `cli/`, ...) instead of a single flat file. Avoid a flat namespace.
-- **Keep public APIs small.** Ersilia packages are thought of as simple APIs and CLIs. Avoid over-parametrising function signatures; a few well-chosen arguments are better than many optional knobs.
+| | |
+|---|---|
+| **S** | the **surrogate**, distilled from the teacher's soft labels |
+| **H** | the **hard-label model**, trained on real measurements |
+| **H_S** | **H** carried onto **S**'s scale by an isotonic map |
+| **T** | predicted **1-NN Tanimoto** to the labelled set |
+| **a** | the blend weight, `a = a_max · ramp(T)` |
 
-## Code style and quality
+The shipped prediction is `(1 − a) · S + a · H_S`. `S`, `H_S` and `a` stay **internal tensors** in the
+fused graph: a column declares exactly one output, its prediction. That is deliberate — the wiring has
+changed once already, and callers must not be able to depend on it.
 
-- **Run ruff before every commit.** `ruff check` and `ruff format` must both pass.
-- **Docstrings: NumPy convention.** Write succinct NumPy-style docstrings for every public class, function, and method. For private helpers, only add a docstring when the intent isn't obvious from the name and signature.
-- **Keep code, docstrings, and docs aligned.** Revisit docstrings, the README, and any `docs/` files periodically — fix drift as you see it, not in a separate cleanup pass.
+## Layout
 
-## Logging
+Package code lives in `olinda/`, **not** `src/olinda/`. Don't "fix" this.
 
-Use the Ersilia logging pattern: a module-level singleton built on stdlib `logging` + Rich's `RichHandler`, exposing the usual levels plus a `success()` method. See [`ersilia/utils/logging.py`](https://github.com/ersilia-os/ersilia) as the reference implementation; [`lazy-qsar`](https://github.com/ersilia-os/lazy-qsar) is an acceptable `loguru`-based alternative if richer formatting is needed.
+| | |
+|---|---|
+| `olinda/cli/` | one module per command in `commands/`, assembled by `create_cli.py` |
+| `olinda/train/` | the boosting engines, tuning, per-column training |
+| `olinda/hard/` | the hard-label head: `labels`, `gate`, `train`, and `layout` for the on-disk names |
+| `olinda/export/` | the fuse: stage graphs, metadata, parity checking, `build_bundle` |
+| `olinda/report/` | `olinda validate` and its figures |
+| `olinda/data/` | the reference library and the run's split |
+| `olinda/console.py` | user-facing output — see below |
+| `olinda/utils/logging.py` | the levelled logger — see below |
 
-```python
-from <package>.utils.logging import logger
+## The lazy-import contract
 
-logger.info("Loaded %d molecules", len(df))
-logger.success("Model saved → %s", model_dir)
-logger.warning("Skipping invalid SMILES: %s", smi)
-```
+This is the constraint most likely to be broken by an innocent-looking edit.
 
-Import the singleton everywhere — do not call `logging.getLogger(...)` directly in feature code.
+numpy, pandas, xgboost, rdkit and matplotlib cost about **12 seconds** to import. `olinda --help` must
+not pay that, and a base install does not even have most of them. So:
 
-## CLI (optional)
+> **A module under `olinda/cli/` may import, at module scope, only `__future__`, the standard library,
+> `click`/`rich_click`, and other `olinda.cli.*` modules.** Nothing from `olinda.*` outside
+> `olinda/cli/` — not even `olinda.console`. Every such import goes inside the command body.
 
-- **Use Click.** If the package exposes a CLI, build it with [Click](https://click.palletsprojects.com/), organised as `src/<package>/cli/commands/` with one file per command and a small `create_cli.py` that registers them. This mirrors [`ersilia-os/ersilia`](https://github.com/ersilia-os/ersilia).
-- **Document commands as a table.** In the README, list CLI commands in a compact two-column table (command → one-line description). Do not write extensive prose for each flag — that belongs in `--help`.
+No exceptions, because a rule with exceptions is one nobody applies. `create_cli.py` imports all ten
+command modules to register them, so a single slip lands on every invocation.
 
-## Tests
+Two tests enforce it, and they fail differently on purpose: `tests/test_cli_surface.py` parses the AST
+and names the offending file; `tests/test_inference_install.py` checks `sys.modules` from a clean
+subprocess, which is the only way to catch an import that a dev machine happens to satisfy.
 
-- **Smoke-test the user-facing API/CLI.** High-level tests that exercise the documented entry points catch regressions where they actually matter. Skip exhaustive unit-test coverage of internals.
-- **Keep `tests/` lean.** Transient `pytest` files are fine during development, but delete them once the code they exercised has stabilised. A small, curated test suite is better than a large pile of mostly-redundant tests.
+Commands are registered with `add_command` rather than `@cli.command`, so no command module imports the
+group. That keeps the import graph acyclic even though `fit` imports five of its siblings — it drives
+the pipeline by calling their callbacks directly.
 
-## Dependencies and packaging
+## Output: two channels, and they are not interchangeable
 
-- **Pin exact versions.** Use `==X.Y.Z` for every entry in `pyproject.toml` (and any other requirements file the user adds). No floors (`>=`), no ranges.
-- **Evaluate every new dependency.** Adding a library is a long-term cost. Prefer the standard library or an existing transitive dependency; only add a new package when the benefit is clear and the alternative would be substantial code.
-- **Keep `pyproject.toml` in sync with the package.** When code starts (or stops) importing something, update `pyproject.toml` in the same commit. The project name, version, and dependency list must always reflect the current state of `src/`.
+- **`olinda/console.py`** — everything a user reads. Rules, panels, live tables, progress bars, `echo`.
+  Not levelled and not silenceable; it is presentation.
+- **`olinda/utils/logging.py`** — the loguru singleton (`from olinda.utils.logging import logger`),
+  with the usual levels plus `success()`.
 
-## Data with eosvc
+**The console handler is attached at `WARNING`.** `logger.debug`, `logger.info` and `logger.success`
+therefore print nothing. That is intentional — status belongs to `console` — but it means routing
+user-visible output through `logger.info` silently deletes it. Both write through the same Rich
+`Console`, so they interleave correctly with live regions.
 
-- `data/` is gitignored on purpose. Do not commit datasets, model artefacts, or large binaries to git.
-- Use [`eosvc`](https://github.com/ersilia-os) to back `data/` with an S3 bucket when the package needs reproducible inputs or outputs across machines.
+## Install tiers
 
-## README guidelines
+`pip install olinda` runs models: the CLI, `olinda predict`, `OlindaArtifact`. `[report]` adds
+`olinda validate` and its figures. `[train]` adds the boosting stack and includes `[report]`.
 
-- **Be brutally brief.** The README should answer "what is this and how do I use it" and nothing else. Aim for a screen or two. Long-form content belongs in `docs/`.
-- **Never use the package name as the H1 title.** For example, a package named `lazy-qsar` should not have `# lazy-qsar` at the top — write a short descriptive title instead (e.g. `# Lazy QSAR modelling for small molecules`).
-- **CLI commands as a table.** If the package ships a CLI, document its commands in one small table; don't reproduce `--help` output in Markdown.
-- **No AI-style filler.** Skip generic "Installation / Contributing / License / Acknowledgements" boilerplate unless the project actually has something to say about it.
+A command needing an absent extra must **refuse and name it** — `require_train_extra` /
+`require_report_extra` — never die on whichever heavy import came first. CI installs each tier
+separately and exercises it, so the boundaries are real.
 
-## Versioning and releases
+## Conventions
 
-- **Semantic versioning only.** Versions are `vMAJOR.MINOR.PATCH` (e.g. `v0.1.0`). Do not use date-based, build-number, or other schemes.
-- **PyPI releases via GitHub Actions.** When the user is ready to publish to PyPI, add a GitHub Action that triggers on release (not on every push). The git tag, GitHub release name, and `[project].version` in `pyproject.toml` must all match — release is blocked otherwise.
+- **ruff** is the canonical Ersilia config, with two documented deviations in `ruff.toml`
+  (`target-version = "py311"`, and `preview` scoped under `[lint]`). `ruff check` and `ruff format`
+  must both pass; `.pre-commit-config.yaml` runs them at the same pinned version as CI.
+- **Docstrings** are NumPy convention. `D101`/`D102` are enforced. Say *why* rather than restating the
+  signature — `olinda/data/reference.py` is the exemplar.
+- **Dependencies** are pinned exactly. `train`'s self-reference `olinda[report]==1.1.0` must be bumped
+  in lockstep with `[project].version`.
+- **`git blame`** — run `git config blame.ignoreRevsFile .git-blame-ignore-revs` once, or the
+  whole-repo reformat owns every line.
+- **Tests** smoke-test the documented entry points. They run real fits on a synthetic 240-row library,
+  so the whole suite is ~25 seconds; keep it that way.
 
-## Ersilia ecosystem
+## Data
 
-- Be aware of Ersilia's codebase in [GitHub](https://github.com/ersilia-os). Ersilia develops many tools.
-- Ersilia maintains a set of skills in [`ersilia-skills`](https://github.com/ersilia-os/ersilia-skills). That repo is updated independently — check it for the current list before assuming a skill is or isn't available, and use a skill instead of writing the same logic from scratch when one fits.
+`data/` is gitignored and backed by [`eosvc`](https://github.com/ersilia-os/eosvc); `access.json` is
+local. The reference library (`~/.olinda/erl0_morgan.h5`, 2.8 GB) is fetched by `olinda setup` from a
+public bucket. Never commit datasets, model artefacts or `.onnx` files.
+
+## Things that look wrong and are not
+
+- `example/run_stepwise.sh` has no `export` branch. Correct: `learn-hard` builds the artifact and
+  `clean` moves it out; `export` only exists to rebuild one.
+- `MODEL_NAME = "model.onnx"` is defined in three places. Left alone deliberately — importing it across
+  those modules would add edges for a thirteen-character string.
+- The `archive/master-v2-refactor` tag points at an **orphan root commit** on no branch. That tag is the
+  only thing keeping it reachable, so it is not semver and must not be deleted.
+- Tag `v1.0.0` sits on a 2022 commit with a published release. This is why the current version is 1.1.0.

@@ -1,0 +1,10 @@
+# Runs the same two checks as the Lint step in .github/workflows/test.yml, so a push does not fail on
+# something a commit could have caught. The rev matches `ruff==0.15.20` in pyproject's dev extra —
+# bump both together, or local and CI will disagree about what "formatted" means.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
