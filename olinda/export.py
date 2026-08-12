@@ -30,7 +30,7 @@ import numpy as np
 
 from olinda.console import STEP_COLORS, echo, rule, success, summary_panel
 from olinda.console import path as cpath
-from olinda.hard import (
+from olinda.hard.layout import (
     H_TO_S_NAME,
     HARD_DIRNAME,
     HARD_EVAL_NAME,
