@@ -3,8 +3,8 @@
 ``--soft-labels`` is a file with the teacher model's value for every molecule in the reference
 library, in the same order as ``erl0_morgan.h5``: a SMILES column — named ``smiles`` or ``input``,
 else column 0 — followed by the value columns, whatever they are called. This module reads that
-file, verifies the SMILES line up with the HDF5 row order, and returns the value vector for
-training. Callers that know better can name the columns outright rather than rely on the
+file, verifies the SMILES line up with the HDF5 row order, and returns one value vector per
+column. Callers that know better can name the columns outright rather than rely on the
 convention; :func:`smiles_column_index` and :func:`select_value_columns` are where that is decided.
 """
 
@@ -203,21 +203,6 @@ def resolve_smiles_frame(df, *, smiles_column: str | None = None, label_columns=
   return smiles, values
 
 
-def resolve_smiles_value(df, *, smiles_column: str | None = None, label_column: str | None = None):
-  """Return ``(smiles, values)`` for the single-target layout — one value column only.
-
-  Thin wrapper over :func:`resolve_smiles_frame` kept for single-column callers (e.g.
-  ``load_reference_calcs`` and ground-truth loading). See that function for the column conventions.
-  Without *label_column* the first value column wins, as before.
-  """
-  smiles, values = resolve_smiles_frame(
-    df,
-    smiles_column=smiles_column,
-    label_columns=None if label_column is None else [label_column],
-  )
-  return smiles, values.iloc[:, 0].to_numpy()
-
-
 def _read_table(path: str | Path):
   """Read a CSV/TSV/Parquet file into a pandas DataFrame (format inferred from the suffix)."""
   import pandas as pd
@@ -260,45 +245,6 @@ def _verify_smiles_alignment(smiles, descriptors_h5: str | Path) -> int:
         )
   logger.debug(f"Calculations verified against {n} library molecules")
   return n
-
-
-def load_reference_calcs(
-  path: str | Path,
-  descriptors_h5: str | Path,
-  *,
-  smiles_column: str | None = None,
-  label_column: str | None = None,
-) -> np.ndarray:
-  """Read a single-column reference-calcs file and return its value column as a float32 vector.
-
-  By default the file's first column (after any leading ``key``) is SMILES and the next column is
-  the teacher value (its name is ignored); name either explicitly to override that. The SMILES are
-  checked against the ``input`` dataset of ``descriptors_h5`` (see :func:`_verify_smiles_alignment`).
-  Non-finite values are kept (the packer/splitter drops them).
-
-  Parameters
-  ----------
-  path : str or Path
-      CSV/TSV/Parquet with a SMILES column and a single value column after it.
-  descriptors_h5 : str or Path
-      The reference-library HDF5 (its ``input`` dataset is the source of truth for order).
-  smiles_column : str, optional
-      Name of the SMILES column (default: ``smiles``/``input``, else the first column).
-  label_column : str, optional
-      Name of the value column (default: the first column after the SMILES one).
-
-  Returns
-  -------
-  np.ndarray
-      The value column as ``float32``, length equal to the number of reference molecules.
-  """
-  smiles, values = resolve_smiles_value(
-    _read_table(path), smiles_column=smiles_column, label_column=label_column
-  )
-  values = values.astype(np.float32)
-  logger.debug(f"Loaded {len(values)} reference-calcs values")
-  _verify_smiles_alignment(smiles, descriptors_h5)
-  return values
 
 
 def load_reference_calcs_frame(

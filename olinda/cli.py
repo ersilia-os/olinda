@@ -1005,7 +1005,7 @@ def validate_cmd(
   if soft_labels is None and hard_labels is None:
     echo("no labels given — reporting the model's internals only", "warning")
 
-  from olinda.report import validate_model
+  from olinda.report import REPORT_NAME, validate_model
 
   try:
     report = validate_model(
@@ -1035,7 +1035,7 @@ def validate_cmd(
         if report.get(kind)
       ],
       ("Figures", f"[bold]{n_figures}[/] written"),
-      ("Report", f"[dim]{cpath(Path(out_dir) / 'report.html')}[/]"),
+      ("Report", f"[dim]{cpath(Path(out_dir) / REPORT_NAME)}[/]"),
     ],
     border_style=STEP_COLORS["validate"],
     icon="✓",

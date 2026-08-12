@@ -24,10 +24,9 @@ import numpy as np
 # pixels wide, where 600 dpi costs encoding time and disk for no visible gain. The PDF stays vector.
 REPORT_DPI = 200
 
-# The reference grid every figure is sized on. A figure declares a footprint in 3 cm cells and its
-# size follows, which is what keeps a report's panels commensurate instead of each plot inventing
-# an aspect ratio. Six cells span stylia's print width (18 cm ≈ 7.09 in).
-CELL_CM = 3.0
+# The reference grid every figure is sized on. A figure declares a footprint in cells and its size
+# follows, which is what keeps a report's panels commensurate instead of each plot inventing an
+# aspect ratio. Six cells span stylia's print width (18 cm ≈ 7.09 in), so a cell is 3 cm.
 CELLS_PER_WIDTH = 6
 
 # Semantic roles → stylia ArticleColors names. Plots ask for a *meaning*, never a colour, so the

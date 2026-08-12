@@ -250,7 +250,9 @@ rest. Each figure links its vector PDF for publication use.</details>
 </main>
 </div>
 """
-  path = out_dir / "report.html"
+  from olinda.report import REPORT_NAME
+
+  path = out_dir / REPORT_NAME
   path.write_text(page, encoding="utf-8")
   return path
 
