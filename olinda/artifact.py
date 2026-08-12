@@ -49,6 +49,28 @@ def _check_rdkit_version(meta: dict) -> None:
 _BATCH = 4096
 
 
+def _as_smiles_list(smiles) -> list[str]:
+  """Normalise user input to a list of SMILES strings, refusing the shapes that would mislead.
+
+  A bare ``"CCO"`` is the trap worth guarding: a string is a perfectly good sequence of characters, so
+  it would featurize as three one-atom molecules and return three rows without complaint. Being handed
+  one molecule instead of a list is a natural mistake, and a wrong answer is a far worse outcome than
+  an exception.
+  """
+  if isinstance(smiles, (str, bytes)):
+    raise TypeError(
+      f"expected a sequence of SMILES, got a single string {smiles!r:.40} — iterating it would score "
+      f"each character as a molecule. Pass a list: [{smiles!r:.40}]"
+    )
+    # (a set would scramble the row order against the caller's input, so it is not accepted either)
+  if isinstance(smiles, (dict, set, frozenset)):
+    raise TypeError(f"expected an ordered sequence of SMILES, got {type(smiles).__name__} — order matters")
+  try:
+    return [str(s) for s in smiles]
+  except TypeError as exc:
+    raise TypeError(f"expected a sequence of SMILES, got {type(smiles).__name__}") from exc
+
+
 class _Progress:
   """A minimal stderr progress bar.
 
@@ -228,8 +250,10 @@ class OlindaArtifact:
   def run_channels(self, smiles, batch_size: int = _BATCH, progress: bool | None = None) -> dict:
     """Every named output of the graph, as a dict of 1-D arrays keyed by output name.
 
-    Useful for inspecting the pieces behind a blended prediction (the surrogate, the calibrated
-    ground truth, and the applicability weight). Most callers want :meth:`run`.
+    Most callers want :meth:`run`, which is this plus a DataFrame. Note that a fused artifact
+    currently exposes only its final per-column prediction: the surrogate, the calibrated ground
+    truth and the applicability weight exist inside the graph but are not declared as outputs, so
+    they do not appear here. Use ``olinda validate`` to see those.
 
     ``progress`` shows a bar on stderr; the default shows one only for inputs larger than a single
     batch, and only when stderr is a terminal.
@@ -241,7 +265,10 @@ class OlindaArtifact:
     """
     import warnings
 
-    smiles = [str(s) for s in smiles]
+    smiles = _as_smiles_list(smiles)
+    batch_size = int(batch_size)
+    if batch_size < 1:
+      raise ValueError(f"batch_size must be at least 1, got {batch_size}")
     chunks: list[dict] = []
     n_invalid = 0
     with _Progress(len(smiles), enabled=progress) as bar:
@@ -289,7 +316,7 @@ class OlindaArtifact:
     """
     import pandas as pd
 
-    smiles = [str(s) for s in smiles]
+    smiles = _as_smiles_list(smiles)
     channels = self.run_channels(smiles, batch_size=batch_size, progress=progress)  # already str
     values = {c["name"]: channels[c["output"]] for c in self._columns}
     return pd.DataFrame({"smiles": smiles, **values})

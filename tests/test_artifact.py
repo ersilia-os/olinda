@@ -253,3 +253,50 @@ def test_declared_outputs_are_checked_against_the_graph(tmp_path, monkeypatch):
   onnx.save(m, str(path))
   with pytest.raises(ValueError, match="does not produce"):
     OlindaArtifact(path)
+
+
+def test_a_single_smiles_string_is_refused_rather_than_iterated(tmp_path, monkeypatch):
+  """``run("CCO")`` must not silently score C, C and O as three molecules.
+
+  A string is a valid sequence, so without this guard the most natural mistake a caller can make —
+  passing one molecule instead of a list of them — returns a full DataFrame of confident nonsense.
+  """
+  model = OlindaArtifact(_build_artifact(tmp_path, monkeypatch))
+  with pytest.raises(TypeError, match="single string"):
+    model.run("CCO")
+  with pytest.raises(TypeError, match="single string"):
+    model.run_channels("CCO")
+  # the same molecule as a list is the correct call, and still works
+  assert len(model.run(["CCO"])) == 1
+
+
+def test_unordered_and_non_sequence_inputs_are_refused(tmp_path, monkeypatch):
+  """Row order is part of the contract, so a set cannot be accepted; nor can a bare number."""
+  model = OlindaArtifact(_build_artifact(tmp_path, monkeypatch))
+  with pytest.raises(TypeError, match="order matters"):
+    model.run({"CCO", "CCC"})
+  with pytest.raises(TypeError, match="sequence of SMILES"):
+    model.run(42)
+
+
+def test_batch_size_must_be_positive(tmp_path, monkeypatch):
+  """Zero used to reach range() and fail with 'range() arg 3 must not be zero'."""
+  model = OlindaArtifact(_build_artifact(tmp_path, monkeypatch))
+  for bad in (0, -1):
+    with pytest.raises(ValueError, match="at least 1"):
+      model.run(["CCO"], batch_size=bad)
+
+
+def test_ordinary_sequence_types_are_all_accepted(tmp_path, monkeypatch):
+  """Lists, tuples, numpy arrays, pandas Series and generators are all reasonable inputs."""
+  import pandas as pd
+
+  model = OlindaArtifact(_build_artifact(tmp_path, monkeypatch))
+  expected = model.run(["CCO", "c1ccccc1"])[model.columns[0]].to_numpy()
+  for given in (
+    ("CCO", "c1ccccc1"),
+    np.array(["CCO", "c1ccccc1"]),
+    pd.Series(["CCO", "c1ccccc1"]),
+    iter(["CCO", "c1ccccc1"]),
+  ):
+    np.testing.assert_allclose(model.run(given)[model.columns[0]].to_numpy(), expected)

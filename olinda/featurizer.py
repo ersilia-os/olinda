@@ -6,6 +6,12 @@ import numpy as np
 from rdkit import Chem, RDLogger
 from rdkit.Chem import rdFingerprintGenerator
 
+# Errors as well as warnings: an unparseable SMILES is an ordinary, expected input here, and every
+# caller already reports it — `transform` returns an all-zero row, which the artifact turns into NaN and
+# summarises in a single warning naming the count. RDKit's own multi-line complaint per molecule is
+# written straight from C++ to stderr, so it cannot be captured or counted, and on a bad input file it
+# buries the result it is describing.
+RDLogger.DisableLog("rdApp.error")
 RDLogger.DisableLog("rdApp.warning")
 
 
