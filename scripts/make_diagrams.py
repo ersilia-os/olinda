@@ -32,421 +32,526 @@ OUT = NC.orange  # outputs
 
 
 def _canvas(ax) -> None:
-  """Turn an axis into a blank 0-100 layout grid."""
-  ax.set_xlim(0, 100)
-  ax.set_ylim(0, 100)
-  ax.axis("off")
+    """Turn an axis into a blank 0-100 layout grid."""
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+    ax.axis("off")
 
 
-def _box(ax, x, y, w, h, text, color, *, dashed=False, fontsize=None, bold_first=False, fill=0.16):
-  """Rounded box centred on ``(x, y)`` with centred, optionally bold-first-line text."""
-  ax.add_patch(
-    FancyBboxPatch(
-      (x - w / 2, y - h / 2),
-      w,
-      h,
-      boxstyle="round,pad=0,rounding_size=1.4",
-      linewidth=1.3,
-      edgecolor=color,
-      facecolor=to_rgba(color, fill),
-      linestyle="--" if dashed else "-",
-      mutation_aspect=0.45,
-      zorder=2,
+def _box(
+    ax,
+    x,
+    y,
+    w,
+    h,
+    text,
+    color,
+    *,
+    dashed=False,
+    fontsize=None,
+    bold_first=False,
+    fill=0.16,
+):
+    """Rounded box centred on ``(x, y)`` with centred, optionally bold-first-line text."""
+    ax.add_patch(
+        FancyBboxPatch(
+            (x - w / 2, y - h / 2),
+            w,
+            h,
+            boxstyle="round,pad=0,rounding_size=1.4",
+            linewidth=1.3,
+            edgecolor=color,
+            facecolor=to_rgba(color, fill),
+            linestyle="--" if dashed else "-",
+            mutation_aspect=0.45,
+            zorder=2,
+        )
     )
-  )
-  if bold_first and "\n" in text:
-    head, rest = text.split("\n", 1)
-    ax.text(
-      x,
-      y + h * 0.20,
-      head,
-      ha="center",
-      va="center",
-      fontsize=fontsize or stylia.FONTSIZE_SMALL,
-      fontweight="bold",
-      color=NC.black,
-      zorder=3,
-    )
-    ax.text(
-      x,
-      y - h * 0.16,
-      rest,
-      ha="center",
-      va="center",
-      fontsize=stylia.FONTSIZE_SMALL * 0.86,
-      color=NC.black,
-      zorder=3,
-    )
-  else:
-    ax.text(
-      x,
-      y,
-      text,
-      ha="center",
-      va="center",
-      fontsize=fontsize or stylia.FONTSIZE_SMALL,
-      color=NC.black,
-      zorder=3,
-    )
+    if bold_first and "\n" in text:
+        head, rest = text.split("\n", 1)
+        ax.text(
+            x,
+            y + h * 0.20,
+            head,
+            ha="center",
+            va="center",
+            fontsize=fontsize or stylia.FONTSIZE_SMALL,
+            fontweight="bold",
+            color=NC.black,
+            zorder=3,
+        )
+        ax.text(
+            x,
+            y - h * 0.16,
+            rest,
+            ha="center",
+            va="center",
+            fontsize=stylia.FONTSIZE_SMALL * 0.86,
+            color=NC.black,
+            zorder=3,
+        )
+    else:
+        ax.text(
+            x,
+            y,
+            text,
+            ha="center",
+            va="center",
+            fontsize=fontsize or stylia.FONTSIZE_SMALL,
+            color=NC.black,
+            zorder=3,
+        )
 
 
-def _arrow(ax, start, end, *, color=None, dashed=False, elbow=None, label=None, label_dy=2.6):
-  """Arrow from ``start`` to ``end``; ``elbow`` picks a right-angled connection style."""
-  style = {"angle_h": "angle,angleA=0,angleB=90", "angle_v": "angle,angleA=90,angleB=0"}
-  ax.add_patch(
-    FancyArrowPatch(
-      start,
-      end,
-      arrowstyle="-|>",
-      mutation_scale=11,
-      linewidth=1.2,
-      color=color or NC.gray,
-      linestyle="--" if dashed else "-",
-      connectionstyle=style.get(elbow, "arc3,rad=0"),
-      shrinkA=1,
-      shrinkB=1,
-      zorder=1,
+def _arrow(
+    ax, start, end, *, color=None, dashed=False, elbow=None, label=None, label_dy=2.6
+):
+    """Arrow from ``start`` to ``end``; ``elbow`` picks a right-angled connection style."""
+    style = {
+        "angle_h": "angle,angleA=0,angleB=90",
+        "angle_v": "angle,angleA=90,angleB=0",
+    }
+    ax.add_patch(
+        FancyArrowPatch(
+            start,
+            end,
+            arrowstyle="-|>",
+            mutation_scale=11,
+            linewidth=1.2,
+            color=color or NC.gray,
+            linestyle="--" if dashed else "-",
+            connectionstyle=style.get(elbow, "arc3,rad=0"),
+            shrinkA=1,
+            shrinkB=1,
+            zorder=1,
+        )
     )
-  )
-  if label:
-    ax.text(
-      (start[0] + end[0]) / 2,
-      (start[1] + end[1]) / 2 + label_dy,
-      label,
-      ha="center",
-      va="bottom",
-      fontsize=stylia.FONTSIZE_SMALL * 0.82,
-      color=NC.gray,
-      style="italic",
-      zorder=3,
-    )
+    if label:
+        ax.text(
+            (start[0] + end[0]) / 2,
+            (start[1] + end[1]) / 2 + label_dy,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=stylia.FONTSIZE_SMALL * 0.82,
+            color=NC.gray,
+            style="italic",
+            zorder=3,
+        )
 
 
 def _ramp(ax, *, x0, x1, y0, y1):
-  """An inset plot of the blend weight against predicted similarity, drawn in canvas coordinates.
+    """An inset plot of the blend weight against predicted similarity, drawn in canvas coordinates.
 
-  The gate's output is the one part of the pipeline a box cannot state honestly: what matters is that
-  ``a`` is *continuous* — zero below T_LO, rising linearly to ``a_max`` at T_HI — which is exactly
-  what the bucketed gate this replaced got wrong. So draw the function.
-  """
-  lo, hi = 0.4, 0.7  # olinda.tanimoto.T_LO / T_HI
+    The gate's output is the one part of the pipeline a box cannot state honestly: what matters is that
+    ``a`` is *continuous* — zero below T_LO, rising linearly to ``a_max`` at T_HI — which is exactly
+    what the bucketed gate this replaced got wrong. So draw the function.
+    """
+    lo, hi = 0.4, 0.7  # olinda.tanimoto.T_LO / T_HI
 
-  def px(t):  # similarity 0..1 → canvas x
-    return x0 + t * (x1 - x0)
+    def px(t):  # similarity 0..1 → canvas x
+        return x0 + t * (x1 - x0)
 
-  def py(a):  # weight 0..1 → canvas y
-    return y0 + a * (y1 - y0)
+    def py(a):  # weight 0..1 → canvas y
+        return y0 + a * (y1 - y0)
 
-  ax.plot([x0, x1], [y0, y0], color=NC.gray, linewidth=0.9, zorder=2)  # axes
-  ax.plot([x0, x0], [y0, y1], color=NC.gray, linewidth=0.9, zorder=2)
-  ax.plot(
-    [px(0), px(lo), px(hi), px(1)],
-    [py(0), py(0), py(0.66), py(0.66)],
-    color=TANIMOTO,
-    linewidth=1.6,
-    solid_capstyle="round",
-    zorder=3,
-  )
-  for t, label in ((lo, "0.4"), (hi, "0.7")):
-    ax.plot([px(t), px(t)], [y0, py(0.66)], color=TANIMOTO, linewidth=0.7, linestyle=":", zorder=2)
-    _note(ax, px(t), y0 - 3.4, label, color=DATA)
-  _note(ax, x0 - 2.5, py(0.66), "a_max", color=TANIMOTO, ha="right")
-  _note(ax, x0 - 2.5, y0, "0", color=DATA, ha="right")
-  _note(ax, (x0 + x1) / 2, y0 - 8, "predicted 1-NN Tanimoto", color=DATA)
+    ax.plot([x0, x1], [y0, y0], color=NC.gray, linewidth=0.9, zorder=2)  # axes
+    ax.plot([x0, x0], [y0, y1], color=NC.gray, linewidth=0.9, zorder=2)
+    ax.plot(
+        [px(0), px(lo), px(hi), px(1)],
+        [py(0), py(0), py(0.66), py(0.66)],
+        color=TANIMOTO,
+        linewidth=1.6,
+        solid_capstyle="round",
+        zorder=3,
+    )
+    for t, label in ((lo, "0.4"), (hi, "0.7")):
+        ax.plot(
+            [px(t), px(t)],
+            [y0, py(0.66)],
+            color=TANIMOTO,
+            linewidth=0.7,
+            linestyle=":",
+            zorder=2,
+        )
+        _note(ax, px(t), y0 - 3.4, label, color=DATA)
+    _note(ax, x0 - 2.5, py(0.66), "a_max", color=TANIMOTO, ha="right")
+    _note(ax, x0 - 2.5, y0, "0", color=DATA, ha="right")
+    _note(ax, (x0 + x1) / 2, y0 - 8, "predicted 1-NN Tanimoto", color=DATA)
 
 
 def _note(ax, x, y, text, *, color=None, ha="center", italic=True):
-  """Small free-standing annotation."""
-  ax.text(
-    x,
-    y,
-    text,
-    ha=ha,
-    va="center",
-    fontsize=stylia.FONTSIZE_SMALL * 0.82,
-    color=color or NC.gray,
-    style="italic" if italic else "normal",
-    zorder=3,
-  )
+    """Small free-standing annotation."""
+    ax.text(
+        x,
+        y,
+        text,
+        ha=ha,
+        va="center",
+        fontsize=stylia.FONTSIZE_SMALL * 0.82,
+        color=color or NC.gray,
+        style="italic" if italic else "normal",
+        zorder=3,
+    )
 
 
 # ── 1 · the big idea ─────────────────────────────────────────────────────────
 
 
 def draw_distillation(ax) -> None:
-  """Why olinda exists: score a heavy teacher once, then learn a fast student from it."""
-  _canvas(ax)
+    """Why olinda exists: score a heavy teacher once, then learn a fast student from it."""
+    _canvas(ax)
 
-  _box(ax, 15, 80, 26, 20, "TEACHER\noriginal model\naccurate · slow · heavy deps", TEACHER, bold_first=True)
-  _box(ax, 50, 80, 26, 20, "REFERENCE LIBRARY\n~1.4M compounds\n2048-d Morgan counts", DATA, bold_first=True)
-  _box(ax, 85, 80, 24, 20, "SOFT LABELS\none teacher value\nper compound", DATA, bold_first=True)
+    _box(
+        ax,
+        15,
+        80,
+        26,
+        20,
+        "TEACHER\noriginal model\naccurate · slow · heavy deps",
+        TEACHER,
+        bold_first=True,
+    )
+    _box(
+        ax,
+        50,
+        80,
+        26,
+        20,
+        "REFERENCE LIBRARY\n~1.4M compounds\n2048-d Morgan counts",
+        DATA,
+        bold_first=True,
+    )
+    _box(
+        ax,
+        85,
+        80,
+        24,
+        20,
+        "SOFT LABELS\none teacher value\nper compound",
+        DATA,
+        bold_first=True,
+    )
 
-  _arrow(ax, (28.5, 80), (36.5, 80), label="score once")
-  _arrow(ax, (63.5, 80), (72.5, 80))
+    _arrow(ax, (28.5, 80), (36.5, 80), label="score once")
+    _arrow(ax, (63.5, 80), (72.5, 80))
 
-  # fingerprints and teacher values meet in the student
-  _arrow(ax, (50, 69.5), (50, 55), color=STUDENT)
-  _arrow(ax, (85, 69.5), (67, 46), elbow="angle_v", color=STUDENT)
-  _note(ax, 53.5, 62, "fingerprints", color=STUDENT, ha="left")
-  _note(ax, 82, 58, "targets", color=STUDENT, ha="right")
+    # fingerprints and teacher values meet in the student
+    _arrow(ax, (50, 69.5), (50, 55), color=STUDENT)
+    _arrow(ax, (85, 69.5), (67, 46), elbow="angle_v", color=STUDENT)
+    _note(ax, 53.5, 62, "fingerprints", color=STUDENT, ha="left")
+    _note(ax, 82, 58, "targets", color=STUDENT, ha="right")
 
-  _box(
-    ax,
-    50,
-    44,
-    46,
-    17,
-    "STUDENT\ngradient boosting  ·  XGBoost on GPU / LightGBM on CPU",
-    STUDENT,
-    bold_first=True,
-  )
-  _arrow(ax, (50, 35), (50, 26), color=BUNDLE)
-  _box(
-    ax,
-    50,
-    18,
-    56,
-    13,
-    "model.onnx  —  milliseconds per compound, none of the teacher's dependencies",
-    BUNDLE,
-  )
-  _note(ax, 50, 6, "the teacher is never needed again", color=DATA)
+    _box(
+        ax,
+        50,
+        44,
+        46,
+        17,
+        "STUDENT\ngradient boosting  ·  XGBoost on GPU / LightGBM on CPU",
+        STUDENT,
+        bold_first=True,
+    )
+    _arrow(ax, (50, 35), (50, 26), color=BUNDLE)
+    _box(
+        ax,
+        50,
+        18,
+        56,
+        13,
+        "model.onnx  —  milliseconds per compound, none of the teacher's dependencies",
+        BUNDLE,
+    )
+    _note(ax, 50, 6, "the teacher is never needed again", color=DATA)
 
-  stylia.label(ax, xlabel="", ylabel="", title="olinda distils a slow teacher into a fast student")
+    stylia.label(
+        ax,
+        xlabel="",
+        ylabel="",
+        title="olinda distils a slow teacher into a fast student",
+    )
 
 
 # ── 2 · commands and artifacts ───────────────────────────────────────────────
 
 
 def draw_pipeline(ax) -> None:
-  """The CLI steps and what each one writes into the run directory."""
-  _canvas(ax)
+    """The CLI steps and what each one writes into the run directory."""
+    _canvas(ax)
 
-  steps = [
-    ("setup", "erl0_morgan.h5\nreference fingerprints", False),
-    ("prepare", "manifest.json\ntargets.h5 · splits.h5", False),
-    ("tune", "best_params.json", True),
-    ("learn-soft", "columns/<id>/\nbooster · metrics · plots", False),
-    ("learn-hard", "columns/<id>/_hard/\ncalibrator · gate", True),
-    ("export", "model.onnx\nrebuilt on demand", True),
-    ("clean", "model.onnx\nand nothing else", False),
-  ]
-  xs = [8.0 + i * 14.0 for i in range(len(steps))]
-  w = 12.0
+    steps = [
+        ("setup", "erl0_morgan.h5\nreference fingerprints", False),
+        ("prepare", "manifest.json\ntargets.h5 · splits.h5", False),
+        ("tune", "best_params.json", True),
+        ("learn-soft", "columns/<id>/\nbooster · metrics · plots", False),
+        ("learn-hard", "columns/<id>/_hard/\ncalibrator · gate", True),
+        ("export", "model.onnx\nrebuilt on demand", True),
+        ("clean", "model.onnx\nand nothing else", False),
+    ]
+    xs = [8.0 + i * 14.0 for i in range(len(steps))]
+    w = 12.0
 
-  for (name, artifact, optional), x in zip(steps, xs):
-    _box(ax, x, 68, w, 11, name, STUDENT if not optional else DATA, dashed=optional)
-    _box(ax, x, 46, w, 15, artifact, DATA, dashed=optional, fill=0.09)
-    _arrow(ax, (x, 62), (x, 54), color=DATA)
+    for (name, artifact, optional), x in zip(steps, xs):
+        _box(ax, x, 68, w, 11, name, STUDENT if not optional else DATA, dashed=optional)
+        _box(ax, x, 46, w, 15, artifact, DATA, dashed=optional, fill=0.09)
+        _arrow(ax, (x, 62), (x, 54), color=DATA)
 
-  for x0, x1 in zip(xs[:-1], xs[1:]):
-    _arrow(ax, (x0 + w / 2, 68), (x1 - w / 2, 68))
+    for x0, x1 in zip(xs[:-1], xs[1:]):
+        _arrow(ax, (x0 + w / 2, 68), (x1 - w / 2, 68))
 
-  _note(ax, xs[2], 78.5, "optional", color=DATA)
-  _note(ax, xs[4], 78.5, "only with hard labels", color=DATA)
-  _note(ax, xs[5], 78.5, "implicit: each fuses as it ends", color=DATA)
+    _note(ax, xs[2], 78.5, "optional", color=DATA)
+    _note(ax, xs[4], 78.5, "only with hard labels", color=DATA)
+    _note(ax, xs[5], 78.5, "implicit: each fuses as it ends", color=DATA)
 
-  # `fit` chains prepare → clean, fusing along the way
-  ax.plot([xs[1] - w / 2, xs[-1] + w / 2], [90, 90], color=OUT, linewidth=1.3, zorder=1)
-  for x in (xs[1] - w / 2, xs[-1] + w / 2):
-    ax.plot([x, x], [86, 90], color=OUT, linewidth=1.3, zorder=1)
-  ax.text(
-    (xs[1] + xs[-1]) / 2,
-    93,
-    "olinda fit  — chains these in one command",
-    ha="center",
-    va="bottom",
-    fontsize=stylia.FONTSIZE_SMALL,
-    color=OUT,
-    fontweight="bold",
-    zorder=3,
-  )
+    # `fit` chains prepare → clean, fusing along the way
+    ax.plot(
+        [xs[1] - w / 2, xs[-1] + w / 2], [90, 90], color=OUT, linewidth=1.3, zorder=1
+    )
+    for x in (xs[1] - w / 2, xs[-1] + w / 2):
+        ax.plot([x, x], [86, 90], color=OUT, linewidth=1.3, zorder=1)
+    ax.text(
+        (xs[1] + xs[-1]) / 2,
+        93,
+        "olinda fit  — chains these in one command",
+        ha="center",
+        va="bottom",
+        fontsize=stylia.FONTSIZE_SMALL,
+        color=OUT,
+        fontweight="bold",
+        zorder=3,
+    )
 
-  _arrow(ax, (xs[-1], 38.5), (81, 24), elbow="angle_v", color=BUNDLE)
-  _box(
-    ax,
-    46,
-    18,
-    64,
-    13,
-    "olinda predict  -m <run dir>  -i compounds.csv  -o predictions.csv",
-    BUNDLE,
-  )
-  _note(ax, 46, 7, "every step shares one --model-dir / -m", color=DATA)
+    _arrow(ax, (xs[-1], 38.5), (81, 24), elbow="angle_v", color=BUNDLE)
+    _box(
+        ax,
+        46,
+        18,
+        64,
+        13,
+        "olinda predict  -m <run dir>  -i compounds.csv  -o predictions.csv",
+        BUNDLE,
+    )
+    _note(ax, 46, 7, "every step shares one --model-dir / -m", color=DATA)
 
-  stylia.label(ax, xlabel="", ylabel="", title="One run directory, one command per step")
+    stylia.label(
+        ax, xlabel="", ylabel="", title="One run directory, one command per step"
+    )
 
 
 # ── 3 · inside the fused bundle ──────────────────────────────────────────────
 
 
 def draw_model_onnx(ax) -> None:
-  """What the single self-describing model.onnx actually contains."""
-  _canvas(ax)
+    """What the single self-describing model.onnx actually contains."""
+    _canvas(ax)
 
-  # the ONNX boundary
-  ax.add_patch(
-    FancyBboxPatch(
-      (24, 16),
-      57,
-      66,
-      boxstyle="round,pad=0,rounding_size=1.4",
-      linewidth=1.6,
-      edgecolor=BUNDLE,
-      facecolor=to_rgba(BUNDLE, 0.06),
-      mutation_aspect=0.45,
-      zorder=0,
+    # the ONNX boundary
+    ax.add_patch(
+        FancyBboxPatch(
+            (24, 16),
+            57,
+            66,
+            boxstyle="round,pad=0,rounding_size=1.4",
+            linewidth=1.6,
+            edgecolor=BUNDLE,
+            facecolor=to_rgba(BUNDLE, 0.06),
+            mutation_aspect=0.45,
+            zorder=0,
+        )
     )
-  )
-  ax.text(
-    26,
-    78,
-    "model.onnx",
-    ha="left",
-    va="center",
-    fontsize=stylia.FONTSIZE_SMALL,
-    fontweight="bold",
-    color=NC.black,
-    zorder=3,
-  )
+    ax.text(
+        26,
+        78,
+        "model.onnx",
+        ha="left",
+        va="center",
+        fontsize=stylia.FONTSIZE_SMALL,
+        fontweight="bold",
+        color=NC.black,
+        zorder=3,
+    )
 
-  # featurization is the one stage that cannot live in the graph
-  _box(ax, 9, 66, 15, 11, "SMILES", DATA)
-  _box(ax, 9, 46, 16, 14, "RDKit\nMorgan featurizer", DATA, dashed=True, bold_first=True)
-  _arrow(ax, (9, 60.5), (9, 53), color=DATA)
-  _note(ax, 9, 33, "stays in Python\nRDKit has no ONNX op", color=DATA)
-  _arrow(ax, (17, 46), (21, 46), color=DATA)
-  _note(ax, 19.5, 51, "2048 counts", color=DATA)
+    # featurization is the one stage that cannot live in the graph
+    _box(ax, 9, 66, 15, 11, "SMILES", DATA)
+    _box(
+        ax,
+        9,
+        46,
+        16,
+        14,
+        "RDKit\nMorgan featurizer",
+        DATA,
+        dashed=True,
+        bold_first=True,
+    )
+    _arrow(ax, (9, 60.5), (9, 53), color=DATA)
+    _note(ax, 9, 33, "stays in Python\nRDKit has no ONNX op", color=DATA)
+    _arrow(ax, (17, 46), (21, 46), color=DATA)
+    _note(ax, 19.5, 51, "2048 counts", color=DATA)
 
-  # three heads, fed from the same fingerprint
-  _box(ax, 36, 66, 17, 13, "S · surrogate\nGBM", STUDENT, bold_first=True)
-  _box(ax, 36, 44, 17, 13, "H · hard model\nGBM", TEACHER, bold_first=True)
-  _box(ax, 36, 24, 17, 13, "T · Tanimoto\nMLP", TANIMOTO, bold_first=True)
-  for y in (66, 44, 24):
-    _arrow(ax, (21.5, 46), (27, y), color=DATA)
+    # three heads, fed from the same fingerprint
+    _box(ax, 36, 66, 17, 13, "S · surrogate\nGBM", STUDENT, bold_first=True)
+    _box(ax, 36, 44, 17, 13, "H · hard model\nGBM", TEACHER, bold_first=True)
+    _box(ax, 36, 24, 17, 13, "T · Tanimoto\nMLP", TANIMOTO, bold_first=True)
+    for y in (66, 44, 24):
+        _arrow(ax, (21.5, 46), (27, y), color=DATA)
 
-  _box(ax, 57, 66, 15, 12, "isotonic\ncorrection", STUDENT, fill=0.09)
-  _box(ax, 57, 44, 15, 12, "isotonic\nH → H_S", TEACHER, fill=0.09)
-  _arrow(ax, (44.5, 66), (49.5, 66), color=STUDENT)
-  _arrow(ax, (44.5, 44), (49.5, 44), color=TEACHER, label="H", label_dy=1.8)
+    _box(ax, 57, 66, 15, 12, "isotonic\ncorrection", STUDENT, fill=0.09)
+    _box(ax, 57, 44, 15, 12, "isotonic\nH → H_S", TEACHER, fill=0.09)
+    _arrow(ax, (44.5, 66), (49.5, 66), color=STUDENT)
+    _arrow(ax, (44.5, 44), (49.5, 44), color=TEACHER, label="H", label_dy=1.8)
 
-  # everything converges on the blend
-  _box(ax, 73, 44, 12, 20, "blend", OUT, bold_first=False)
-  _arrow(ax, (64.5, 66), (69, 50), color=STUDENT)
-  _note(ax, 63, 57, "S", color=STUDENT, ha="right")
-  _arrow(ax, (64.5, 44), (67, 44), color=TEACHER)
-  _note(ax, 57, 35, "h_s", color=TEACHER)
-  _arrow(ax, (44.5, 24), (69, 38), elbow="angle_h", color=TANIMOTO)
-  _note(ax, 56, 20, "a", color=TANIMOTO)
+    # everything converges on the blend
+    _box(ax, 73, 44, 12, 20, "blend", OUT, bold_first=False)
+    _arrow(ax, (64.5, 66), (69, 50), color=STUDENT)
+    _note(ax, 63, 57, "S", color=STUDENT, ha="right")
+    _arrow(ax, (64.5, 44), (67, 44), color=TEACHER)
+    _note(ax, 57, 35, "h_s", color=TEACHER)
+    _arrow(ax, (44.5, 24), (69, 38), elbow="angle_h", color=TANIMOTO)
+    _note(ax, 56, 20, "a", color=TANIMOTO)
 
-  _arrow(ax, (79, 44), (86, 44), color=OUT)
-  _box(ax, 93, 44, 13, 13, "prediction", OUT)
+    _arrow(ax, (79, 44), (86, 44), color=OUT)
+    _box(ax, 93, 44, 13, 13, "prediction", OUT)
 
-  _note(
-    ax,
-    52,
-    92,
-    "prediction  =  (1 − a) · S  +  a · H_S",
-    color=NC.black,
-    italic=False,
-  )
-  _note(
-    ax,
-    52,
-    9,
-    "one graph output per teacher column, named after it — plus the channels above, so a report can "
-    "show them",
-    color=DATA,
-  )
-  _note(
-    ax,
-    52,
-    4,
-    "metadata_props carries the featurizer config, the RDKit version and the reference library — "
-    "so predict refuses a mismatched RDKit",
-    color=DATA,
-  )
+    _note(
+        ax,
+        52,
+        92,
+        "prediction  =  (1 − a) · S  +  a · H_S",
+        color=NC.black,
+        italic=False,
+    )
+    _note(
+        ax,
+        52,
+        9,
+        "one graph output per teacher column, named after it — plus the channels above, so a report can "
+        "show them",
+        color=DATA,
+    )
+    _note(
+        ax,
+        52,
+        4,
+        "metadata_props carries the featurizer config, the RDKit version and the reference library — "
+        "so predict refuses a mismatched RDKit",
+        color=DATA,
+    )
 
-  stylia.label(ax, xlabel="", ylabel="", title="One fused, self-describing artifact")
+    stylia.label(ax, xlabel="", ylabel="", title="One fused, self-describing artifact")
 
 
 # ── 4 · hard labels: H, H_S and T ───────────────────────────────────────────
 
 
 def draw_hard(ax) -> None:
-  """The four learn-hard steps, and how T sets the blend weight."""
-  _canvas(ax)
+    """The four learn-hard steps, and how T sets the blend weight."""
+    _canvas(ax)
 
-  steps = [
-    "1 · train H\non your hard labels",
-    "2 · score H\nacross the library",
-    "3 · calibrate\nH → H_S, S's scale",
-    "4 · train T\nTanimoto regressor",
-  ]
-  xs = [14, 38, 62, 86]
-  for text, x in zip(steps, xs):
-    _box(ax, x, 80, 21, 16, text, TEACHER, bold_first=True)
-  for x0, x1 in zip(xs[:-1], xs[1:]):
-    _arrow(ax, (x0 + 10.5, 80), (x1 - 10.5, 80))
-  _note(ax, 50, 68, "the isotonic direction is learned — a low H may map to a high soft label", color=DATA)
+    steps = [
+        "1 · train H\non your hard labels",
+        "2 · score H\nacross the library",
+        "3 · calibrate\nH → H_S, S's scale",
+        "4 · train T\nTanimoto regressor",
+    ]
+    xs = [14, 38, 62, 86]
+    for text, x in zip(steps, xs):
+        _box(ax, x, 80, 21, 16, text, TEACHER, bold_first=True)
+    for x0, x1 in zip(xs[:-1], xs[1:]):
+        _arrow(ax, (x0 + 10.5, 80), (x1 - 10.5, 80))
+    _note(
+        ax,
+        50,
+        68,
+        "the isotonic direction is learned — a low H may map to a high soft label",
+        color=DATA,
+    )
 
-  # The gate learns to stand in for a nearest-neighbour search, so the labelled fingerprints never
-  # have to ship: exact Tanimoto labels the library once, here, and an MLP reproduces it from bits.
-  _box(ax, 15, 48, 25, 17, "exact 1-NN Tanimoto\nto your labelled\ncompounds", TANIMOTO, bold_first=True)
-  _arrow(ax, (27.5, 48), (35, 48), color=TANIMOTO, label="target", label_dy=1.6)
-  _box(ax, 47, 50, 22, 17, "T · MLP\n2048 → 256 → 64 → 1", TANIMOTO, bold_first=True)
-  _arrow(ax, (58, 50), (65, 50), color=TANIMOTO)
-  _ramp(ax, x0=68, x1=95, y0=44, y1=59)
+    # The gate learns to stand in for a nearest-neighbour search, so the labelled fingerprints never
+    # have to ship: exact Tanimoto labels the library once, here, and an MLP reproduces it from bits.
+    _box(
+        ax,
+        15,
+        48,
+        25,
+        17,
+        "exact 1-NN Tanimoto\nto your labelled\ncompounds",
+        TANIMOTO,
+        bold_first=True,
+    )
+    _arrow(ax, (27.5, 48), (35, 48), color=TANIMOTO, label="target", label_dy=1.6)
+    _box(ax, 47, 50, 22, 17, "T · MLP\n2048 → 256 → 64 → 1", TANIMOTO, bold_first=True)
+    _arrow(ax, (58, 50), (65, 50), color=TANIMOTO)
+    _ramp(ax, x0=68, x1=95, y0=44, y1=59)
 
-  _note(
-    ax,
-    50,
-    31,
-    "at predict time two matrix multiplies estimate the similarity — no search, and your compounds "
-    "stay out of the artifact",
-    color=NC.black,
-    italic=False,
-  )
-  _note(ax, 50, 26, "how high the ramp may reach is earned: a head that cannot reproduce", color=DATA)
-  _note(ax, 50, 22, "the teacher's scale is capped low, and one that loses is dropped", color=DATA)
-  _box(
-    ax,
-    50,
-    11,
-    66,
-    13,
-    "prediction  =  (1 − a) · S  +  a · H_S",
-    OUT,
-  )
-  _note(ax, 50, 2.5, "far from your data the blend falls back to S", color=DATA)
+    _note(
+        ax,
+        50,
+        31,
+        "at predict time two matrix multiplies estimate the similarity — no search, and your compounds "
+        "stay out of the artifact",
+        color=NC.black,
+        italic=False,
+    )
+    _note(
+        ax,
+        50,
+        26,
+        "how high the ramp may reach is earned: a head that cannot reproduce",
+        color=DATA,
+    )
+    _note(
+        ax,
+        50,
+        22,
+        "the teacher's scale is capped low, and one that loses is dropped",
+        color=DATA,
+    )
+    _box(
+        ax,
+        50,
+        11,
+        66,
+        13,
+        "prediction  =  (1 − a) · S  +  a · H_S",
+        OUT,
+    )
+    _note(ax, 50, 2.5, "far from your data the blend falls back to S", color=DATA)
 
-  stylia.label(ax, xlabel="", ylabel="", title="Hard labels, calibrated onto the teacher's scale")
+    stylia.label(
+        ax,
+        xlabel="",
+        ylabel="",
+        title="Hard labels, calibrated onto the teacher's scale",
+    )
 
 
 FIGURES = [
-  ("olinda_01_distillation.png", draw_distillation, 0.52),
-  ("olinda_02_pipeline.png", draw_pipeline, 0.50),
-  ("olinda_03_model_onnx.png", draw_model_onnx, 0.56),
-  ("olinda_04_hard.png", draw_hard, 0.50),
+    ("olinda_01_distillation.png", draw_distillation, 0.52),
+    ("olinda_02_pipeline.png", draw_pipeline, 0.50),
+    ("olinda_03_model_onnx.png", draw_model_onnx, 0.56),
+    ("olinda_04_hard.png", draw_hard, 0.50),
 ]
 
 
 def main() -> None:
-  parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--out-dir", default="docs/diagrams", help="Directory for the PNGs.")
-  args = parser.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--out-dir", default="docs/diagrams", help="Directory for the PNGs."
+    )
+    args = parser.parse_args()
 
-  out_dir = Path(args.out_dir)
-  out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-  for name, draw, height in FIGURES:
-    # `height` is set per figure: these are schematics whose content dictates the aspect ratio,
-    # not data plots where stylia's default slide ratio applies.
-    fig, axs = stylia.create_figure(1, 1, height=height)
-    draw(axs.next())
-    stylia.save_figure(str(out_dir / name))
-    print(f"wrote {out_dir / name}")
+    for name, draw, height in FIGURES:
+        # `height` is set per figure: these are schematics whose content dictates the aspect ratio,
+        # not data plots where stylia's default slide ratio applies.
+        fig, axs = stylia.create_figure(1, 1, height=height)
+        draw(axs.next())
+        stylia.save_figure(str(out_dir / name))
+        print(f"wrote {out_dir / name}")
 
 
 if __name__ == "__main__":
-  main()
+    main()

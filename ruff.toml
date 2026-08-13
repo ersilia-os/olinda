@@ -1,40 +1,92 @@
-indent-width = 2
-preview = true
-target-version = "py310"
-
-lint.select = [
-  "F",  # Pyflakes
-  "W6",
-  "E71",
-  "E72",
-  "E112",   # no-indented-block
-  "E113",   # unexpected-indentation
-  # "E124",
-  "E203",   # whitespace-before-punctuation
-  "E272",   # multiple-spaces-before-keyword
-  "E275",   # missing-whitespace-after-keyword
-  "E303",   # too-many-blank-lines
-  "E304",   # blank-line-after-decorator
-  # "E502",
-  "E702",   # multiple-statements-on-one-line-semicolon
-  "E703",   # useless-semicolon
-  "E731",   # lambda-assignment
-  "W191",   # tab-indentation
-  "W291",   # trailing-whitespace
-  "W293",   # blank-line-with-whitespace
-  "UP039",  # unnecessary-class-parentheses
-  "C416",   # unnecessary-comprehension
-  "RET506", # superfluous-else-raise
-  "RET507", # superfluous-else-continue
-  "A",      # builtin-variable-shadowing, builtin-argument-shadowing, builtin-attribute-shadowing
-  "SIM105", # suppressible-exception
-  "FURB110",# if-exp-instead-of-or-operator
-  "RUF018", # assignment-in-assert
-]
-
-line-length = 110
-
+# The Ersilia canonical ruff config, with two deliberate deviations noted below.
 exclude = [
-  "docs/",
-  "tests/",
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".github",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "test",
+    "node_modules",
+    "site-packages",
+    "venv",
 ]
+
+line-length = 88
+indent-width = 4
+
+# Deviation from canonical, which says py310: `requires-python = ">=3.11"`, the CI matrix and the
+# classifiers all say 3.11. target-version gates pyupgrade fixes, so understating it suppresses valid
+# modernisations. Measured: identical lint and format output either way.
+target-version = "py311"
+
+[lint]
+select = ["D101", "D102", "E4", "E9", "F", "I", "W"]
+
+# Rules olinda selected before adopting the canonical config. All of them are clean, so keeping them
+# costs nothing and they cover classes canonical does not: `A` catches builtin shadowing, `RUF018`
+# catches assignments inside asserts (which silently disable them), and keeping `E731` selected is
+# what made a stale `# noqa` visible when the line-length changed. Listed separately from `select` so
+# that a future canonical bump touches one line and the diff against canonical stays legible.
+extend-select = [
+    "A",       # builtin shadowing (variable, argument, attribute)
+    "C416",    # unnecessary-comprehension
+    "E112",    # no-indented-block
+    "E113",    # unexpected-indentation
+    "E203",    # whitespace-before-punctuation
+    "E272",    # multiple-spaces-before-keyword
+    "E275",    # missing-whitespace-after-keyword
+    "E303",    # too-many-blank-lines
+    "E304",    # blank-line-after-decorator
+    "E71",     # comparison style (== None, not ... in ...)
+    "E72",     # bare except, type comparison
+    "E702",    # multiple-statements-on-one-line-semicolon
+    "E703",    # useless-semicolon
+    "E731",    # lambda-assignment
+    "FURB110", # if-exp-instead-of-or-operator
+    "RET506",  # superfluous-else-raise
+    "RET507",  # superfluous-else-continue
+    "RUF018",  # assignment-in-assert
+    "SIM105",  # suppressible-exception
+    "UP039",   # unnecessary-class-parentheses
+]
+
+# Scoped to [lint] on purpose, never top level. Seven of the rules above are preview-gated
+# (E112 E113 E203 E272 E275 E303 E304), but a top-level `preview` also puts the *formatter* in preview
+# mode, and preview format style changes between releases — so a ruff bump could silently reformat the
+# whole repo again.
+preview = true
+
+ignore = ["D104", "D105", "D107"]
+fixable = ["ALL", "D"]
+unfixable = []
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[lint.pydocstyle]
+convention = "numpy"
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = 50

@@ -1,0 +1,11 @@
+# Revisions to skip when running `git blame` — purely mechanical, no behaviour change.
+#
+# GitHub's blame view honours this file automatically. Local git does not until you tell it to:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Entries must be full 40-character SHAs; `git blame` errors out on abbreviated ones.
+
+# Adopt the canonical Ersilia ruff config: 2 -> 4 space indent, 110 -> 88 columns, double quotes,
+# imports sorted. 42 files, verified AST-identical modulo docstring indentation and import grouping.
+e5494eacfde149da440862c46b8f26452f34cf98

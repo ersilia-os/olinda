@@ -12,6 +12,10 @@ access.json
 /*.png
 /best_params.json
 
+# Findings report written by the repository-auditing skill. Regenerated on demand, and it is a
+# working note about the repo rather than part of it.
+/AUDIT.md
+
 # Distilled models and the folders that build them. `fit -m runs/foo.onnx` writes runs/foo.onnx and
 # builds in runs/foo/ — none of it belongs in git (CLAUDE.md: no model artefacts or large binaries).
 *.onnx
