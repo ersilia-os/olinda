@@ -101,5 +101,13 @@ def test_a_distilling_command_names_the_extra_it_needs():
     )
     assert "Traceback" not in out
 
-    # and the guard itself is importable and honest on an environment that HAS the extras
-    require_train_extra()
+    # And the guard tells the truth about whatever environment it is in. This file runs in both: the
+    # `test` job has the training stack, where it must stay quiet, and `inference-install` does not,
+    # where it must raise and name the extra. Asserting either one unconditionally fails the other job
+    # — which it did, on `main`, for as long as this line read `require_train_extra()`.
+    try:
+        require_train_extra()
+    except RuntimeError as exc:
+        assert "olinda[train]" in str(exc), (
+            f"the guard raised without naming the extra: {exc}"
+        )

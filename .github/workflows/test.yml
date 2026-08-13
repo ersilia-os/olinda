@@ -72,7 +72,9 @@ jobs:
         run: |
           python -m venv /tmp/trainenv
           /tmp/trainenv/bin/pip install --upgrade pip
-          /tmp/trainenv/bin/pip install ".[train]"
+          # pytest too: the fixture builder lives in tests/conftest.py, which imports pytest for the
+          # fixtures further down the file.
+          /tmp/trainenv/bin/pip install ".[train]" pytest
           /tmp/trainenv/bin/python -c "
           from tests.conftest import build_tiny_model
           build_tiny_model('/tmp/fixture')

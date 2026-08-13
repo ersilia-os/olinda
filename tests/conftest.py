@@ -7,8 +7,9 @@ fixtures here build that instead.
 
 :func:`build_tiny_model` is also called from CI (the ``report-install`` job in
 ``.github/workflows/test.yml``) to produce a model with the training stack that is then scored with
-only the reporting extra installed. It therefore has to stay importable and runnable outside pytest —
-hence plain functions here, and no ``import pytest`` at module scope.
+only the reporting extra installed. Hence plain functions rather than fixtures for the builders: a
+caller outside pytest can use them directly. That job installs pytest alongside the training extra,
+because importing this module does run the ``import pytest`` below.
 """
 
 from __future__ import annotations
@@ -278,7 +279,9 @@ def build_artifact(
 
 
 # ── pytest fixtures ──────────────────────────────────────────────────────────
-# Imported lazily so this module stays usable from CI, which has no pytest.
+# Below the builders so the file reads builders-first, but this is a plain module-scope import and it
+# runs on any import of this module — including CI's, which is why the report-install job installs
+# pytest. It is not lazy; a comment here used to claim it was.
 
 import pytest  # noqa: E402
 
