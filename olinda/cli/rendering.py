@@ -12,7 +12,10 @@ import rich_click.rich_click as rc
 
 # Two-level help grouping (a la zairachem): top-level user commands, then the lower-level pipeline steps.
 COMMAND_PANELS = [
-    {"name": "Main commands", "commands": ["setup", "fit", "predict", "validate"]},
+    {
+        "name": "Main commands",
+        "commands": ["setup", "library", "fit", "predict", "validate"],
+    },
     {
         "name": "Fit pipeline commands",
         "commands": [

@@ -76,6 +76,7 @@ def rule(title: str, *, style: str | None = None, right: str | None = None) -> N
 # so the terminal shifts hue as the pipeline advances and a long run stays readable at a glance.
 STEP_COLORS = {
     "setup": "cyan",
+    "library": "cyan",
     "prepare": "cyan",
     "tune": "bright_yellow",
     "learn-soft": "green",

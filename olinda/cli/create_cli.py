@@ -1,4 +1,4 @@
-"""Assemble the olinda CLI: one group, ten commands, each defined in its own module."""
+"""Assemble the olinda CLI: one group, eleven commands, each defined in its own module."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from olinda.cli.commands.export import export_cmd
 from olinda.cli.commands.fit import fit_cmd
 from olinda.cli.commands.learn_hard import learn_hard_cmd
 from olinda.cli.commands.learn_soft import learn_soft_cmd
+from olinda.cli.commands.library import library_cmd
 from olinda.cli.commands.predict import predict_cmd
 from olinda.cli.commands.prepare import prepare_cmd
 from olinda.cli.commands.setup import setup_cmd
@@ -18,6 +19,7 @@ from olinda.cli.rendering import COMMAND_PANELS, configure_help
 
 _COMMANDS = {
     "setup": setup_cmd,
+    "library": library_cmd,
     "fit": fit_cmd,
     "prepare": prepare_cmd,
     "learn-soft": learn_soft_cmd,

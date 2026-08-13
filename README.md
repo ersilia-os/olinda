@@ -76,7 +76,7 @@ olinda fit --soft-labels my_soft_labels.csv --hard-labels my_hard_labels.csv --m
 The easiest way to evaluate a distilled model is to pass an additional set of soft-labels (and optionally hard labels):
 
 ```bash
-olinda report --soft-labels my_validation_soft_labels.csv --model-onnx my_model.onnx --output-dir my_report_folder
+olinda validate --soft-labels my_validation_soft_labels.csv --model-onnx my_model.onnx --output-dir my_report_folder
 ```
 
 ## About the Ersilia Open Source Initiative
