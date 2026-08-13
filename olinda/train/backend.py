@@ -378,8 +378,8 @@ class LightGBMBackend:
 
         import lightgbm as lgb
 
-        from olinda.console import live_status, spinner
-        from olinda.train.reference import _fmt_secs, _val_stats
+        from olinda.console import elapsed, live_status, status_line
+        from olinda.train.reference import _val_stats
 
         metric = self._metric_name(native_params)
         echo(
@@ -421,10 +421,25 @@ class LightGBMBackend:
                         yval, np.asarray(env.model.predict(xval), dtype=np.float64)
                     )
                 if it % 25 == 0:
+                    # Only what the live table's row cannot show: it already carries R², ρ, the val
+                    # loss as RMSE, the round count and the elapsed time (see _row_values).
                     update(
-                        f"  [bold cyan]{spinner(it)} training[/] [dim]round[/] [bold]{it}[/][dim]/{num_boost_round}[/]"
-                        f"  [dim]·[/]  [dim]{metric}[/] val [bold cyan]{va:.4f}[/]  [dim]·[/]  R² [bold]{st['r2']:.4f}[/]"
-                        f" · ρ [bold]{st['rho']:.4f}[/]  [dim]· best@{st['best_it']} · {_fmt_secs(_time.perf_counter() - t0)}[/]",
+                        status_line(
+                            "training",
+                            frac=(it + 1) / num_boost_round
+                            if num_boost_round
+                            else None,
+                            pairs=[
+                                ("round", f"{it:,}/{num_boost_round:,}"),
+                                (f"{metric} val", f"{va:.4f}"),
+                            ],
+                            tail=f"best@{st['best_it']:,} · {elapsed(_time.perf_counter() - t0)}",
+                        ),
+                        detail={
+                            "round": f"{it:,}/{num_boost_round:,}",
+                            f"{metric} val": f"{va:.4f}",
+                            "best": f"@{st['best_it']:,}",
+                        },
                         **_row_values(st["r2"], st["rho"], va, metric, it),
                     )
 
@@ -440,8 +455,8 @@ class LightGBMBackend:
         best_score = float(booster.best_score["val"][metric])
         n_trees = booster.num_trees()
         echo(
-            f"Trained [bold]{best_it}[/] trees (best of {num_boost_round}) · val {metric} [bold]{best_score:.5f}[/]"
-            f" · {_fmt_secs(_time.perf_counter() - t0)}",
+            f"Trained [bold]{best_it:,}[/] trees (best of {num_boost_round:,}) · val {metric} "
+            f"[bold]{best_score:.5f}[/] · {elapsed(_time.perf_counter() - t0)}",
             "success",
         )
         return TrainResult(booster, best_it, best_score, metric, n_trees)

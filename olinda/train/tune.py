@@ -23,11 +23,15 @@ import numpy as np
 from olinda.console import (
     console,
     echo,
+    elapsed,
     engine_banner,
     live_status,
     rule,
-    spinner,
+    status_line,
     summary_panel,
+)
+from olinda.console import (
+    path as cpath,
 )
 from olinda.data import apply_bin_weights, resolve_regression_weights
 from olinda.train.backend import CANONICAL_DEFAULTS, get_backend, select_backend
@@ -212,8 +216,7 @@ def run_tuning(
     live = [lambda _s: None]
 
     def _elapsed() -> str:
-        s = int(time.perf_counter() - start)
-        return f"{s}s" if s < 60 else f"{s // 60}m{s % 60:02d}s"
+        return elapsed(time.perf_counter() - start)
 
     def objective_fn(trial):
         canonical = {**CANONICAL_DEFAULTS, **_TUNE_OVERRIDES, **_suggest(trial)}
@@ -227,9 +230,17 @@ def run_tuning(
                 b = progress["best"]
                 btxt = f"{b:.4f}" if b is not None else "—"
                 live[0](
-                    f"  [bold cyan]{spinner(iteration)} tuning[/] trial [bold]{trial.number + 1}[/][dim]/{trials}[/]"
-                    f" · round {iteration}/{tune_rounds} · [dim]{metric}[/] [bold cyan]{score:.4f}[/]"
-                    f" · best [bold]{btxt}[/] [dim]· {_elapsed()}[/]"
+                    status_line(
+                        "tuning",
+                        frac=(trial.number + 1) / trials if trials else None,
+                        pairs=[
+                            ("trial", f"{trial.number + 1}/{trials}"),
+                            ("round", f"{iteration:,}/{tune_rounds:,}"),
+                            (metric, f"{score:.4f}"),
+                            ("best", btxt),
+                        ],
+                        tail=_elapsed(),
+                    )
                 )
             if trial.should_prune():
                 raise optuna.TrialPruned()
@@ -332,7 +343,7 @@ def run_tuning(
     with open(out, "w") as fp:
         json.dump(tuned, fp, indent=2)
 
-    elapsed = f"{int(dt)}s" if dt < 60 else f"{int(dt) // 60}m{int(dt) % 60:02d}s"
+    took = elapsed(dt)
     others = " · ".join(
         f"{k} {v:.3g}" for k, v in best.params.items() if k != "learning_rate"
     )
@@ -345,10 +356,10 @@ def run_tuning(
         ("Best params", f"[dim]{others}[/]"),
         (
             "Elapsed",
-            f"[bold]{elapsed}[/]  [dim]· {len(completed)} trials + {len(pruned)} pruned · {backend_name}·{device}[/]",
+            f"[bold]{took}[/]  [dim]· {len(completed)} trials + {len(pruned)} pruned · {backend_name}·{device}[/]",
         ),
         *lr_rows,
-        ("Saved", f"[dim]{out}[/]"),
+        ("Saved", f"[dim]{cpath(out)}[/]"),
     ]
     summary_panel("olinda · tune", rows, border_style="green", icon="✓")
 

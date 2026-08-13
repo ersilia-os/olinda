@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from olinda.console import echo, step, summary_panel, sweep_progress
+from olinda.console import path as cpath
 from olinda.featurizer import MorganCountFeaturizer
 from olinda.hard.gate import _fit_tanimoto, _pearson
 from olinda.hard.layout import (
@@ -173,15 +174,17 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         # === Step 1/4 — train the hard-label classifier H ======================
         step(1, 4, "training the hard-label model H")
         echo(
-            f"  {len(y):,} labelled compounds · {int(y.sum()):,} positive ({y.mean():.1%})",
+            f"{len(y):,} labelled compounds · {int(y.sum()):,} positive ({y.mean():.1%})",
             "info",
+            sub=True,
         )
         hard_model.fit(X, y)
         hard_model.save(str(hard_dir))
         selection = _selection_report(hard_model)
         echo(
-            f"  ready · {selection['preset']} preset · {selection['best_iteration']} trees",
+            f"ready · {selection['preset']} preset · {selection['best_iteration']:,} trees",
             "info",
+            sub=True,
         )
 
         # === Step 2/4 — score H across the reference library ===================
@@ -189,7 +192,7 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         g_ref = _score_reference(hard_model, "binary", X.shape[1], matrix)
         with h5py.File(hard_root / H_REFERENCE_NAME, "w") as f:
             f.create_dataset("g", data=g_ref.astype(np.float32))
-        echo(f"  saved → {H_REFERENCE_NAME}", "info")
+        echo(f"saved → {H_REFERENCE_NAME}", "info", sub=True)
 
         # === Step 3/4 — calibrate H onto the soft-label scale ==================
         from olinda.calibrate import IsotonicCalibrator, _spearman_sign
@@ -224,13 +227,14 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         # R², not the correlation, is what bounds the blend — see _blend_ceiling. The gap between r² and
         # R² is the part of the disagreement that a shift or a rescaling would explain.
         alignment_r2 = _r2(sv, calibrated)
-        echo(f"  {direction} fit · Spearman(H, soft) {spearman:+.3f}", "info")
+        echo(f"{direction} fit · Spearman(H, soft) {spearman:+.3f}", "info", sub=True)
         # R² is the one that matters downstream — it is what caps the blend — so it is named as such
         # rather than left as the third number in a row of three.
         echo(
-            f"  agreement after calibration · Pearson {pearson_after:.3f} · "
+            f"agreement after calibration · Pearson {pearson_after:.3f} · "
             f"[bold]R² {alignment_r2:.3f}[/] [dim]· R² caps the blend weight[/]",
             "info",
+            sub=True,
         )
 
         # No plots here. `olinda validate` draws the calibration map from the fused graph itself, so a
@@ -247,19 +251,22 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         )
         ad_clf.save(hard_root / TANIMOTO_DIRNAME)
         echo(
-            f"  true similarity · median {ad_counts['sim_median']:.3f} · "
+            f"true similarity · median {ad_counts['sim_median']:.3f} · "
             f"{ad_counts['frac_above_lo']:.1%} above {T_LO} · {ad_counts['frac_above_hi']:.1%} above {T_HI}",
             "info",
+            sub=True,
         )
         echo(
-            f"  T fit · R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} "
+            f"T fit · R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} "
             f"[dim]on {ad_counts['fit_n']:,} held out[/]",
             "info",
+            sub=True,
         )
         echo(
-            f"  T reach · opens for [bold]{ad_counts['fit_recall']:.0%}[/] of the compounds that qualify · "
+            f"T reach · opens for [bold]{ad_counts['fit_recall']:.0%}[/] of the compounds that qualify · "
             f"{ad_counts['fit_precision']:.0%} of those it opens for deserve it",
             "info",
+            sub=True,
         )
         if ad_counts["a_max"] <= 0.0:
             reason = (
@@ -332,7 +339,7 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
     rows = [
         (
             "Hard model H",
-            f"[bold]{selection['preset']}[/] · {selection['best_iteration']} trees",
+            f"[bold]{selection['preset']}[/] · {selection['best_iteration']:,} trees",
         ),
         ("Reference scored", f"[bold]{len(gv):,}[/] compounds"),
         (
@@ -344,7 +351,7 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
             f"similarity R² [bold]{ad_counts['fit_r2']:.3f}[/] · "
             f"{ad_counts['frac_above_lo']:.1%} of the library above {T_LO} → [dim]{TANIMOTO_DIRNAME}/[/]",
         ),
-        ("Saved", f"[dim]{hard_root}[/]"),
+        ("Saved", f"[dim]{cpath(hard_root)}[/]"),
     ]
     summary_panel("olinda · learn-hard", rows, border_style="green", icon="✓")
 

@@ -41,10 +41,16 @@ _ICONS = {
 }
 
 
-def echo(text: str, kind: str = "info") -> None:
-    """One-line status message with an Ersilia-style icon and color."""
+def echo(text: str, kind: str = "info", *, sub: bool = False) -> None:
+    """One-line status message with an Ersilia-style icon and color.
+
+    ``sub`` indents by one more level, for a line that elaborates on the one above it rather than
+    standing beside it. This exists so nesting is stated rather than faked: call sites used to open
+    the *text* with two literal spaces, which put the padding inside the markup where nothing could
+    keep it consistent, and left no way to tell a deliberate sub-item from a stray space.
+    """
     icon, style = _ICONS.get(kind, _ICONS["info"])
-    console.print(f"  [{style}]{icon}[/] {text}")
+    console.print(f"{'    ' if sub else '  '}[{style}]{icon}[/] {text}")
 
 
 def step(index: int, total: int, title: str) -> None:
@@ -264,9 +270,61 @@ def engine_banner(backend: str, device: str, reason: str) -> None:
     )
 
 
-def spinner(i: int) -> str:
-    """Return the spinner glyph for frame ``i`` (callers that lack a timer can pass an iteration count)."""
+def spinner(i: int | None = None) -> str:
+    """The spinner glyph for frame ``i``, or for *now* when ``i`` is omitted.
+
+    Prefer the no-argument form. Passing an iteration count ties the animation to how often the caller
+    happens to repaint, and a caller that updates every 25 rounds produces a spinner that jumps in
+    fives — which reads as a stalled process rather than a slow one.
+    """
+    if i is None:
+        i = int(time.time() * 8)
     return _SPINNER[i % len(_SPINNER)]
+
+
+def bar(frac: float, width: int = 24) -> str:
+    """A ``━`` progress bar filled to *frac*, dim for the remainder."""
+    filled = int(round(max(0.0, min(1.0, frac)) * width))
+    return "━" * filled + "[dim]━[/]" * (width - filled)
+
+
+def status_line(
+    verb: str,
+    *,
+    frac: float | None = None,
+    pairs=(),
+    tail: str | None = None,
+    width: int = 24,
+) -> str:
+    """Build the one transient line a running stage repaints in place.
+
+    Every progress display in olinda goes through here, because six of them grew up separately and
+    drifted: three hardcoded ``bold cyan`` while their command was themed green, three drove the
+    spinner off an iteration counter, and each invented its own spacing. The vocabulary is fixed —
+    spinner and verb in the command's accent, an optional bar and percentage, ``·``-separated
+    ``label value`` pairs, and a dim tail — so a new caller inherits the look instead of choosing one.
+
+    Parameters
+    ----------
+    verb : str
+        What is happening, in the present participle: ``"training"``, ``"scoring"``.
+    frac : float, optional
+        Progress in ``[0, 1]``. Omit when the total is unknown — the spinner still turns.
+    pairs : sequence of (str, str)
+        Label/value pairs. Labels render dim, values bold, so the numbers carry the line.
+    tail : str, optional
+        Dim trailing note — elapsed time, a best-so-far marker.
+    """
+    parts = [f"[{active_color()}]{spinner()} {verb}[/]"]
+    if frac is not None:
+        parts.append(f"{bar(frac, width)} [bold]{frac:>4.0%}[/]")
+    for label, value in pairs:
+        # An empty label is a bare value — a count that needs no naming next to the bar beside it.
+        parts.append(
+            f"[dim]{label}[/] [bold]{value}[/]" if label else f"[bold]{value}[/]"
+        )
+    line = "  [dim]·[/]  ".join(parts)
+    return f"{line}  [dim]· {tail}[/]" if tail else line
 
 
 _live_owner: object | None = None
@@ -284,12 +342,17 @@ def live_region_taken() -> bool:
 
 @contextmanager
 def live_status(*, enabled: bool = True):
-    """Yield an ``update(markup, **values)`` that redraws a single transient status line in place.
+    """Yield an ``update(markup, detail=None, **values)`` that redraws one transient line in place.
 
     When an outer live region already owns the screen, the updates are *handed to that owner* rather
-    than dropped — a :class:`LiveTable` renders the line under itself and folds ``values`` into the
-    running row. Silencing them instead is what makes a long stage look hung: the inner stage is the
-    only thing that knows how far along it is.
+    than dropped — a :class:`LiveTable` shows them beside itself and folds ``values`` into the running
+    row. Silencing them instead is what makes a long stage look hung: the inner stage is the only
+    thing that knows how far along it is.
+
+    Two channels, because the two destinations want different shapes. ``markup`` is a finished line
+    for a bare live region, which has the full terminal width to itself. ``detail`` is a small mapping
+    of label → value for a :class:`LiveTable`, which has only the margin beside its table and already
+    shows most of these numbers in the row — so it needs the few that are missing, not a sentence.
 
     Falls back to a no-op updater when ``enabled`` is False or the console is not a TTY (piped/CI
     output), so callers should still emit plain milestone lines for the log.
@@ -299,12 +362,12 @@ def live_status(*, enabled: bool = True):
         yield owner.progress
         return
     if not enabled or live_region_taken() or not console.is_terminal:
-        yield lambda markup, **values: None
+        yield lambda markup, detail=None, **values: None
         return
     live = Live(console=console, transient=True, refresh_per_second=12)
     live.__enter__()
     try:
-        yield lambda markup, **values: live.update(markup)
+        yield lambda markup, detail=None, **values: live.update(markup)
     finally:
         live.__exit__(None, None, None)
 
@@ -335,21 +398,24 @@ def sweep_progress(verb: str, total: int, *, width: int = 24):
                 else ""
             )
             if console.is_terminal and not live_region_taken():
-                filled = int(round(frac * width))
-                bar = "━" * filled + "[dim]━[/]" * (width - filled)
                 update(
-                    f"  [{active_color()}]{spinner(int(time.time() * 8))} {verb}[/] {bar} "
-                    f"[bold]{frac:>4.0%}[/] [dim]·[/] {done:,}/{total:,} "
-                    f"[dim]· {rate / 1000:.0f}k/s{eta}[/]"
+                    status_line(
+                        verb,
+                        frac=frac,
+                        pairs=[("", f"{done:,}/{total:,}")],
+                        tail=f"{rate / 1000:.0f}k/s{eta}",
+                        width=width,
+                    )
                 )
             elif frac >= state["milestone"] + 0.25 or done == total:
                 state["milestone"] = frac
-                echo(f"  {verb} {frac:>4.0%} · {done:,}/{total:,}{eta}", "info")
+                echo(f"{verb} {frac:>4.0%} · {done:,}/{total:,}{eta}", "info", sub=True)
 
         yield tick
     echo(
-        f"  {verb} complete · [bold]{total:,}[/] compounds [dim]· {elapsed(time.time() - started)}[/]",
+        f"{verb} complete · [bold]{total:,}[/] compounds [dim]· {elapsed(time.time() - started)}[/]",
         "info",
+        sub=True,
     )
 
 
@@ -376,9 +442,6 @@ def epoch_progress(verb: str, total: int, *, width: int = 24):
                 state["best"] = (float(loss), float(rmse))
             if not console.is_terminal or live_region_taken():
                 return
-            frac = epoch / total
-            filled = int(round(frac * width))
-            bar = "━" * filled + "[dim]━[/]" * (width - filled)
             note = (
                 "best"
                 if improved
@@ -387,9 +450,13 @@ def epoch_progress(verb: str, total: int, *, width: int = 24):
                 else "no gain"
             )
             update(
-                f"  [{active_color()}]{spinner(int(time.time() * 8))} {verb}[/] {bar} "
-                f"[bold]{frac:>4.0%}[/] [dim]·[/] epoch {epoch}/{total} "
-                f"[dim]· val MSE {loss:.6f} · ±{rmse:.3f} · {note}[/]"
+                status_line(
+                    verb,
+                    frac=epoch / total,
+                    pairs=[("epoch", f"{epoch}/{total}"), ("val MSE", f"{loss:.6f}")],
+                    tail=f"±{rmse:.3f} · {note}",
+                    width=width,
+                )
             )
 
         yield report
@@ -403,9 +470,10 @@ def epoch_progress(verb: str, total: int, *, width: int = 24):
         else f"stopped early at [bold]{ran}[/]/{total}"
     )
     echo(
-        f"  {verb} complete · {reach} · best val MSE {loss:.6f} [dim]· ±{rmse:.3f} similarity "
+        f"{verb} complete · {reach} · best val MSE {loss:.6f} [dim]· ±{rmse:.3f} similarity "
         f"· {elapsed(time.time() - started)}[/]",
         "info",
+        sub=True,
     )
 
 
@@ -461,7 +529,8 @@ class LiveTable:
             for i in self.items
         }
         self._live = None
-        self._note = ""
+        self._note = ""  # the fallback line, shown under the table when the detail cannot fit beside
+        self._detail: dict = {}
 
     # -- rendering ---------------------------------------------------------
 
@@ -471,9 +540,7 @@ class LiveTable:
         if s["status"] == "running":
             # Driven off the clock, not a call counter, so it keeps moving between updates — a stalled
             # spinner reads as a hung process even when the work underneath is fine.
-            return (
-                f"[{self.color}]{spinner(int(time.time() * 8))} {self.running_verb}[/]"
-            )
+            return f"[{self.color}]{spinner()} {self.running_verb}[/]"
         if s["status"] == "failed":
             return "[red]failed[/]"
         return "[green]✓ done[/]"
@@ -495,10 +562,12 @@ class LiveTable:
             pad_edge=False,
             expand=False,
         )
+        # Both widths are sized to their content rather than generously: the margin they free is what
+        # the detail panel occupies, and a task name is identified by its tail as readily as its head.
         table.add_column(
-            self.item_label, no_wrap=True, overflow="ellipsis", max_width=32
+            self.item_label, no_wrap=True, overflow="ellipsis", max_width=24
         )
-        table.add_column("Status", no_wrap=True, width=18)
+        table.add_column("Status", no_wrap=True, width=13)
         for name in self.fields:
             table.add_column(name, justify="right", no_wrap=True)
         ticking = self._elapsed_cell
@@ -513,11 +582,60 @@ class LiveTable:
             table.add_row(*row)
         return table
 
+    def _detail_panel(self):
+        """The running item's extra numbers, as a narrow panel — or ``None`` when there are none."""
+        if not self._detail:
+            return None
+        grid = Table.grid(padding=(0, 1))
+        grid.add_column(justify="left", style="dim", no_wrap=True)
+        grid.add_column(justify="right", no_wrap=True)
+        for label, value in self._detail.items():
+            grid.add_row(label, str(value))
+        return Panel(
+            grid,
+            border_style=self.color,
+            box=box.ROUNDED,
+            padding=(0, 1),
+            expand=False,
+        )
+
     def _renderable(self):
-        """The table, plus the running item's status line when there is one."""
+        """The table, with the running item's detail beside it if it fits, else beneath it.
+
+        Beside is the point — the detail describes the row it sits next to, and putting it underneath
+        separated the two by the whole width of the table. It only fits because the detail carries just
+        what the row does not: the numbers the row already shows are not repeated here.
+
+        Rich will happily squeeze a table into whatever space is left, silently truncating cells to do
+        it, so the fit is measured rather than assumed. On a terminal too narrow for both, the line
+        goes back underneath, which is cramped but never mangles the table.
+        """
+        table = self._render()
+        panel = self._detail_panel()
+        if panel is not None:
+            grid = Table.grid(padding=(0, 3))
+            grid.add_column()
+            grid.add_column(
+                vertical="bottom"
+            )  # beside the rows, not floating up by the title
+            grid.add_row(table, panel)
+            # Measured against an unbounded width, not the console's. Rich clamps a measurement to the
+            # space available, so asking it directly reports "fits" for every terminal — while the
+            # render quietly ellipsises the cells to make that true.
+            wide = console.options.update(width=100_000)
+            if console.measure(grid, options=wide).maximum <= console.width:
+                return grid
+            # Too narrow for both. Fold the same detail into one line rather than the caller's full
+            # markup, which carries a progress bar and every pair and would wrap on exactly the narrow
+            # terminal that sent us here — a wrapped status line reflows the display on every repaint.
+            folded = "  [dim]·[/]  ".join(
+                f"[dim]{label}[/] [bold]{value}[/]"
+                for label, value in self._detail.items()
+            )
+            return Group(table, "", f"  {folded}")
         if not self._note:
-            return self._render()
-        return Group(self._render(), "", self._note)
+            return table
+        return Group(table, "", self._note)
 
     def _refresh(self) -> None:
         if self._live is not None:
@@ -539,13 +657,15 @@ class LiveTable:
         self._state[str(item)]["values"].update(values)
         self._refresh()
 
-    def progress(self, markup: str, **values) -> None:
-        """Show the running item's status line under the table, and tick its row with *values*.
+    def progress(self, markup: str, detail=None, **values) -> None:
+        """Show the running item's live detail beside the table, and tick its row with *values*.
 
         This is what :func:`live_status` hands to an inner stage while this table owns the live region,
-        so the stage's own progress reporting lands here instead of being dropped.
+        so the stage's own progress reporting lands here instead of being dropped. *detail* is what
+        renders beside the table; *markup* is kept only for the narrow-terminal fallback.
         """
         self._note = markup
+        self._detail = dict(detail or {})
         if values:
             running = next(
                 (i for i, s in self._state.items() if s["status"] == "running"), None
@@ -563,6 +683,7 @@ class LiveTable:
             s["elapsed"] = time.time() - s["started"]
         s["values"].update(values)
         self._note = ""  # the finished row carries the numbers now
+        self._detail = {}
         if self._live is None:
             shown = "  ".join(f"{k} {v}" for k, v in s["values"].items())
             echo(f"{'✓' if ok else '✖'} {item}  [dim]{shown}[/]", "info")

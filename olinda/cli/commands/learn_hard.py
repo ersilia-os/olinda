@@ -129,7 +129,7 @@ def learn_hard_cmd(model_dir):
             *[
                 (
                     c["name"],
-                    f"[dim]{(c.get('hard') or {}).get('n', '?')} labelled compounds[/]",
+                    f"[dim]{(c.get('hard') or {}).get('n', 0):,} labelled compounds[/]",
                 )
                 for c in with_hard
             ],
