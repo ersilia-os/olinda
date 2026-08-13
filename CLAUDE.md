@@ -109,6 +109,8 @@ public bucket. Never commit datasets, model artefacts or `.onnx` files.
   `clean` moves it out; `export` only exists to rebuild one.
 - `MODEL_NAME = "model.onnx"` is defined in three places. Left alone deliberately — importing it across
   those modules would add edges for a thirteen-character string.
-- The `archive/master-v2-refactor` tag points at an **orphan root commit** on no branch. That tag is the
-  only thing keeping it reachable, so it is not semver and must not be deleted.
+- The `archive/v2-refactor` tag points at an **orphan root commit** on no branch — a squashed snapshot
+  of an abandoned v2 rewrite. That tag is the only thing keeping it reachable, so it is deliberately not
+  semver and must not be deleted. (It was `archive/master-v2-refactor` until 2026-08-13; there is no
+  `master` branch and never was.)
 - Tag `v1.0.0` sits on a 2022 commit with a published release. This is why the current version is 1.1.0.
