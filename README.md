@@ -1,196 +1,84 @@
 # Olinda, model distillation for chemistry
 
-Some models are too slow to run on a million compounds. Olinda makes a fast one that behaves like
+Some ML-for-chemistry models are too slow to run on a million compounds. Olinda makes a fast one that behaves like
 them: score the slow model once over a reference library of ~1.4M molecules, train a compact
 gradient-boosting student to reproduce it, and ship the result as a single ONNX file.
 
-![How olinda distils a teacher into a student](docs/diagrams/olinda_01_distillation.png)
-
 ## Installation
 
+Olinda is pip-installable:
+
 ```bash
-pip install olinda                 # run models: the CLI, `olinda predict`, olinda.OlindaArtifact
-pip install "olinda[report]"       # + score one: `olinda validate` and its figures
-pip install "olinda[train]"        # + distil your own (the boosting stack)
+pip install olinda                 # use the base install if you only need to run Olinda at inference type
+pip install "olinda[report]"       # add plotting functionalities in case you need a report on validation data
+pip install "olinda[train]"        # install training capabilities (e.g. XGBoost)
 ```
 
-Running a model should never drag in a plotting stack, so the tiers are separate. `[train]` includes
-`[report]`, since a training run draws its own figures. A command that needs an extra refuses and
-names it, rather than failing on an import three steps in. CI installs each tier on its own and
-exercises it, so the boundaries are real rather than aspirational.
+Check that Olinda is correctly installed:
+
+```bash
+olinda --help
+```
+
+Before getting started, you need to download the pre-calculated Morgan fingerprints for a reference library (1.4M compounds; 2.8GB):
+
+```bash
+olinda setup
+```
 
 ## Running a model at inference time
 
-A distilled model is one self-describing file. The featurizer, the RDKit build it needs, the task
-names — all of it travels inside the `.onnx`, so nothing else is required to run it.
+A distilled model is one self-describing ONNX file. You can load and run the model in Python:
 
 ```python
 from olinda import OlindaArtifact
 
 model = OlindaArtifact("model.onnx")
-model.run(["CCO", "c1ccccc1"])  # DataFrame: smiles + one column per task
+model.run(["CCO", "c1ccccc1"])
 ```
 
-## Distilling a model (soft labels)
-
-Fetch the reference library once (~2.8 GB), then fit:
+Alternatively, you can use the CLI:
 
 ```bash
-olinda setup
-olinda fit -s teacher.csv -m runs/my_model.onnx
-olinda predict -m runs/my_model.onnx -i compounds.csv -o predictions.csv
+olinda predict --model-onnx model.onnx --input my_smiles.csv --output my_output.csv
 ```
 
-`-m` names the artifact you want. `fit` builds the run in `runs/my_model/` beside it and deletes that
-folder once everything has fused, so what you keep is one file.
+## Distilling a model
 
-`teacher.csv` holds a `smiles` column plus one or more value columns, covering **exactly the
-reference-library molecules in the same order** — olinda verifies this and refuses otherwise.
+### Getting your soft labels
 
-Up to **10 teacher columns** in one file. Each becomes an independent student, and all of them fuse
-into one `model.onnx` with one output per task. A single column is just the one-column case; there is
-no separate mode.
+Olinda relies on a reference library that is [maintained](https://github.com/ersilia-os/ersilia-model-hub-maintained-inputs) by the Ersilia team.
 
-### Try it on a handful of molecules first
-
-A full run trains on 1.36M compounds and takes a while, so check the plumbing before you commit to
-it. `--max-samples` truncates the library to its first N rows, which shrinks every stage — the split,
-the boosting, the hard head's calibration and the gate:
+Use the following command to obtain a 1-column file with the SMILES structures of the reference library:
 
 ```bash
-olinda fit -s teacher.csv -m runs/check.onnx --max-samples 1000    # ~a minute
-olinda predict -m runs/check.onnx -i a_few_molecules.csv -o out.csv
+olinda library -o ersilia_reference_library.csv
 ```
 
-The result is a real, servable `model.onnx` — just a bad one, fitted on a thousandth of the data. Use
-it to confirm your teacher file is accepted, your columns are matched the way you expect and the
-predictions come out where you want them. Then drop the flag for the real thing:
+Use this file to make predictions with your model of choice. Feel free to explore models from the [Ersilia Model Hub](https://catalog.ersilia.io), or models trained with [ZairaChem](https://github.com/ersilia-os/zaira-chem). We refer to the result of this predictions as **soft labels**.
+
+### Training a distilled model
+
+Assuming you have your soft labels calculated, you can simply get a distilled (surrogate model) as follows:
 
 ```bash
-olinda fit -s teacher.csv -h measured.csv -m runs/my_model.onnx    # hours, on everything
+olinda fit --soft-labels my_soft_labels.csv --model-onnx my_model.onnx
 ```
 
-Both paths are scripted end-to-end in [`example/run.sh`](example/run.sh) (`./run.sh check` for the
-fast version, `./run.sh` for the full one). [`example/run_stepwise.sh`](example/run_stepwise.sh) walks
-the same distillation one command at a time, so you can stop after the surrogate, look at what it
-learned, and only then decide to add the hard-label head.
-
-### Hard labels (your own measurements)
-
-If you also have real measurements, pass them with `-h`:
+Optionally, you can provide **hard labels** (ground truth) if you have them. For now, only binary (1/0) labels are allowed as hard labels.
 
 ```bash
-olinda fit -s teacher.csv -h measured.csv -m runs/my_model.onnx
+olinda fit --soft-labels my_soft_labels.csv --hard-labels my_hard_labels.csv --model-onnx my_model.onnx
 ```
 
-`measured.csv` is a `smiles` column plus one column per assay, left empty where a compound was not
-tested. Columns are matched to the teacher by name, allowing a suffix — `abaumannii_inhibition`
-matches `abaumannii_inhibition_probability`. Anything ambiguous is an error, not a guess.
+### Evaluating a distilled model
 
-Olinda then trains a model on your labels, calibrates it onto the teacher's scale (learning the
-direction from the data), and learns where to trust it. Three models, one letter each — the same names
-appear in the code and in the run directory:
-
-| | |
-|---|---|
-| **S** | the **surrogate**, distilled from the teacher's soft labels |
-| **H** | the **hard-label model**, trained on your measurements |
-| **H_S** | **H** carried onto **S**'s scale by an isotonic map |
-| **T** | predicted **1-NN Tanimoto** to your labelled set |
-| **a** | the blend weight, `a = a_max · ramp(T)` |
-
-The final prediction is
-
-```
-prediction  =  (1 − a) · S  +  a · H_S
-```
-
-`a` rises only near chemistry you have actually measured. Rather than search your labelled set for
-every query, olinda measures each reference compound's nearest-neighbour Tanimoto to it once, at
-training time, and fits **T**, a small network predicting that number from a fingerprint alone — so
-your compounds never travel inside the shipped model. A ramp turns **T** into `a`, continuously:
-nothing jumps at a threshold.
-
-How far `a` can ever rise is earned, not assumed. An **H** whose calibrated output tracks the teacher
-poorly is capped low, and one that loses to **S** outright is dropped, leaving the column soft-only.
-Far from your data the model falls back to **S**. That weighting is already inside the number `run()`
-returns.
-
-## Is it any good?
-
-`validate` scores a finished model against data of your choosing and writes a report — figures, a
-`metrics.json`, and a `performance_table.csv`:
+The easiest way to evaluate a distilled model is to pass an additional set of soft-labels (and optionally hard labels):
 
 ```bash
-olinda validate -m runs/my_model.onnx -s heldout_teacher.csv -h measured.csv -o report/
+olinda report --soft-labels my_validation_soft_labels.csv --model-onnx my_model.onnx --output-dir my_report_folder
 ```
-
-Unlike the teacher file `fit` takes, these labels have **no size or ordering restriction** — any
-SMILES with values, matched to the model's tasks by name. Held-out data is the point: the surrogate's
-isotonic correction is fitted on the run's own validation rows, so only new data measures the
-calibrated model honestly. If the compounds turn out to be the training library, the report says so
-rather than letting you read fit as generalisation.
-
-`-s` gives correlation, residual and calibration diagnostics; `-h` gives ROC, precision–recall and
-enrichment — of the **blended** output, which is what `predict` emits, not the hard-label head on
-its own. With neither, you still get the model's own calibration curves, read straight out of the
-graph.
-
-## Commands
-
-The four you normally need:
-
-| | |
-|---|---|
-| `setup` | Download the reference-library fingerprints to `~/.olinda/` |
-| `fit` | Distil a teacher into one `model.onnx` |
-| `predict` | Run a model over a file of SMILES |
-| `validate` | Score a model against labelled data and write a report |
-
-`fit` chains the steps below. Each is also a command in its own right — run them one at a time when you
-want the per-column boosters, metrics and plots that `fit` discards:
-
-| | |
-|---|---|
-| `prepare` | Read the teacher columns and plan each one's split |
-| `tune` | Optional Optuna pass; single-column runs only |
-| `learn-soft` | Train S, the surrogate, for every column |
-| `learn-hard` | Train H and T, and calibrate H onto S's scale |
-| `export` | Rebuild `model.onnx` from a trained run |
-| `clean` | Move the model out and delete the run folder |
-
-`fit`, `predict` and `clean` take `-m` as a path to the **`.onnx`**; the pipeline steps between them
-take `-m` as the **run folder** they share. The engine is picked from your hardware — XGBoost on a
-CUDA GPU, LightGBM on CPU — and `OLINDA_BACKEND` overrides it.
-
-![The commands and what each one writes](docs/diagrams/olinda_02_pipeline.png)
-
-## How it fits together
-
-Two more diagrams, for when the shape of the thing matters more than the commands: what ends up
-inside the artifact, and how the hard-label head is calibrated and gated.
-
-| | |
-|---|---|
-| [The fused artifact](docs/diagrams/olinda_03_model_onnx.png) | Every stage in one graph, and what the metadata carries |
-| [Hard labels: H, H_S and T](docs/diagrams/olinda_04_hard.png) | The four `learn-hard` steps, and where `a` comes from |
-
-They are drawn by [`scripts/make_diagrams.py`](scripts/make_diagrams.py) — regenerate them if you
-change the pipeline.
-
-## Where this sits
-
-Olinda distils models from the [Ersilia Model Hub](https://github.com/ersilia-os/ersilia): score a hub
-model over the reference library, and olinda gives you a student that runs in milliseconds without the
-model's environment. It was built for the **AI2050 for TB Modelling** project, where the teachers are
-*M. tuberculosis* activity predictors that are far too slow to screen a full library with.
-
-The reference library, `erl0_morgan.h5`, is 1.36M compounds fingerprinted with the same Morgan settings
-as the hub model [`eos5axz`](https://github.com/ersilia-os/eos5axz), which is what lets a teacher's
-predictions and a student's features line up row for row.
 
 ## About the Ersilia Open Source Initiative
 
 The [Ersilia Open Source Initiative](https://ersilia.io) is a tech-nonprofit organization fueling sustainable research in the Global South. Ersilia's main asset is the [Ersilia Model Hub](https://github.com/ersilia-os/ersilia), an open-source repository of AI/ML models for antimicrobial drug discovery. You can support Ersilia by clicking [here](https://www.ersilia.io/donate).
-
-![Ersilia Logo](assets/Ersilia_Plum.png)
