@@ -79,6 +79,29 @@ The easiest way to evaluate a distilled model is to pass an additional set of so
 olinda validate --soft-labels my_validation_soft_labels.csv --model-onnx my_model.onnx --output-dir my_report_folder
 ```
 
+## Commands
+
+| Command | What it does |
+|---|---|
+| `setup` | Download the reference library's Morgan fingerprints |
+| `library` | Write the reference library's SMILES to a CSV |
+| `fit` | Distil a teacher into a student end-to-end |
+| `predict` | Run a distilled `model.onnx` on SMILES |
+| `validate` | Score a model against labelled data and write a report |
+
+`fit` drives the step-by-step pipeline below; run the steps yourself to inspect or redo one of them.
+
+| Command | What it does |
+|---|---|
+| `prepare` | Set up a run directory from the soft (and hard) labels |
+| `tune` | Search hyperparameters for `learn-soft` with Optuna |
+| `learn-soft` | Train the surrogate on the teacher's soft labels |
+| `learn-hard` | Train on hard labels and calibrate onto the soft-label scale |
+| `export` | Rebuild `model.onnx` for a trained run |
+| `clean` | Move the model out of the run and delete the working folder |
+
 ## About the Ersilia Open Source Initiative
 
-The [Ersilia Open Source Initiative](https://ersilia.io) is a tech-nonprofit organization fueling sustainable research in the Global South. Ersilia's main asset is the [Ersilia Model Hub](https://github.com/ersilia-os/ersilia), an open-source repository of AI/ML models for antimicrobial drug discovery. You can support Ersilia by clicking [here](https://www.ersilia.io/donate).
+The [Ersilia Open Source Initiative](https://ersilia.io) is a tech-nonprofit organization fueling sustainable research in the Global South. Ersilia's main asset is the [Ersilia Model Hub](https://github.com/ersilia-os/ersilia), an open-source repository of AI/ML models for antimicrobial drug discovery.
+
+![Ersilia Logo](assets/Ersilia_Plum.png)
