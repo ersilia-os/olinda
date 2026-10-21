@@ -113,4 +113,9 @@ $("model").addEventListener("change", () => {
   loaded = null;
   example = null; // an uploaded file replaces the example
 });
-init().catch((err) => status(`Error loading the page: ${err.message}`));
+init().catch((err) =>
+  status(
+    `Error loading the page: ${err.message}. The featurizer needs WebAssembly exception handling: ` +
+      "Chrome 137+, Firefox 131+ or Safari 18.4+. If your browser is recent, reload the page.",
+  ),
+);
