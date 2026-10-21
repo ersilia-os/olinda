@@ -138,18 +138,19 @@ def _fit_tanimoto(
     # `export.build_bundle` refuses to fuse, so leaving it ungated turns a degenerate gate into a failed
     # run. Reachable is the norm on the full library; a subsampled view is where this bites.
     reachable = float(sim.max()) >= sim_lo
+    # Gathered once: early stopping during the fit and the reported numbers after it use the same rows.
+    xval = matrix.gather(val_idx)
     with epoch_progress("learning T", T_MAX_EPOCHS) as report:
         regressor = TanimotoRegressor.fit(
             batches,
             matrix.n_cols,
-            (matrix.gather(val_idx), sim[val_idx]),
+            (xval, sim[val_idx]),
             progress=report,
             a_max=_blend_ceiling(alignment_r2) if reachable else 0.0,
             sim_lo=sim_lo,
             sim_hi=sim_hi,
         )
 
-    xval = matrix.gather(val_idx)
     predicted = regressor.predict_tanimoto(xval)
     del xval
     truth = sim[val_idx].astype(np.float64)

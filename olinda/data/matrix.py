@@ -129,10 +129,11 @@ def index_sequence(
             self.batch_size = int(batch_rows)
 
         def __getitem__(self, item):
-            # LightGBM samples in double for bin construction, so float64 here (not float32).
+            # LightGBM samples single rows in double for bin construction, so float64 there. Pushed
+            # batches accept float32, which holds every uint8 count exactly at half the bytes.
             if np.isscalar(item) or isinstance(item, np.integer):
                 return np.asarray(self.matrix.x[self.idx[item]], dtype=np.float64)
-            return self.matrix.gather(self.idx[item], dtype=np.float64)
+            return self.matrix.gather(self.idx[item], dtype=np.float32)
 
         def __len__(self) -> int:
             return int(len(self.idx))

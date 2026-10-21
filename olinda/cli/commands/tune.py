@@ -46,9 +46,13 @@ def tune_cmd(model_dir, trials, max_rows):
     from olinda.run import PARAMS_NAME
     from olinda.train.tune import run_tuning
 
-    run_tuning(
-        model_dir,
-        trials=trials,
-        max_rows=max_rows,
-        out=Path(model_dir) / PARAMS_NAME,
-    )
+    try:
+        run_tuning(
+            model_dir,
+            trials=trials,
+            max_rows=max_rows,
+            out=Path(model_dir) / PARAMS_NAME,
+        )
+    # A multi-column run or a missing Optuna; both messages explain themselves.
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc

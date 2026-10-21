@@ -88,15 +88,27 @@ def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 50_
         raise ValueError(
             f"reference library has {dim}-d features but H expects {n_features}-d"
         )
+    # lazy-qsar's predict_proba builds an xgb.DMatrix per call, which costs ~3x the prediction itself.
+    # With calibration off it is exactly the booster up to best_iteration_, so ask the booster directly.
+    booster = getattr(model, "booster_", None)
+    direct = (
+        task == "binary"
+        and booster is not None
+        and not hasattr(model, "calibrator_")
+        and hasattr(model, "best_iteration_")
+    )
     out = []
     with sweep_progress("scoring", n) as tick:
         for start in range(0, n, chunk):
             xb = np.asarray(matrix.x[start : start + chunk], dtype=np.float32)
-            g = (
-                np.asarray(model.predict_proba(xb))[:, 1]
-                if task == "binary"
-                else np.asarray(model.predict(xb))
-            )
+            if direct:
+                g = booster.inplace_predict(
+                    xb, iteration_range=(0, int(model.best_iteration_) + 1)
+                )
+            elif task == "binary":
+                g = np.asarray(model.predict_proba(xb))[:, 1]
+            else:
+                g = np.asarray(model.predict(xb))
             out.append(np.asarray(g, dtype=np.float32).ravel())
             tick(min(start + chunk, n))
     return np.concatenate(out)

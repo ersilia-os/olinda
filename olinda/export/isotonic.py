@@ -66,6 +66,15 @@ def _isotonic_model(cal, in_name: str, out_name: str):
     slope = np.zeros_like(xk)
     slope[:-1] = (yk[1:] - yk[:-1]) / (xk[1:] - xk[:-1])  # slope[-1]=0 → end-clamp
     n = len(xk)
+    # The knot index is count(xk <= t) - 1. Counting against all n knots is a B x n comparison per batch
+    # (4,096 knots: a 134 MB int64 temporary and ~9 ms per 4,096 rows). Instead count the knots in two
+    # steps: against every k-th knot to find t's group, then within that one group. Every group before it
+    # lies wholly at or below t and every group after it wholly above, so the count is exact, with
+    # B x (n/k + k) comparisons. Padding the last group with +inf keeps the table rectangular.
+    k = max(1, int(np.ceil(np.sqrt(n))))
+    groups = int(np.ceil(n / k))
+    table = np.full(groups * k, np.inf)
+    table[:n] = xk
     ct = helper.make_tensor
     init = [
         ct("sign", TensorProto.DOUBLE, [1], [float(cal._sign)]),
@@ -74,6 +83,10 @@ def _isotonic_model(cal, in_name: str, out_name: str):
         ct("slope", TensorProto.DOUBLE, [n], slope),
         ct("x0", TensorProto.DOUBLE, [1], [float(xk[0])]),
         ct("xlast", TensorProto.DOUBLE, [1], [float(xk[-1])]),
+        ct("coarse", TensorProto.DOUBLE, [groups], xk[::k]),
+        ct("fine", TensorProto.DOUBLE, [groups, k], table),
+        ct("k_i", TensorProto.INT64, [1], [k]),
+        ct("gm1", TensorProto.INT64, [1], [groups - 1]),
         ct("one_i", TensorProto.INT64, [1], [1]),
         ct("nm1", TensorProto.INT64, [1], [n - 1]),
         ct("zero_i", TensorProto.INT64, [1], [0]),
@@ -87,9 +100,20 @@ def _isotonic_model(cal, in_name: str, out_name: str):
         ),  # clamp into [x0, xlast] → out-of-range holds ends
         helper.make_node("Min", ["t_lo", "xlast"], ["t"]),
         helper.make_node("Unsqueeze", ["t", "axis1"], ["t2"]),
-        helper.make_node("LessOrEqual", ["xk", "t2"], ["le"]),
-        helper.make_node("Cast", ["le"], ["lei"], to=TensorProto.INT64),
-        helper.make_node("ReduceSum", ["lei", "axis1"], ["cnt"], keepdims=0),
+        # step 1: which group of k knots t falls in
+        helper.make_node("LessOrEqual", ["coarse", "t2"], ["le_c"]),
+        helper.make_node("Cast", ["le_c"], ["lei_c"], to=TensorProto.INT64),
+        helper.make_node("ReduceSum", ["lei_c", "axis1"], ["cnt_c"], keepdims=0),
+        helper.make_node("Sub", ["cnt_c", "one_i"], ["grp0"]),
+        helper.make_node("Max", ["grp0", "zero_i"], ["grp1"]),
+        helper.make_node("Min", ["grp1", "gm1"], ["grp"]),
+        # step 2: how many knots of that group lie at or below t
+        helper.make_node("Gather", ["fine", "grp"], ["window"], axis=0),
+        helper.make_node("LessOrEqual", ["window", "t2"], ["le_f"]),
+        helper.make_node("Cast", ["le_f"], ["lei_f"], to=TensorProto.INT64),
+        helper.make_node("ReduceSum", ["lei_f", "axis1"], ["cnt_f"], keepdims=0),
+        helper.make_node("Mul", ["grp", "k_i"], ["base"]),
+        helper.make_node("Add", ["base", "cnt_f"], ["cnt"]),
         helper.make_node("Sub", ["cnt", "one_i"], ["idx0"]),
         helper.make_node("Max", ["idx0", "zero_i"], ["idxc"]),
         helper.make_node("Min", ["idxc", "nm1"], ["idx"]),

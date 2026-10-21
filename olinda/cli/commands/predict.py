@@ -68,6 +68,14 @@ def predict_cmd(model_onnx, input_path, out_path, smiles_column):
     from olinda.predict import predict_file
 
     try:
-        predict_file(model_onnx, input_path, out_path, smiles_column=smiles_column)
+        # Every CPU featurizes: the console script that runs this has the __main__ guard worker
+        # processes need, which a library caller's script may not.
+        predict_file(
+            model_onnx,
+            input_path,
+            out_path,
+            smiles_column=smiles_column,
+            workers=None,
+        )
     except (RDKitVersionMismatch, ValueError, FileNotFoundError) as exc:
         raise click.ClickException(str(exc)) from exc

@@ -157,7 +157,12 @@ def fit_cmd(
     )
     if do_tune:
         tune_cmd.callback(model_dir=model_dir, trials=trials, max_rows=100_000)
-    learn_soft_cmd.callback(model_dir=model_dir, num_boost_round=num_boost_round)
+    # With hard labels, learn-hard fuses the run itself, so a soft-only fuse here would be thrown away.
+    learn_soft_cmd.callback(
+        model_dir=model_dir,
+        num_boost_round=num_boost_round,
+        fuse=hard_labels is None,
+    )
     if hard_labels is not None:
         learn_hard_cmd.callback(model_dir=model_dir)
     # Everything is fused, so the working folder has no consumer left.

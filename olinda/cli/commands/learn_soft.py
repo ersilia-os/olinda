@@ -21,7 +21,9 @@ from olinda.cli.guards import require_train
     show_default=True,
     help="Upper cap; early stopping decides.",
 )
-def learn_soft_cmd(model_dir, num_boost_round):
+# Hidden: only `fit` turns it off, when `learn-hard` is about to fuse the same run again anyway.
+@click.option("--fuse/--no-fuse", default=True, hidden=True)
+def learn_soft_cmd(model_dir, num_boost_round, fuse):
     """Learn the surrogate: fast gradient-boosting regression on each column's prepared split.
 
     The engine is auto-selected by device — XGBoost on a CUDA GPU, LightGBM on CPU (``OLINDA_BACKEND``
@@ -126,12 +128,13 @@ def learn_soft_cmd(model_dir, num_boost_round):
 
     del matrix  # release ~2.8 GB before fusing, which is itself memory-hungry
 
-    from olinda.export import build_bundle
+    if fuse:
+        from olinda.export import build_bundle
 
-    try:
-        build_bundle(model_dir)
-    except (ValueError, FileNotFoundError) as exc:
-        raise click.ClickException(str(exc)) from exc
+        try:
+            build_bundle(model_dir)
+        except (ValueError, FileNotFoundError) as exc:
+            raise click.ClickException(str(exc)) from exc
 
     summary_panel(
         "olinda · learn-soft",
@@ -144,7 +147,11 @@ def learn_soft_cmd(model_dir, num_boost_round):
                 )
                 for r in results
             ],
-            ("Model", f"[dim]{cpath(model_dir / 'model.onnx')}[/]"),
+            *(
+                [("Model", f"[dim]{cpath(model_dir / 'model.onnx')}[/]")]
+                if fuse
+                else []
+            ),
             ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
         ],
         border_style=STEP_COLORS["learn-soft"],
