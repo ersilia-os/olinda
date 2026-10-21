@@ -1,9 +1,9 @@
 """The qmfp decoder at the front of every fused graph: packed bytes in, float slot values out.
 
-The model's input is exactly what RDKit MinimalLib and RDKit.js return, so a runtime in any
-language passes those bytes straight to onnxruntime and holds no fingerprint logic of its own.
-One ``Gather`` on a 256-row table decodes both slots of every byte at once; unpacking to bits
-with BitShift/Mod was about 4x slower under onnxruntime-web.
+The model's input is the packed 4-bit Morgan counts olinda's WebAssembly RDKit returns, so a runtime
+passes those bytes straight to onnxruntime and holds no fingerprint logic of its own. One ``Gather``
+on a 256-row table decodes both slots of every byte at once; unpacking with BitShift/Mod was about
+4x slower under onnxruntime-web.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def qmfp_decoder_nodes(spec: dict, in_name: str = "input"):
 
     slots = int(spec["slots"])
     inits = [
-        numpy_helper.from_array(byte_table(spec["levels"]), "qmfp_table"),
+        numpy_helper.from_array(byte_table(), "qmfp_table"),
         numpy_helper.from_array(np.array([0, slots], dtype=np.int64), "qmfp_shape"),
     ]
     nodes = [

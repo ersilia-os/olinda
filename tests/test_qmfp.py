@@ -9,46 +9,42 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from olinda.featurizer.codec import LEVEL_VALUES, byte_table, decode, pack
+from olinda.featurizer.codec import COUNT_CLIP, byte_table, decode, pack
 from olinda.featurizer.spec import QMFP_SPEC, default_spec, n_input_bytes, validate_spec
 
-# Every byte MinimalLib can emit: two thermometer nibbles, each one of 0x0, 0x1, 0x3, 0x7, 0xF.
-_NIBBLES = [0x0, 0x1, 0x3, 0x7, 0xF]
-_VALID_BYTES = np.array(
-    [[lo | (hi << 4) for hi in _NIBBLES for lo in _NIBBLES]], dtype=np.uint8
-)
+
+def test_every_byte_round_trips():
+    """With 4-bit counts every one of the 256 byte values is a valid pair of slots."""
+    every_byte = np.arange(256, dtype=np.uint8)[None, :]
+    assert np.array_equal(pack(decode(every_byte)), every_byte)
 
 
-def test_every_byte_minimallib_can_emit_round_trips():
-    """Decoding then packing gives back each of the 25 thermometer bytes unchanged."""
-    assert np.array_equal(pack(decode(_VALID_BYTES)), _VALID_BYTES)
-
-
-def test_slot_values_round_trip_and_the_even_slot_is_the_low_nibble():
+def test_counts_round_trip_clip_at_15_and_the_even_slot_is_the_low_nibble():
     rng = np.random.default_rng(0)
-    values = rng.choice(LEVEL_VALUES, size=(64, 2048)).astype(np.uint8)
-    assert np.array_equal(decode(pack(values)), values)
-    # 0x71: low nibble 0x1 → even slot level 1 → 1; high nibble 0x7 → odd slot level 3 → 4
-    assert byte_table()[0x71].tolist() == [1.0, 4.0]
-
-
-def test_pack_refuses_a_value_that_is_not_a_level():
-    with pytest.raises(ValueError, match="0, 1, 2, 4 or 8"):
-        pack(np.array([[3, 0]], dtype=np.uint8))
+    counts = rng.integers(0, 16, size=(64, 2048)).astype(np.uint8)
+    assert np.array_equal(decode(pack(counts)), counts)
+    # 0x71: low nibble 1 → even slot count 1; high nibble 7 → odd slot count 7
+    assert byte_table()[0x71].tolist() == [1.0, 7.0]
+    # true counts above 15 are stored as 15
+    assert decode(pack(np.array([[16, 200]]))).tolist() == [[COUNT_CLIP, COUNT_CLIP]]
 
 
 def test_the_spec_is_self_consistent_and_guards_its_layout():
     assert validate_spec(default_spec()) is not None
     assert n_input_bytes(QMFP_SPEC) == 1024
     for change in (
-        {"useCountSimulation": False},
-        {"nBits": 2048},
-        {"levels": [0, 1, 2, 3, 4]},
+        {"encoding": "thermometer"},
+        {"count_clip": 8},
+        {"slots": 1024},
     ):
         with pytest.raises(ValueError):
             validate_spec({**QMFP_SPEC, **change})
     with pytest.raises(ValueError, match="qmfp only"):
         validate_spec({**QMFP_SPEC, "type": "morgan"})
+    # a spec from the earlier count-simulation layout has no encoding: refused, not misread
+    old = {k: v for k, v in QMFP_SPEC.items() if k != "encoding"}
+    with pytest.raises(ValueError, match="missing"):
+        validate_spec(old)
 
 
 def test_the_graph_decoder_is_the_numpy_decoder():
@@ -85,8 +81,8 @@ def test_the_graph_decoder_is_the_numpy_decoder():
     assert empty.shape == (0, 2 * nb)
 
 
-def test_quantized_counts_are_rdkit_count_simulation():
-    """The claim the format rests on: count simulation is the true counts, clipped and quantized."""
+def test_the_oracle_bytes_are_rdkit_counts_clipped_at_15():
+    """The format is RDKit's folded Morgan counts, clipped at 15: nothing else."""
     pytest.importorskip("rdkit")
     from tests.rdkit_oracle import RDKitOracle
 
@@ -98,12 +94,12 @@ def test_quantized_counts_are_rdkit_count_simulation():
         "CC(=O)Oc1ccccc1C(=O)O",
     ]
     oracle = RDKitOracle(QMFP_SPEC)
-    simulated, v1 = oracle.simulation_bytes(smiles)
-    counted, v2 = oracle.count_bytes(smiles)
-    assert v1.all() and np.array_equal(v1, v2)
-    assert np.array_equal(simulated, counted)
-    # the long chain reaches level 4 (a count of 8 or more) somewhere
-    assert decode(simulated[2:3]).max() == 8
+    raw, valid = oracle.counts(smiles)
+    packed, valid2 = oracle.count_bytes(smiles)
+    assert valid.all() and np.array_equal(valid, valid2)
+    assert np.array_equal(decode(packed), np.minimum(raw, COUNT_CLIP))
+    # the long chain's CH2 environments count far above 15, so clipping is exercised
+    assert raw[2].max() > COUNT_CLIP and decode(packed[2:3]).max() == COUNT_CLIP
 
 
 def test_the_webassembly_featurizer_is_rdkit_byte_for_byte():
@@ -122,7 +118,7 @@ def test_the_webassembly_featurizer_is_rdkit_byte_for_byte():
     smiles = GOLDEN_SMILES + SMILES
     featurizer = QmfpFeaturizer(QMFP_SPEC)
     got, got_valid = featurizer.featurize_bytes(smiles)
-    want, want_valid = RDKitOracle(QMFP_SPEC).simulation_bytes(smiles)
+    want, want_valid = RDKitOracle(QMFP_SPEC).count_bytes(smiles)
     assert np.array_equal(got_valid, want_valid)
     assert np.array_equal(got, want)
 

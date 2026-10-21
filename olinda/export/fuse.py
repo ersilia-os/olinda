@@ -1,6 +1,6 @@
 """Stitch every column's stages into ONE graph, with one output per column.
 
-The graph's input is qmfp bytes, exactly what RDKit MinimalLib or RDKit.js returns; a decoder at the
+The graph's input is qmfp bytes, Morgan counts packed 4 bits per slot by olinda's featurizer; a decoder at the
 front turns them into the float fingerprint every head reads. ``S``, ``H_S`` and the weight ``a`` stay
 internal tensors: they are how the answer is computed, not part of the answer. Each column's nodes and
 tensors are namespaced by its id so ten columns can share a graph without colliding.
@@ -227,8 +227,9 @@ def _fuse(model_dir: Path):
     model.domain = "io.ersilia.olinda"
     model.doc_string = (
         f"Distilled model produced by olinda {md.get('olinda_version')} on {md.get('trained_at')}. "
-        f"Input: uint8 ({n_input_bytes(spec)},) qmfp bytes, radius {spec['radius']}, as RDKit "
-        f"MinimalLib's get_morgan_fp_as_bytes returns them. Outputs: {', '.join(outputs)}."
+        f"Input: uint8 ({n_input_bytes(spec)},) qmfp bytes: Morgan radius "
+        f"{spec['morgan']['radius']} counts clipped at 15, two 4-bit slots per byte. "
+        f"Outputs: {', '.join(outputs)}."
     )
     # json_safe first: metrics can carry NaN, which strict JSON parsers in other languages reject. The
     # golden vectors are added by build_bundle, which needs the finished graph to compute them.

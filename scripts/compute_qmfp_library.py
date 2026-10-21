@@ -2,7 +2,7 @@
 
 The library is featurized exactly as every olinda model featurizes its input: through
 :class:`olinda.featurizer.QmfpFeaturizer`, RDKit MinimalLib compiled to WebAssembly. The ``data``
-matrix holds the decoded slot values (0, 1, 2, 4 or 8) as ``uint8``, which is what training reads;
+matrix holds the decoded slot counts (0-15) as ``uint8``, which is what training reads;
 ``valid`` marks the rows RDKit could parse; ``input`` keeps the SMILES in library order, so teacher
 files computed against the old library stay row-aligned.
 
@@ -88,7 +88,7 @@ def _check_rdkit(path: Path, n: int) -> int:
         )
         smiles = h5["input"].asstr()[idx]
         data, valid = h5["data"][idx], h5["valid"][idx]
-    ref, ref_valid = RDKitOracle(QMFP_SPEC).simulation_bytes(list(smiles))
+    ref, ref_valid = RDKitOracle(QMFP_SPEC).count_bytes(list(smiles))
     bad = (decode(ref) != data).any(axis=1) | (ref_valid != valid)
     for i in np.flatnonzero(bad)[:10]:
         logger.error(f"mismatch at row {idx[i]}: {smiles[i]}")
@@ -110,7 +110,7 @@ def main() -> None:
     featurizer = QmfpFeaturizer(QMFP_SPEC)
     slots = int(QMFP_SPEC["slots"])
     logger.info(
-        f"{n:,} SMILES from {args.input} · qmfp radius {QMFP_SPEC['radius']} · {slots} slots · "
+        f"{n:,} SMILES from {args.input} · qmfp radius {QMFP_SPEC['morgan']['radius']} · {slots} slots · "
         f"RDKit {featurizer.rdkit_version} (WebAssembly)"
     )
 

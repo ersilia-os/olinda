@@ -6,7 +6,7 @@ build the input it expects. Every value is a string; structured ones are JSON:
 ``olinda.schema_version``
     ``"MAJOR.MINOR"``. Runtimes refuse a major version they do not know.
 ``olinda.fingerprint``
-    The qmfp spec (:mod:`olinda.featurizer.spec`): the RDKit MinimalLib / RDKit.js options that turn
+    The qmfp spec (:mod:`olinda.featurizer.spec`): the RDKit MinimalLib options that turn
     SMILES into the graph's input bytes. Runtimes read it rather than hard-coding featurization.
 ``olinda.rdkit_version``
     The RDKit release that featurized training and computed the golden vectors.
