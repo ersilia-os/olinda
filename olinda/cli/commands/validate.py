@@ -76,7 +76,7 @@ def validate_cmd(
     head alone. With neither, you still get the artifact's own calibration curves, read straight from the
     graph. Requires the reporting extra: `pip install "olinda[report]"`.
     """
-    from olinda.artifact import MODEL_NAME, RDKitVersionMismatch
+    from olinda.artifact import MODEL_NAME, GoldenMismatch
     from olinda.console import STEP_COLORS, echo, rule, set_active_color, summary_panel
     from olinda.console import path as cpath
 
@@ -104,7 +104,7 @@ def validate_cmd(
             hard_smiles_column=hard_smiles_column,
             hard_label_columns=parse_label_columns(hard_label_columns),
         )
-    except (RDKitVersionMismatch, RuntimeError, ValueError, FileNotFoundError) as exc:
+    except (GoldenMismatch, RuntimeError, ValueError, FileNotFoundError) as exc:
         raise click.ClickException(str(exc)) from exc
 
     for note in report.get("notes", []):

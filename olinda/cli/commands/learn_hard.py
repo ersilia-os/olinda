@@ -18,7 +18,7 @@ def learn_hard_cmd(model_dir):
     """Learn from hard (binary) labels and calibrate them onto the soft-label scale — four clear steps.
 
     Runs once per matched column, reading that column's `hard.h5` (from `prepare --hard-labels`): (1) trains
-    `H`, the hard-label model; (2) scores `H` across the full reference library (`erl0_morgan.h5`,
+    `H`, the hard-label model; (2) scores `H` across the full reference library (`erl0_qmfp_r3.h5`,
     required); (3) calibrates `H` onto `S`'s scale — that is `H_S` — against the column's reference-aligned
     targets, with a monotonic map whose direction is learned from the data; (4) trains `T`, a small MLP
     predicting a compound's 1-NN Tanimoto to the labeled set from its fingerprint alone. Artifacts land

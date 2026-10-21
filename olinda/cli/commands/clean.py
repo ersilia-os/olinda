@@ -16,7 +16,7 @@ def clean_cmd(model_onnx):
     """Finish a run: move its fused model to `--model-onnx` and delete the working folder.
 
     `runs/foo.onnx` is built in `runs/foo/`; this moves `runs/foo/model.onnx` out and removes the rest.
-    The artifact is self-describing — column names, metrics, featurizer, RDKit build, reference library
+    The artifact is self-describing — column names, metrics, fingerprint spec, golden vectors, reference library
     and provenance all live inside it — so the manifest, targets, splits and per-column directories have
     no consumer once the fuse succeeds. On a real run they are almost all of the bytes.
 

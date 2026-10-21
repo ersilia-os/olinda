@@ -76,7 +76,7 @@ def describe_graph(model_onnx: str | Path) -> dict:
     import onnx
 
     model = onnx.load(str(model_onnx), load_external_data=False)
-    raw = next((p.value for p in model.metadata_props if p.key == "olinda"), None)
+    raw = next((p.value for p in model.metadata_props if p.key == "olinda.model"), None)
     if not raw:
         raise ValueError(
             f"{model_onnx} carries no olinda metadata — is it an olinda artifact?"

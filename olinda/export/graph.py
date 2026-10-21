@@ -45,7 +45,12 @@ def _strip_dead_attributes(model) -> int:
     return saved
 
 
-def _save(model, path: Path) -> None:
+def _finalise(model) -> None:
+    """Stamp, trim and check a fused model in memory, so it can be run before it is written.
+
+    build_bundle needs the finished graph to compute the golden vectors, which then go into the same
+    file: checking here and writing once afterwards saves a second serialisation of a large model.
+    """
     import onnx
 
     model.ir_version = _IR_VERSION
@@ -57,6 +62,12 @@ def _save(model, path: Path) -> None:
             "Reduce the number of columns or --num-boost-round."
         )
     onnx.checker.check_model(model)
+
+
+def _write(model, path: Path) -> None:
+    """Write a model :func:`_finalise` has already checked."""
+    import onnx
+
     onnx.save(model, str(path))
 
 

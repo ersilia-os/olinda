@@ -7,7 +7,6 @@ pytest.importorskip("onnx")
 pytest.importorskip("onnxruntime")
 pytest.importorskip("xgboost")
 
-import h5py  # noqa: E402
 import pandas as pd  # noqa: E402
 from click.testing import CliRunner  # noqa: E402
 
@@ -26,10 +25,10 @@ _SM = [
 
 
 def _stage_reference(home, tmp_path, monkeypatch):
-    """Point OLINDA_HOME at a tmp dir holding a synthetic erl0_morgan.h5 + a row-aligned soft.csv."""
+    """Point OLINDA_HOME at a tmp dir holding a synthetic reference library + a row-aligned soft.csv."""
     import olinda.data as D
     import olinda.data.fetch as F
-    from olinda.featurizer import MorganCountFeaturizer
+    from tests.conftest import write_library
 
     monkeypatch.setenv(
         "OLINDA_BACKEND", "xgboost"
@@ -37,11 +36,7 @@ def _stage_reference(home, tmp_path, monkeypatch):
     monkeypatch.setattr(F, "OLINDA_HOME", home)
     monkeypatch.setattr(D, "OLINDA_HOME", home)
 
-    smiles = (_SM * 20)[:200]
-    X = MorganCountFeaturizer().transform(smiles).astype(np.uint8)
-    with h5py.File(home / "erl0_morgan.h5", "w") as f:
-        f.create_dataset("data", data=X)
-        f.create_dataset("input", data=np.array([s.encode() for s in smiles]))
+    smiles, X = write_library(home, smiles=(_SM * 20)[:200])
     val = X[:, :120].sum(1).astype(np.float32)
     val = (val - val.min()) / (np.ptp(val) + 1e-9)
     soft = tmp_path / "soft.csv"
@@ -94,9 +89,9 @@ def test_fit_with_hard_labels_blends_behind_one_output(tmp_path, monkeypatch):
     home.mkdir()
     soft = _stage_reference(home, tmp_path, monkeypatch)
     gt = tmp_path / "gt.csv"
-    from olinda.featurizer import MorganCountFeaturizer
+    from olinda.featurizer import QmfpFeaturizer
 
-    xu = MorganCountFeaturizer().transform(_SM)
+    xu = QmfpFeaturizer().transform(_SM)
     lab = (xu[:, :100].sum(1) > np.median(xu[:, :100].sum(1))).astype(int)
     pd.DataFrame({"smiles": _SM, "y": lab}).to_csv(
         gt, index=False

@@ -1,61 +1,49 @@
 """The public inference API: load a distilled ``model.onnx`` and predict from SMILES.
 
-An olinda artifact is a single self-describing file. Everything needed to run it — the Morgan
-featurizer configuration, the RDKit build it was fused against, the task names and their outputs —
-travels inside the file's ``metadata_props``, so the ``.onnx`` is the only input required:
+An olinda artifact is a single self-describing file. Everything needed to run it — the fingerprint
+spec, the golden vectors that prove a runtime reproduces it, the task names and their outputs — travels
+inside the file's ``metadata_props``, so the ``.onnx`` is the only input required:
 
     from olinda import OlindaArtifact
 
     model = OlindaArtifact("model.onnx")
     model.columns          # ['abaumannii_inhibition_probability', ...]
     model.trained_at       # '2026-08-11T09:14:00+00:00'
-    df = model.run(["CCO", "c1ccccc1"])   # DataFrame: smiles + one column per task
+    y = model.run(["CCO", "c1ccccc1"])   # float64 array, one row per SMILES, one column per task
+
+Inference needs numpy, onnxruntime and wasmtime, nothing else. SMILES are featurized by RDKit compiled
+to WebAssembly (:mod:`olinda.featurizer`), so there is no rdkit package to install or to match.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
 
 MODEL_NAME = "model.onnx"
 
-# The metadata layout this code understands. Kept here, next to the reader, rather than imported from
+# The metadata major version this code reads. Kept here, next to the reader, rather than imported from
 # olinda.export: the export module belongs to the [train] extra and inference must not reach into it.
-BUNDLE_SCHEMA = "olinda.bundle.v1"
-
-
-class RDKitVersionMismatch(RuntimeError):
-    """Raised when the installed RDKit differs from the build that produced ``model.onnx``."""
-
-
-def _check_rdkit_version(meta: dict) -> None:
-    """Verify the installed RDKit matches the one recorded in ``model.onnx`` metadata.
-
-    Morgan fingerprints are only bit-for-bit reproducible with the exact RDKit build the model was fused
-    against, so a mismatch would silently corrupt every prediction — we refuse rather than guess.
-    """
-    want = (meta.get("featurizer") or {}).get("rdkit_version")
-    if not want:
-        return
-    import rdkit
-
-    have = rdkit.__version__
-    if have != want:
-        raise RDKitVersionMismatch(
-            f"model.onnx was built with RDKit {want}, but {have} is installed — Morgan fingerprints are only "
-            f"reproducible with the exact build. Install rdkit=={want} (e.g. `pip install rdkit=={want}`)."
-        )
-
+SUPPORTED_SCHEMA_MAJOR = 1
 
 _BATCH = 4096
 
 
-def _featurize_batch(featurizer, smiles: list[str]) -> np.ndarray:
+class GoldenMismatch(RuntimeError):
+    """Raised, in strict mode, when this runtime does not reproduce a model's golden vectors."""
+
+
+class GoldenMismatchWarning(RuntimeWarning):
+    """Warned when this runtime does not reproduce a model's golden vectors."""
+
+
+def _featurize_batch(featurizer, smiles: list[str]):
     """Featurize one batch in a worker process. Module-level so the pool can pickle a reference to it."""
-    return np.asarray(featurizer.transform(smiles), dtype=np.float32)
+    return featurizer.featurize_bytes(smiles)
 
 
 def _as_smiles_list(smiles) -> list[str]:
@@ -88,8 +76,8 @@ class _Progress:
     """A minimal stderr progress bar.
 
     Hand-rolled rather than reaching for rich or tqdm: the inference install is deliberately limited to
-    numpy, pandas, rdkit and onnxruntime, and a progress bar is not worth widening that. Silent unless
-    stderr is a terminal, so redirected output and notebooks stay clean.
+    numpy, onnxruntime and wasmtime, and a progress bar is not worth widening that. Silent unless stderr
+    is a terminal, so redirected output and notebooks stay clean.
     """
 
     WIDTH = 28
@@ -135,23 +123,31 @@ class OlindaArtifact:
     ----------
     path : str or Path
         The ``model.onnx`` itself, or a run directory containing one.
-    check_rdkit : bool, optional
-        Verify the installed RDKit matches the build the model was fused against (default ``True``).
-        Morgan fingerprints only reproduce bit-for-bit on the exact build, so disabling this can
-        silently change every prediction.
+    strict : bool, optional
+        Raise :class:`GoldenMismatch` instead of warning when this runtime does not reproduce the
+        model's golden vectors (default ``False``).
+    check_golden : bool, optional
+        Featurize and score the golden vectors on load (default ``True``). They are the evidence that
+        predictions here match the ones the model was built to make; skip them only to save the few
+        milliseconds they take.
 
     Attributes
     ----------
     columns : list of str
         The task names this model predicts, in output order.
+    golden : dict or None
+        The result of the golden check: ``{"n", "bytes_differ", "outputs_differ"}``, or ``None`` when
+        it was skipped.
     path : Path
         Where the artifact was loaded from.
     """
 
-    def __init__(self, path: str | Path, *, check_rdkit: bool = True) -> None:
+    def __init__(
+        self, path: str | Path, *, strict: bool = False, check_golden: bool = True
+    ) -> None:
         import onnxruntime as ort
 
-        from olinda.featurizer import featurizer_from_meta
+        from olinda.featurizer import QmfpFeaturizer, n_input_bytes, validate_spec
 
         path = Path(path)
         if path.is_dir():
@@ -166,43 +162,48 @@ class OlindaArtifact:
             str(path), options, providers=["CPUExecutionProvider"]
         )
 
-        raw = self._session.get_modelmeta().custom_metadata_map.get("olinda")
-        if not raw:
+        props = self._session.get_modelmeta().custom_metadata_map
+        if "olinda.schema_version" not in props:
+            if "olinda" in props:
+                raise ValueError(
+                    f"{path} was built by olinda 1.2 or earlier, which fed Morgan count fingerprints from the rdkit "
+                    "package. This olinda reads qmfp models only: rebuild it with `olinda fit`."
+                )
             raise ValueError(
-                f"{path} carries no olinda metadata — it may not be an olinda artifact, or it predates "
-                "self-describing bundles. Rebuild it with `olinda export`."
+                f"{path} carries no olinda metadata — it may not be an olinda artifact."
             )
-        self.metadata = json.loads(raw)
-        schema = self.metadata.get("schema")
-        if schema != BUNDLE_SCHEMA:
-            # Checked rather than assumed. The bundle carried a version from the start but nothing read it,
-            # so a file written to any other layout would have been parsed as though it were this one and
-            # gone wrong field by field. Refusing is the only honest answer: the graph is fine, but this
-            # code cannot say what its metadata means.
+        self.schema_version = props["olinda.schema_version"]
+        if int(self.schema_version.split(".")[0]) != SUPPORTED_SCHEMA_MAJOR:
+            # Checked rather than assumed: a file written to another layout would otherwise be parsed as
+            # though it were this one and go wrong field by field.
             raise ValueError(
-                f"{path} declares metadata schema {schema!r}, but this olinda reads {BUNDLE_SCHEMA!r}. "
-                "Rebuild it with `olinda export`, or install the olinda that wrote it."
+                f"{path} declares metadata schema {self.schema_version}, but this olinda reads "
+                f"{SUPPORTED_SCHEMA_MAJOR}.x. Install the olinda that wrote it, or rebuild the model."
             )
-        if check_rdkit:
-            _check_rdkit_version(self.metadata)
 
-        self._featurizer = featurizer_from_meta(
-            self.metadata.get("featurizer_class"), self.metadata.get("featurizer", {})
-        )
-        if self._featurizer is None:
+        self.fingerprint = validate_spec(json.loads(props["olinda.fingerprint"]))
+        self.metadata = json.loads(props["olinda.model"])
+        self._golden = json.loads(props.get("olinda.golden", "null"))
+        self._rdkit_version = props.get("olinda.rdkit_version")
+
+        model_input = self._session.get_inputs()[0]
+        self._input_name = model_input.name
+        width = model_input.shape[-1]
+        if model_input.type != "tensor(uint8)" or width != n_input_bytes(
+            self.fingerprint
+        ):
             raise ValueError(
-                f"{path} records an unsupported featurizer: {self.metadata.get('featurizer_class')}"
+                f"{path} takes {model_input.type} of width {width}, not the uint8 "
+                f"({n_input_bytes(self.fingerprint)},) qmfp bytes its metadata describes"
             )
-        self._input_name = self._session.get_inputs()[0].name
         self._output_names = [o.name for o in self._session.get_outputs()]
 
         # A single-task model is just the one-column case, so nothing downstream distinguishes them.
         self._columns = self.metadata.get("columns") or []
         if not self._columns:
             raise ValueError(
-                f"{path} records no columns — rebuild it with `olinda export`."
+                f"{path} records no columns — rebuild it with `olinda fit`."
             )
-
         # Fail here rather than with a bare KeyError deep inside run() if the embedded column list and
         # the graph disagree — which is what a hand-edited or mismatched artifact looks like.
         missing = [
@@ -211,8 +212,52 @@ class OlindaArtifact:
         if missing:
             raise ValueError(
                 f"{path} declares output(s) {missing} that the graph does not produce; "
-                f"it exposes {self._output_names}. Rebuild it with `olinda export`."
+                f"it exposes {self._output_names}. Rebuild it with `olinda fit`."
             )
+
+        self._featurizer = QmfpFeaturizer(self.fingerprint)
+        have = self._featurizer.rdkit_version
+        if self._rdkit_version and have != self._rdkit_version:
+            warnings.warn(
+                f"{path.name} was featurized with RDKit {self._rdkit_version}; this olinda computes "
+                f"fingerprints with RDKit {have}. The golden check below says whether that matters.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        self.golden = None
+        if check_golden and self._golden:
+            self.golden = self._check_golden(strict)
+
+    def _run_bytes(self, packed: np.ndarray) -> dict:
+        return dict(
+            zip(self._output_names, self._session.run(None, {self._input_name: packed}))
+        )
+
+    def _check_golden(self, strict: bool) -> dict:
+        """Re-score the golden vectors; warn, or raise in strict mode, if anything differs."""
+        from olinda.golden import check_golden
+
+        result = check_golden(self._golden, self._run_bytes, self._featurizer)
+        bad_bytes, bad_out = result["bytes_differ"], result["outputs_differ"]
+        if bad_bytes or bad_out:
+            if bad_bytes:
+                what = (
+                    f"{len(bad_bytes)} of {result['n']} golden molecules featurize differently "
+                    f"(e.g. {bad_bytes[:3]}): this runtime's RDKit does not reproduce the "
+                    "fingerprints the model was trained on, so its predictions may differ."
+                )
+            else:
+                what = (
+                    f"{len(bad_out)} of {result['n']} golden molecules featurize identically but "
+                    f"score differently (e.g. {bad_out[:3]}): the graph is not running as it did "
+                    "when the model was built."
+                )
+            if strict:
+                raise GoldenMismatch(f"{self.path.name}: {what}")
+            warnings.warn(
+                f"{self.path.name}: {what}", GoldenMismatchWarning, stacklevel=3
+            )
+        return result
 
     # ── what the artifact says about itself ────────────────────────────────────
 
@@ -238,8 +283,13 @@ class OlindaArtifact:
 
     @property
     def rdkit_version(self) -> str | None:
-        """The RDKit build the featurizer must match."""
-        return (self.metadata.get("featurizer") or {}).get("rdkit_version")
+        """The RDKit release that featurized the model's training data and golden vectors."""
+        return self._rdkit_version
+
+    @property
+    def featurizer_rdkit_version(self) -> str:
+        """The RDKit release that featurizes SMILES here, compiled into olinda's WebAssembly module."""
+        return self._featurizer.rdkit_version
 
     def _column(self, task: str) -> dict:
         for c in self._columns:
@@ -277,46 +327,64 @@ class OlindaArtifact:
 
     @property
     def n_features(self) -> int:
-        """Fingerprint width the graph expects, read from the embedded featurizer config."""
-        return int((self.metadata.get("featurizer") or {}).get("fp_size", 2048))
+        """Fingerprint width the heads read: the qmfp slot count."""
+        return int(self.fingerprint["slots"])
 
     def to_json(self, indent: int = 2) -> str:
         """Everything the file records about itself, as a JSON string.
 
-        This is the raw metadata block, not the curated view :meth:`describe` returns — useful for
-        inspecting or logging exactly what was embedded at fuse time.
+        The raw ``olinda.*`` metadata, parsed, rather than the curated view :meth:`describe` returns —
+        useful for inspecting or logging exactly what was embedded at fuse time.
         """
-        return json.dumps(self.metadata, indent=indent, sort_keys=False, default=str)
+        return json.dumps(
+            {
+                "schema_version": self.schema_version,
+                "fingerprint": self.fingerprint,
+                "rdkit_version": self._rdkit_version,
+                "golden": self._golden,
+                "model": self.metadata,
+            },
+            indent=indent,
+            sort_keys=False,
+            default=str,
+        )
 
     def describe(self) -> dict:
         """A compact summary of the artifact, suitable for logging or display."""
+        if self.golden is None:
+            golden = "skipped"
+        elif self.golden["bytes_differ"] or self.golden["outputs_differ"]:
+            n_bad = len(self.golden["bytes_differ"]) + len(
+                self.golden["outputs_differ"]
+            )
+            golden = f"fail: {n_bad}/{self.golden['n']}"
+        else:
+            golden = "pass"
         return {
             "path": str(self.path),
             "producer": self.metadata.get("producer", "olinda"),
             "olinda_version": self.olinda_version,
             "trained_at": self.trained_at,
             "rdkit_version": self.rdkit_version,
+            "featurizer_rdkit_version": self.featurizer_rdkit_version,
             "n_features": self.n_features,
             "columns": self.columns,
             "has_hard": self.has_hard,
+            "golden": golden,
         }
 
     # ── inference ──────────────────────────────────────────────────────────────
 
-    def featurize(self, smiles) -> np.ndarray:
-        """Morgan count fingerprints for *smiles*, exactly as the model was trained on."""
-        # The featurizer already allocates float32, so this is a view rather than a copy.
-        return np.asarray(
-            self._featurizer.transform([str(s) for s in smiles]), dtype=np.float32
-        )
+    def featurize(self, smiles) -> tuple[np.ndarray, np.ndarray]:
+        """``(uint8 bytes (N, B), bool valid (N,))``: exactly what the graph takes, and which rows parsed."""
+        return self._featurizer.featurize_bytes(_as_smiles_list(smiles))
 
     def _featurized_batches(self, smiles: list[str], batch_size: int, workers: int):
-        """Yield ``(batch, fingerprints)`` in input order, featurizing ahead in *workers* processes.
+        """Yield ``(batch, (bytes, valid))`` in input order, featurizing ahead in *workers* processes.
 
-        Featurization is single-threaded RDKit, about 8,000 molecules a second, and on a one- or
-        two-column model it costs more than the graph. With workers, the next batches are featurized
-        while the caller scores the current one. At most ``workers + 1`` batches are in flight, so memory
-        stays bounded on any input size.
+        Featurization costs more than the graph on a one- or two-column model. With workers, the next
+        batches are featurized while the caller scores the current one. At most ``workers + 1`` batches
+        are in flight, so memory stays bounded on any input size.
         """
         batches = [
             smiles[start : start + batch_size]
@@ -324,7 +392,7 @@ class OlindaArtifact:
         ]
         if workers <= 1 or len(batches) < 2:
             for batch in batches:
-                yield batch, self.featurize(batch)
+                yield batch, self._featurizer.featurize_bytes(batch)
             return
 
         from collections import deque
@@ -357,7 +425,7 @@ class OlindaArtifact:
         batch_size: int = _BATCH,
         progress: bool | None = None,
         workers: int | None = 1,
-    ):
+    ) -> np.ndarray:
         """Predict for a list of SMILES. This is the only way to run the model.
 
         Parameters
@@ -377,22 +445,19 @@ class OlindaArtifact:
 
         Returns
         -------
-        pandas.DataFrame
-            A ``smiles`` column followed by **one column per task** — the prediction, which for a blended
-            column already folds in the hard-label model at the weight it earned. The graph declares
-            nothing else: the pieces behind that number are internal to it by design.
+        numpy.ndarray
+            ``float64 (N, n_columns)``: one row per SMILES, in input order, and **one column per task**
+            in :attr:`columns` order. For a blended column the value already folds in the hard-label
+            model at the weight it earned. The graph declares nothing else: the pieces behind that
+            number are internal to it by design.
 
         Notes
         -----
         Molecules RDKit cannot parse come back as ``NaN``, and a single warning names how many. Their
-        fingerprint is all-zero, which the graph happily scores — the trees take every "bit absent" branch
-        and ``T``'s first layer sees nothing but its own bias — so without this an unparseable input would
-        return a confident-looking number.
+        fingerprint would be all-zero bytes, which the graph happily scores, so without this an
+        unparseable input would return a confident-looking number.
         """
         import os
-        import warnings
-
-        import pandas as pd
 
         smiles = _as_smiles_list(smiles)
         batch_size = int(batch_size)
@@ -401,21 +466,21 @@ class OlindaArtifact:
         workers = (os.cpu_count() or 1) if workers is None else int(workers)
 
         wanted = [c["output"] for c in self._columns]
-        chunks: list[dict] = []
+        out = np.empty((len(smiles), len(wanted)), dtype=np.float64)
         n_invalid = 0
+        start = 0
         with _Progress(len(smiles), enabled=progress) as bar:
-            for batch, fp in self._featurized_batches(smiles, batch_size, workers):
-                invalid = fp.sum(axis=1) == 0
-                n_invalid += int(invalid.sum())
-                outs = self._session.run(None, {self._input_name: fp})
-                block = {
-                    n: np.asarray(v, dtype=np.float64).ravel()
-                    for n, v in zip(self._output_names, outs)
-                }
-                if invalid.any():
-                    for values in block.values():
-                        values[invalid] = np.nan
-                chunks.append(block)
+            for batch, (packed, valid) in self._featurized_batches(
+                smiles, batch_size, workers
+            ):
+                scored = self._run_bytes(packed)
+                block = np.column_stack(
+                    [np.asarray(scored[n], dtype=np.float64).ravel() for n in wanted]
+                )
+                block[~valid] = np.nan
+                n_invalid += int((~valid).sum())
+                out[start : start + len(batch)] = block
+                start += len(batch)
                 bar.advance(len(batch))
 
         if n_invalid:
@@ -424,12 +489,7 @@ class OlindaArtifact:
                 RuntimeWarning,
                 stacklevel=2,
             )
-        if chunks:
-            scored = {n: np.concatenate([c[n] for c in chunks]) for n in wanted}
-        else:
-            scored = {n: np.array([], dtype=np.float64) for n in wanted}
-        values = {c["name"]: scored[c["output"]] for c in self._columns}
-        return pd.DataFrame({"smiles": smiles, **values})
+        return out
 
     def __len__(self) -> int:
         return self.n_columns

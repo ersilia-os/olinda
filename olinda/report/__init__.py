@@ -185,10 +185,10 @@ def _predict(artifact, smiles, echo=None) -> "dict[str, np.ndarray]":
         warnings.simplefilter(
             "ignore", RuntimeWarning
         )  # unparseable SMILES are counted, not warned twice
-        frame = artifact.run(smiles, progress=False)
+        values = artifact.run(smiles, progress=False)
     if echo:
         echo(f"scored [bold]{len(smiles):,}[/] compounds", "run")
-    return {c: frame[c].to_numpy() for c in artifact.columns}
+    return {c: values[:, i] for i, c in enumerate(artifact.columns)}
 
 
 def validate_model(
@@ -252,6 +252,11 @@ def validate_model(
         "notes": [],
         "figures": {"soft": [], "hard": [], "internals": []},
     }
+    if report["model"]["golden"].startswith("fail"):
+        report["notes"].append(
+            f"golden check {report['model']['golden']}: this install does not reproduce the model's "
+            "golden vectors, so the metrics below describe this install, not necessarily the model."
+        )
 
     columns_for = {
         "soft": (soft_smiles_column, soft_label_columns),

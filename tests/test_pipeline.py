@@ -141,11 +141,14 @@ def test_the_artifact_describes_itself(tmp_path, library):
         raise ValueError(f"non-finite {c} is not valid JSON")
 
     # Metrics can be NaN, which Python's json emits as `NaN` and every strict parser rejects.
-    meta = json.loads(artifact.to_json(), parse_constant=reject_constant)
-    assert meta["schema"] == "olinda.bundle.v1"
+    recorded = json.loads(artifact.to_json(), parse_constant=reject_constant)
+    assert recorded["schema_version"] == "1.0"
+    assert recorded["fingerprint"]["type"] == "qmfp"
+    assert recorded["rdkit_version"] == artifact.rdkit_version
+    assert artifact.describe()["golden"] == "pass"
+    meta = recorded["model"]
     assert meta["producer"] == "olinda"
     assert meta["trained_at"].endswith("+00:00")
-    assert meta["featurizer"]["rdkit_version"] == artifact.rdkit_version
     assert [c["name"] for c in meta["columns"]] == artifact.columns
 
     # Every head states its own task rather than leaving it to be inferred from which metrics appear.
@@ -170,7 +173,7 @@ def test_clean_leaves_one_file_and_the_same_predictions(tmp_path, library):
     assert (tmp_path / "run.onnx").is_file() and not run_dir.exists()
 
     after = OlindaArtifact(tmp_path / "run.onnx").run(smiles)
-    pd.testing.assert_frame_equal(before, after)
+    assert np.array_equal(before, after, equal_nan=True)
 
 
 def test_max_samples_limits_every_stage(tmp_path, library):
@@ -246,9 +249,7 @@ def test_a_hard_head_that_earns_no_weight_ships_soft_only(tmp_path, library):
     # Prepare *with* hard labels but stop after the surrogate, so the soft-only prediction is on record
     # before the hard head is ever fused in.
     run_dir = _steps(flat, tmp_path / "run", hard, stop_after="soft")
-    surrogate = (
-        OlindaArtifact(run_dir).run(smiles[:6])["activity_probability"].to_numpy()
-    )
+    surrogate = OlindaArtifact(run_dir).run(smiles[:6])[:, 0]
 
     assert (r := run_cli(["learn-hard", "-m", run_dir])).exit_code == 0, r.output
     meta = json.loads(
@@ -258,7 +259,7 @@ def test_a_hard_head_that_earns_no_weight_ships_soft_only(tmp_path, library):
 
     # The fuse must still produce a working model, and with no weight earned it must predict exactly
     # what the surrogate alone predicted — the hard branch contributes nothing.
-    blended = OlindaArtifact(run_dir).run(smiles[:6])["activity_probability"].to_numpy()
+    blended = OlindaArtifact(run_dir).run(smiles[:6])[:, 0]
     np.testing.assert_allclose(blended, surrogate, atol=1e-12)
     assert np.isfinite(blended).all()
 

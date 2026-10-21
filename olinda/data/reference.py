@@ -1,7 +1,7 @@
 """Load teacher calculations aligned to the reference library.
 
 ``--soft-labels`` is a file with the teacher model's value for every molecule in the reference
-library, in the same order as ``erl0_morgan.h5``: a SMILES column — named ``smiles`` or ``input``,
+library, in the same order as ``erl0_qmfp_r3.h5``: a SMILES column — named ``smiles`` or ``input``,
 else column 0 — followed by the value columns, whatever they are called. This module reads that
 file, verifies the SMILES line up with the HDF5 row order, and returns one value vector per
 column. Callers that know better can name the columns outright rather than rely on the
@@ -110,8 +110,8 @@ def smiles_column_index(df, name: str | None = None) -> int | None:
 
     Parameters
     ----------
-    df : pandas.DataFrame
-        The table to inspect.
+    df : pandas.DataFrame or sequence of str
+        The table to inspect, or just its header: `predict` reads files without pandas.
     name : str, optional
         Take this column as the SMILES instead of guessing. Naming a column that isn't there is an
         error, not a fallback — the caller asked for a specific column and silently using another
@@ -124,12 +124,13 @@ def smiles_column_index(df, name: str | None = None) -> int | None:
         recognised name; callers decide what that means (value-bearing files fall back to column 0,
         while `predict` asks for a named column outright).
     """
-    lower = [str(c).strip().lower() for c in df.columns]
+    columns = list(getattr(df, "columns", df))
+    lower = [str(c).strip().lower() for c in columns]
     if name is not None:
         wanted = str(name).strip().lower()
         if wanted not in lower:
             raise ValueError(
-                f"no column named '{name}'; available={[str(c) for c in df.columns]}"
+                f"no column named '{name}'; available={[str(c) for c in columns]}"
             )
         return lower.index(wanted)
     return next((i for i, name_ in enumerate(lower) if name_ in _SMILES_NAMES), None)

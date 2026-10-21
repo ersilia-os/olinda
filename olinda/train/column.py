@@ -24,7 +24,6 @@ def train_one_column(
     """Train one column's surrogate into ``columns/<id>/``; returns its name, metrics and tree count."""
     from olinda.calibrate import IsotonicCalibrator
     from olinda.data import resolve_regression_weights
-    from olinda.featurizer import MorganCountFeaturizer
     from olinda.metrics import regression_metrics
     from olinda.models import StudentModel
     from olinda.train.plots import save_true_vs_pred
@@ -74,18 +73,16 @@ def train_one_column(
     )
 
     x_dim = int(matrix.n_cols)
-    featurizer = MorganCountFeaturizer(
-        radius=int(manifest["features"].get("radius", 3)), fp_size=x_dim
-    )
     student = StudentModel(
         model=res.model,
         backend=backend_name,
-        featurizer=featurizer,
         metadata={
             "task": "regression",
             "column": col["name"],
             "x_dim": x_dim,
-            "features": manifest["features"].get("features", "morgan"),
+            "features": "qmfp",
+            # How the library was featurized, which the fused model must tell its runtimes.
+            "fingerprint": manifest["features"]["fingerprint"],
             "backend": backend_name,
             "objective": "squarederror",
             "reweight": reweight_info,

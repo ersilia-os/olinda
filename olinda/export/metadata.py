@@ -1,8 +1,22 @@
-"""What the bundle says about itself, in ``metadata_props["olinda"]``.
+"""What the bundle says about itself, in ``metadata_props`` under ``olinda.*`` keys.
 
-The artifact is self-describing: the featurizer config, the RDKit build it needs, each column's task
-and the heads behind it all travel inside the file, because a consumer has no other way to know how
-to build the fingerprint it expects.
+The artifact is self-describing, because a runtime in any language has no other way to know how to
+build the input it expects. Every value is a string; structured ones are JSON:
+
+``olinda.schema_version``
+    ``"MAJOR.MINOR"``. Runtimes refuse a major version they do not know.
+``olinda.fingerprint``
+    The qmfp spec (:mod:`olinda.featurizer.spec`): the RDKit MinimalLib / RDKit.js options that turn
+    SMILES into the graph's input bytes. Runtimes read it rather than hard-coding featurization.
+``olinda.rdkit_version``
+    The RDKit release that featurized training and computed the golden vectors.
+``olinda.golden``
+    SMILES with their fingerprint digests and predictions. A runtime featurizes and scores them on
+    load: agreement shows its RDKit reproduces the training fingerprints, which a version string
+    cannot.
+``olinda.model``
+    Everything else: when and how the model was trained, the reference library, and one entry per
+    column describing its task and the heads behind it.
 """
 
 from __future__ import annotations
@@ -13,9 +27,9 @@ from datetime import datetime, timezone
 from olinda.hard.layout import HARD_DIRNAME, HARD_EVAL_NAME, HARD_META_NAME
 
 MODEL_NAME = "model.onnx"
-# One schema, versioned from here on. Nothing in the wild predates it, so there is no legacy shape to
-# read: OlindaArtifact refuses a bundle it does not recognise and says to re-run `olinda export`.
-BUNDLE_SCHEMA = "olinda.bundle.v1"
+# The metadata layout, versioned. OlindaArtifact refuses a major version it does not know and says to
+# rebuild, rather than reading a different layout field by field and getting it wrong.
+SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "olinda"
 
 
@@ -105,13 +119,11 @@ def _run_backend(plan: list, manifest: dict) -> str | None:
     return None
 
 
-def _bundle_metadata(
-    manifest: dict, plan: list, featurizer: dict, featurizer_class: str
-) -> dict:
-    """Everything a consumer needs, embedded in ``model.onnx`` so the file is the only input required.
+def _bundle_metadata(manifest: dict, plan: list) -> dict:
+    """The ``olinda.model`` block: when the model was trained, from what, and what each column predicts.
 
-    Carries the featurizer (and the RDKit build it must run under), when the model was trained, the
-    reference library it was distilled from, and one entry per column describing that task.
+    The fingerprint and the RDKit release have keys of their own, since every runtime needs them before
+    it can run anything; this block is the rest.
 
     The shape is N-ary throughout: ``columns`` is a list, and a one-endpoint model is simply its
     one-element case. Within a column, every model that contributes is an entry in ``heads``, each
@@ -123,8 +135,6 @@ def _bundle_metadata(
     are all properties of ``columns``, and duplicating them here is how they come to disagree with it.
     """
     import importlib.metadata
-
-    import rdkit
 
     from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME, MORGAN_FINGERPRINTS_URL
 
@@ -152,12 +162,9 @@ def _bundle_metadata(
 
     split = manifest.get("split") or {}
     return {
-        "schema": BUNDLE_SCHEMA,
         "producer": "olinda",
         "olinda_version": olinda_version,
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "featurizer": {**featurizer, "rdkit_version": rdkit.__version__},
-        "featurizer_class": featurizer_class,
         "reference_library": {
             "name": MORGAN_FINGERPRINTS_FILENAME,
             "url": MORGAN_FINGERPRINTS_URL,

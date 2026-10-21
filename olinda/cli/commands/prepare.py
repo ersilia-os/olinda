@@ -109,15 +109,30 @@ def prepare_cmd(
         echo(f"reference library missing · [dim]{descriptors}[/]", "error")
         raise click.ClickException(
             f"Morgan descriptors missing at {descriptors} — run `olinda setup` "
-            "(or scripts/compute_morgan_fingerprints.py to generate them locally)."
+            "(or scripts/compute_qmfp_library.py to generate them locally)."
         )
 
-    features = {"features": "morgan"}
+    import json
+
+    from olinda.featurizer import validate_spec
+
     with h5py.File(descriptors, "r") as f:
         n_rows, dim = int(f["data"].shape[0]), int(f["data"].shape[1])
-        for k in ("radius", "nbits"):
-            if k in f.attrs:
-                features[k] = int(f.attrs[k])
+        raw_spec = f.attrs.get("fingerprint")
+    # The library records how it was featurized, and every model trained on it inherits that spec:
+    # it is what olinda.fingerprint tells runtimes. A library without one predates qmfp.
+    try:
+        spec = validate_spec(json.loads(raw_spec))
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(
+            f"{descriptors} records no usable qmfp fingerprint spec ({exc}) — it is not a library "
+            "this olinda can train on. Run `olinda setup` for the current one."
+        ) from exc
+    if int(spec["slots"]) != dim:
+        raise click.ClickException(
+            f"{descriptors} has {dim}-wide rows but its spec says {spec['slots']} slots"
+        )
+    features = {"features": "qmfp", "fingerprint": spec}
 
     n_steps = 3 if hard_labels is not None else 2
 
@@ -212,6 +227,7 @@ def prepare_cmd(
                 {h: name_to_id[s] for h, s in hard_map.items()},
                 task=task,
                 smiles_column=hard_smiles_column,
+                spec=spec,
             )
         except (ValueError, NotImplementedError) as exc:
             raise click.ClickException(str(exc)) from exc

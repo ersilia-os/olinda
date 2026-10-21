@@ -56,23 +56,37 @@ LIBRARY_ROWS = 240
 SUFFIX = "_probability"
 
 
-def write_library(home: Path, n_rows: int = LIBRARY_ROWS):
-    """Write a synthetic ``erl0_morgan.h5`` into *home*; return ``(smiles, fingerprints)``.
+def write_library(home: Path, n_rows: int = LIBRARY_ROWS, smiles=None):
+    """Write a synthetic reference library into *home*; return ``(smiles, fingerprints)``.
 
-    The layout is exactly what `olinda setup` downloads: a ``data`` matrix of uint8 Morgan counts and a
-    row-aligned ``input`` dataset of SMILES, which is the file's source of truth for order.
+    *smiles* gives the library's molecules outright; otherwise :data:`SMILES` is repeated to *n_rows*.
+
+    The layout is exactly what `olinda setup` downloads: a ``data`` matrix of decoded qmfp slot values,
+    a ``valid`` mask, a row-aligned ``input`` dataset of SMILES (the file's source of truth for order)
+    and the fingerprint spec in the attributes.
     """
+    import json
+
     import h5py
     import numpy as np
 
-    from olinda.featurizer import MorganCountFeaturizer
+    from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME
+    from olinda.featurizer import QMFP_SPEC, QmfpFeaturizer
+    from olinda.featurizer.codec import decode
 
     home.mkdir(parents=True, exist_ok=True)
-    smiles = (SMILES * ((n_rows // len(SMILES)) + 1))[:n_rows]
-    x = MorganCountFeaturizer().transform(smiles).astype(np.uint8)
-    with h5py.File(home / "erl0_morgan.h5", "w") as f:
+    if smiles is None:
+        smiles = (SMILES * ((n_rows // len(SMILES)) + 1))[:n_rows]
+    smiles = list(smiles)
+    featurizer = QmfpFeaturizer(QMFP_SPEC)
+    packed, valid = featurizer.featurize_bytes(smiles)
+    x = decode(packed)
+    with h5py.File(home / MORGAN_FINGERPRINTS_FILENAME, "w") as f:
         f.create_dataset("data", data=x)
+        f.create_dataset("valid", data=valid)
         f.create_dataset("input", data=np.array([s.encode() for s in smiles]))
+        f.attrs["fingerprint"] = json.dumps(QMFP_SPEC)
+        f.attrs["rdkit_version"] = featurizer.rdkit_version
     return smiles, x
 
 
@@ -210,27 +224,27 @@ def build_artifact(
     import numpy as np
 
     from olinda import run as runlib
+    from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME
     from olinda.export import build_bundle
-    from olinda.featurizer import MorganCountFeaturizer
+    from olinda.featurizer import QMFP_SPEC, QmfpFeaturizer
     from olinda.models import StudentModel
     from olinda.train.backend import get_backend, select_backend
 
     previous = os.environ.get("OLINDA_BACKEND")
     os.environ["OLINDA_BACKEND"] = backend
     try:
-        featurizer = MorganCountFeaturizer()
         smiles = (SMILES * 4)[:96]
-        x = featurizer.transform(smiles).astype(np.float32)
+        x = QmfpFeaturizer(QMFP_SPEC).transform(smiles).astype(np.float32)
 
         manifest = runlib.new_manifest(
             soft_labels="soft.csv",
             hard_labels=None,
             reference={
-                "name": "erl0_morgan.h5",
+                "name": MORGAN_FINGERPRINTS_FILENAME,
                 "n_rows": len(smiles),
                 "dim": int(x.shape[1]),
             },
-            features={"features": "morgan", "radius": 3},
+            features={"features": "qmfp", "fingerprint": QMFP_SPEC},
             val_frac=0.2,
             seed=42,
             limit=None,
@@ -251,15 +265,13 @@ def build_artifact(
             StudentModel(
                 model=res.model,
                 backend=name,
-                featurizer=featurizer,
                 metadata={
                     "task": "regression",
                     "column": col_name,
                     "x_dim": int(x.shape[1]),
-                    "features": "morgan",
+                    "features": "qmfp",
                     "backend": name,
-                    "featurizer": featurizer.to_dict(),
-                    "featurizer_class": "MorganCountFeaturizer",
+                    "fingerprint": QMFP_SPEC,
                 },
             ).save(runlib.column_dir(run_dir, entry["id"]))
 
@@ -296,12 +308,14 @@ def artifact(tmp_path_factory) -> Path:
     return build_artifact(tmp_path_factory.mktemp("artifact"))
 
 
-def corrupt_metadata(source: Path, dest: Path, mutate=None) -> Path:
-    """Copy *source* to *dest*, editing its olinda metadata block with *mutate* (or removing it).
+def corrupt_metadata(
+    source: Path, dest: Path, mutate=None, key: str = "olinda.model"
+) -> Path:
+    """Copy *source* to *dest*, editing one ``olinda.*`` metadata entry with *mutate* (or removing it).
 
-    ``mutate`` receives the parsed dict and edits it in place. Pass no mutator to strip the block
-    altogether. This is how the load-time guards get exercised — there is no other way to produce a file
-    that lies about itself.
+    ``mutate`` receives the parsed value and either edits it in place or returns a replacement. Pass no
+    mutator to remove the entry. This is how the load-time guards get exercised — there is no other way
+    to produce a file that lies about itself.
     """
     import json as _json
 
@@ -309,14 +323,23 @@ def corrupt_metadata(source: Path, dest: Path, mutate=None) -> Path:
 
     model = onnx.load(str(source))
     for prop in list(model.metadata_props):
-        if prop.key != "olinda":
+        if prop.key != key:
             continue
         if mutate is None:
             model.metadata_props.remove(prop)
-        else:
-            meta = _json.loads(prop.value)
-            mutate(meta)
-            prop.value = _json.dumps(meta)
+            continue
+        # Structured entries are JSON; olinda.schema_version and olinda.rdkit_version are plain strings.
+        # ("1.0" happens to parse as JSON, so only objects and lists count as structured.)
+        try:
+            value = _json.loads(prop.value)
+            is_json = isinstance(value, (dict, list))
+        except ValueError:
+            is_json = False
+        if not is_json:
+            value = prop.value
+        replaced = mutate(value)
+        value = value if replaced is None else replaced
+        prop.value = _json.dumps(value) if is_json else str(value)
     onnx.save(model, str(dest))
     return dest
 
@@ -369,7 +392,7 @@ def peek_internals(artifact_path, smiles, names) -> dict:
     import onnxruntime as ort
     from onnx import TensorProto, helper
 
-    from olinda.featurizer import MorganCountFeaturizer
+    from olinda.featurizer import QMFP_SPEC, QmfpFeaturizer
 
     artifact_path = Path(artifact_path)
     model = onnx.load(str(artifact_path))
@@ -385,6 +408,6 @@ def peek_internals(artifact_path, smiles, names) -> dict:
     options = ort.SessionOptions()
     options.log_severity_level = 3
     sess = ort.InferenceSession(str(tmp), options, providers=["CPUExecutionProvider"])
-    fp = MorganCountFeaturizer().transform([str(s) for s in smiles]).astype(np.float32)
-    outs = sess.run(None, {"input": fp})
+    packed, _ = QmfpFeaturizer(QMFP_SPEC).featurize_bytes([str(s) for s in smiles])
+    outs = sess.run(None, {"input": packed})
     return {o.name: np.asarray(v).ravel() for o, v in zip(sess.get_outputs(), outs)}

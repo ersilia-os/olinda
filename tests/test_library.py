@@ -40,7 +40,9 @@ def test_library_matches_the_h5_it_read(library, tmp_path):
     out = tmp_path / "reference.csv"
     assert run_cli(["library", "-o", out]).exit_code == 0
 
-    with h5py.File(home / "erl0_morgan.h5", "r") as handle:
+    from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME
+
+    with h5py.File(home / MORGAN_FINGERPRINTS_FILENAME, "r") as handle:
         expected = list(handle["input"].asstr())
 
     _, written = _read(out)

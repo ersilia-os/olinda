@@ -17,8 +17,11 @@ _PARITY_LABELLED = (
 )
 
 
-def _parity_probe(plan: list) -> np.ndarray:
-    """Fingerprints to check the fused graph against the Python pipeline.
+def _parity_probe(plan: list, spec: dict) -> tuple[np.ndarray, np.ndarray]:
+    """``(bytes, fingerprints)`` to check the fused graph against the Python pipeline.
+
+    The graph gets the bytes, the Python reference gets the decoded fingerprints, so the check covers
+    the graph's own decoder as well as every head.
 
     A handful of fixed molecules is not enough on its own: ``T`` may score them all
     zero, in which case the blend collapses to the surrogate and the hard model, its calibrator and the
@@ -28,16 +31,19 @@ def _parity_probe(plan: list) -> np.ndarray:
     """
     import h5py
 
-    from olinda.featurizer import MorganCountFeaturizer
+    from olinda.featurizer import QmfpFeaturizer
+    from olinda.featurizer.codec import decode, pack
 
-    blocks = [MorganCountFeaturizer().transform(_SAMPLE_SMILES).astype(np.float32)]
+    blocks = [QmfpFeaturizer(spec).featurize_bytes(_SAMPLE_SMILES)[0]]
     for entry in plan:
         hard = entry["dir"] / HARD_H5_NAME
         if not entry["has_hard"] or not hard.exists():
             continue
         with h5py.File(hard, "r") as f:
-            blocks.append(np.asarray(f["x"][:_PARITY_LABELLED], dtype=np.float32))
-    return np.concatenate(blocks, axis=0)
+            # stored decoded, so packed back into the bytes a runtime would send
+            blocks.append(pack(np.asarray(f["x"][:_PARITY_LABELLED], dtype=np.uint8)))
+    packed = np.concatenate(blocks, axis=0)
+    return packed, decode(packed).astype(np.float32)
 
 
 def _assert_model_belongs_to(sm, entry: dict) -> None:

@@ -218,7 +218,7 @@ def draw_distillation(ax) -> None:
         80,
         26,
         20,
-        "REFERENCE LIBRARY\n~1.4M compounds\n2048-d Morgan counts",
+        "REFERENCE LIBRARY\n~1.4M compounds\n2048-slot qmfp",
         DATA,
         bold_first=True,
     )
@@ -280,7 +280,7 @@ def draw_pipeline(ax) -> None:
     _canvas(ax)
 
     steps = [
-        ("setup", "erl0_morgan.h5\nreference fingerprints", False),
+        ("setup", "erl0_qmfp_r3.h5\nreference fingerprints", False),
         ("prepare", "manifest.json\ntargets.h5 · splits.h5", False),
         ("tune", "best_params.json", True),
         ("learn-soft", "columns/<id>/\nbooster · metrics · plots", False),

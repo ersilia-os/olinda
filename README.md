@@ -9,18 +9,22 @@ gradient-boosting student to reproduce it, and ship the result as a single ONNX 
 Olinda is pip-installable:
 
 ```bash
-pip install olinda                 # use the base install if you only need to run Olinda at inference type
-pip install "olinda[report]"       # add plotting functionalities in case you need a report on validation data
-pip install "olinda[train]"        # install training capabilities (e.g. XGBoost)
+pip install olinda                 # run models from Python: numpy, onnxruntime and wasmtime, nothing else
+pip install "olinda[cli]"          # add the `olinda` command
+pip install "olinda[report]"       # add validation reports and their figures
+pip install "olinda[train]"        # add training (XGBoost, LightGBM)
 ```
 
-Check that Olinda is correctly installed:
+No install needs RDKit: Olinda featurizes molecules with RDKit compiled to WebAssembly, which ships
+inside the package.
+
+Check that the command-line tool is installed:
 
 ```bash
 olinda --help
 ```
 
-Before getting started, you need to download the pre-calculated Morgan fingerprints for a reference library (1.4M compounds; 2.8GB):
+Before distilling, download the pre-calculated fingerprints of the reference library (1.4M compounds; 2.8GB):
 
 ```bash
 olinda setup
@@ -34,7 +38,7 @@ A distilled model is one self-describing ONNX file. You can load and run the mod
 from olinda import OlindaArtifact
 
 model = OlindaArtifact("model.onnx")
-model.run(["CCO", "c1ccccc1"])
+model.run(["CCO", "c1ccccc1"])  # one row per molecule, one column per task (model.columns)
 ```
 
 Alternatively, you can use the CLI:

@@ -175,7 +175,12 @@ def write_report(out_dir: str | Path, report: dict) -> Path:
             ("Tasks", ", ".join(meta["columns"])),
             ("Trained", meta.get("trained_at") or "—"),
             ("olinda", meta.get("olinda_version") or "—"),
-            ("RDKit", meta.get("rdkit_version") or "—"),
+            ("RDKit (training)", meta.get("rdkit_version") or "—"),
+            (
+                "RDKit (featurizer)",
+                f"{meta.get('featurizer_rdkit_version') or '—'} (WebAssembly)",
+            ),
+            ("Golden check", meta.get("golden") or "—"),
             ("Backend", meta.get("backend") or "—"),
             ("Hard-label head", "yes" if meta.get("has_hard") else "no"),
         ],

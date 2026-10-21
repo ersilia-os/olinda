@@ -7,13 +7,22 @@ on:
     types: [published]
 
 jobs:
+  # The WebAssembly featurizer is built from wasm/ (or restored from cache) and packed into the wheel.
+  wasm:
+    uses: ./.github/workflows/wasm.yml
+
   publish:
+    needs: wasm
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write # trusted publishing; no API token stored in the repo
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rdkit-qmfp-wasm
+          path: olinda/featurizer
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -39,6 +48,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build
+
+      # A wheel without its featurizer installs fine and fails on the first SMILES. Refuse to publish
+      # one, and prove the published wheel runs: featurize through the module it carries.
+      - name: Check the wheel carries a working featurizer
+        run: |
+          unzip -l dist/*.whl | grep -q "olinda/featurizer/rdkit_qmfp.wasm"
+          tar tzf dist/*.tar.gz | grep -q "olinda/featurizer/rdkit_qmfp.wasm"
+          python -m venv /tmp/check
+          /tmp/check/bin/pip install dist/*.whl
+          cd /tmp && /tmp/check/bin/python -c "
+          from olinda.featurizer import QmfpFeaturizer
+          b, v = QmfpFeaturizer().featurize_bytes(['CCO'])
+          assert v.all() and b.any(), 'the packed featurizer does not work'
+          print('featurizer OK, RDKit', QmfpFeaturizer().rdkit_version)
+          "
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

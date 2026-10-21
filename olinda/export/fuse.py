@@ -1,8 +1,9 @@
 """Stitch every column's stages into ONE graph, with one output per column.
 
-``S``, ``H_S`` and the weight ``a`` stay internal tensors here: they are how the answer is computed,
-not part of the answer. Each column's nodes and tensors are namespaced by its id so ten columns can
-share a graph without colliding.
+The graph's input is qmfp bytes, exactly what RDKit MinimalLib or RDKit.js returns; a decoder at the
+front turns them into the float fingerprint every head reads. ``S``, ``H_S`` and the weight ``a`` stay
+internal tensors: they are how the answer is computed, not part of the answer. Each column's nodes and
+tensors are namespaced by its id so ten columns can share a graph without colliding.
 """
 
 from __future__ import annotations
@@ -10,11 +11,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from olinda.export.decoder import DECODED, qmfp_decoder_nodes
 from olinda.export.gate import _tanimoto_model
 from olinda.export.graph import _OPSET, _toposort
 from olinda.export.heads import _blender_model, _prob1_model, _soft_model_proto
 from olinda.export.isotonic import _isotonic_model
-from olinda.export.metadata import PRODUCER_NAME, _bundle_metadata
+from olinda.export.metadata import PRODUCER_NAME, SCHEMA_VERSION, _bundle_metadata
 from olinda.export.parity import _assert_model_belongs_to
 from olinda.hard.layout import (
     H_TO_S_NAME,
@@ -77,7 +79,7 @@ def _fuse(model_dir: Path):
     from onnx.compose import add_prefix
 
     from olinda.calibrate import IsotonicCalibrator
-    from olinda.featurizer import featurizer_from_meta
+    from olinda.featurizer import n_input_bytes, validate_spec
     from olinda.models.bundle import StudentModel
     from olinda.tanimoto import TanimotoRegressor
 
@@ -113,27 +115,37 @@ def _fuse(model_dir: Path):
         """Reshape a tree's (N,1) output to (N,), so it lines up with the downstream stages."""
         return helper.make_node("Reshape", [src, "flat_shape"], [dst], name=f"fl_{dst}")
 
-    featurizer: dict = {}
-    featurizer_class = "MorganCountFeaturizer"
-    n_features = 2048
+    students = []
+    for entry in plan:
+        sm = StudentModel.load(entry["dir"])
+        _assert_model_belongs_to(sm, entry)
+        students.append(sm)
+    # One graph, one input, so every column must have been trained on the same fingerprint.
+    specs = {
+        json.dumps(sm.metadata.get("fingerprint"), sort_keys=True) for sm in students
+    }
+    if len(specs) != 1:
+        raise ValueError(
+            f"{model_dir}: columns were trained on different fingerprints; re-run `olinda prepare`"
+        )
+    spec = validate_spec(students[0].metadata["fingerprint"])
+    n_features = int(spec["slots"])
+
+    # The decoder sits in front of everything: uint8 bytes in, the float fingerprint (DECODED) out.
+    dec_nodes, dec_inits = qmfp_decoder_nodes(spec, in_name="input")
+    nodes.extend(dec_nodes)
+    inits.extend(dec_inits)
     outputs: list[str] = []
 
-    for entry in plan:
+    for entry, sm in zip(plan, students):
         p = (
             entry["id"] + "_"
         )  # every node and tensor of this column is namespaced by it
-        sm = StudentModel.load(entry["dir"], featurizer_factory=featurizer_from_meta)
-        _assert_model_belongs_to(sm, entry)
-        featurizer = sm.metadata.get("featurizer") or featurizer
-        featurizer_class = sm.metadata.get("featurizer_class", featurizer_class)
-        n_features = int(
-            featurizer.get("fp_size", sm.metadata.get("x_dim", n_features))
-        )
         x_dim = int(sm.metadata.get("x_dim") or n_features)
 
-        # soft branch: input → soft_model → [soft correction] → surrogate (double)
+        # soft branch: fingerprint → soft_model → [soft correction] → surrogate (double)
         collect(_soft_model_proto(sm, x_dim, entry["dir"]), f"{p}sm")
-        nodes.append(ident("input", f"{p}sm__input"))
+        nodes.append(ident(DECODED, f"{p}sm__input"))
         nodes.append(flat(f"{p}sm__variable", f"{p}soft_raw"))
         soft_raw = f"{p}soft_raw"
         if (
@@ -154,7 +166,7 @@ def _fuse(model_dir: Path):
             collect(
                 onnx.load(str(hard_root / HARD_MODEL_SUBDIR / "xgboost.onnx")), f"{p}hm"
             )
-            nodes.append(ident("input", f"{p}hm__float_input"))
+            nodes.append(ident(DECODED, f"{p}hm__float_input"))
             if (
                 hard_task == "regression"
             ):  # seam: an H regressor exposes a single "variable" output
@@ -172,7 +184,7 @@ def _fuse(model_dir: Path):
 
             clf = TanimotoRegressor.load(hard_root / TANIMOTO_DIRNAME)
             collect(_tanimoto_model(clf, n_features, "input", "a"), f"{p}t")
-            nodes.append(ident("input", f"{p}t__input"))
+            nodes.append(ident(DECODED, f"{p}t__input"))
             nodes.append(ident(f"{p}t__a", f"{p}a"))
 
             collect(_blender_model(), f"{p}bl")
@@ -197,7 +209,7 @@ def _fuse(model_dir: Path):
         "olinda_model",
         [
             helper.make_tensor_value_info(
-                "input", TensorProto.FLOAT, ["B", int(n_features)]
+                "input", TensorProto.UINT8, ["B", n_input_bytes(spec)]
             )
         ],
         out_vi,
@@ -206,7 +218,7 @@ def _fuse(model_dir: Path):
     model = helper.make_model(
         graph, opset_imports=[helper.make_opsetid(d, v) for d, v in opset.items()]
     )
-    md = _bundle_metadata(manifest, plan, featurizer, featurizer_class)
+    md = _bundle_metadata(manifest, plan)
 
     # Standard ONNX provenance, so the file identifies itself to any tool (Netron, hub tooling, the
     # onnx CLI) without them having to know about the custom metadata key below.
@@ -215,10 +227,27 @@ def _fuse(model_dir: Path):
     model.domain = "io.ersilia.olinda"
     model.doc_string = (
         f"Distilled model produced by olinda {md.get('olinda_version')} on {md.get('trained_at')}. "
-        f"Input: {int(n_features)}-d Morgan count fingerprint "
-        f"(RDKit {md['featurizer'].get('rdkit_version')}). Outputs: {', '.join(outputs)}."
+        f"Input: uint8 ({n_input_bytes(spec)},) qmfp bytes, radius {spec['radius']}, as RDKit "
+        f"MinimalLib's get_morgan_fp_as_bytes returns them. Outputs: {', '.join(outputs)}."
     )
-    entry_prop = model.metadata_props.add()
-    # json_safe first: metrics can carry NaN, which strict JSON parsers in other languages reject.
-    entry_prop.key, entry_prop.value = "olinda", json.dumps(json_safe(md))
+    # json_safe first: metrics can carry NaN, which strict JSON parsers in other languages reject. The
+    # golden vectors are added by build_bundle, which needs the finished graph to compute them.
+    set_props(
+        model,
+        {
+            "olinda.schema_version": SCHEMA_VERSION,
+            "olinda.fingerprint": json.dumps(spec),
+            "olinda.model": json.dumps(json_safe(md)),
+        },
+    )
     return model, plan, outputs
+
+
+def set_props(model, props: dict) -> None:
+    """Set ``metadata_props`` entries, replacing any with the same key."""
+    keep = [p for p in model.metadata_props if p.key not in props]
+    del model.metadata_props[:]
+    model.metadata_props.extend(keep)
+    for key, value in props.items():
+        entry = model.metadata_props.add()
+        entry.key, entry.value = key, value

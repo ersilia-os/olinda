@@ -4,11 +4,11 @@ olinda's surrogate ``S(x)`` distills a teacher's *soft* labels. When real experi
 the same endpoint are available, ``learn-hard`` runs four steps, each printed clearly:
 
 1. **Train ``H``** — a binary hard-label classifier: a plain, portfolio-selected XGBoost booster via `lazy-qsar
-   <https://github.com/ersilia-os/lazy-qsar>`_'s ``BaseXGBClassifier(calibrated=False)`` on olinda's Morgan
-   count fingerprints (:class:`~olinda.featurizer.MorganCountFeaturizer`). Output is raw ``predict_proba`` —
+   <https://github.com/ersilia-os/lazy-qsar>`_'s ``BaseXGBClassifier(calibrated=False)`` on olinda's qmfp
+   fingerprints (:class:`~olinda.featurizer.QmfpFeaturizer`). Output is raw ``predict_proba`` —
    lazy-qsar's internal probability calibrator is off. (Continuous hard labels are a raises-for-now
    placeholder — see :func:`_new_hard_model`.)
-2. **Score ``H`` across the reference library** (``erl0_morgan.h5``) → one hard score per reference
+2. **Score ``H`` across the reference library** (``erl0_qmfp_r3.h5``) → one hard score per reference
    compound, saved to ``h_reference.h5``.
 3. **Calibrate** ``H`` onto the soft-label scale — a monotonic isotonic map fit on the reference library
    (where both ``H``'s score and the teacher's soft label exist), with the **direction learned from the
