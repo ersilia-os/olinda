@@ -371,7 +371,7 @@ def draw_model_onnx(ax) -> None:
         zorder=3,
     )
 
-    # featurization is the one stage that cannot live in the graph
+    # featurization runs beside the graph, as RDKit compiled to WebAssembly; the graph takes its bytes
     _box(ax, 9, 66, 15, 11, "SMILES", DATA)
     _box(
         ax,
@@ -379,36 +379,38 @@ def draw_model_onnx(ax) -> None:
         46,
         16,
         14,
-        "RDKit\nMorgan featurizer",
+        "rdkit_qmfp.wasm\nRDKit in WebAssembly",
         DATA,
         dashed=True,
         bold_first=True,
     )
     _arrow(ax, (9, 60.5), (9, 53), color=DATA)
-    _note(ax, 9, 33, "stays in Python\nRDKit has no ONNX op", color=DATA)
-    _arrow(ax, (17, 46), (21, 46), color=DATA)
-    _note(ax, 19.5, 51, "2048 counts", color=DATA)
+    _note(ax, 9, 33, "beside the graph:\nPython, Node or a browser", color=DATA)
+    _arrow(ax, (17, 46), (25.5, 46), color=DATA)
+    _note(ax, 21, 51, "1024 bytes", color=DATA)
 
-    # three heads, fed from the same fingerprint
-    _box(ax, 36, 66, 17, 13, "S · surrogate\nGBM", STUDENT, bold_first=True)
-    _box(ax, 36, 44, 17, 13, "H · hard model\nGBM", TEACHER, bold_first=True)
-    _box(ax, 36, 24, 17, 13, "T · Tanimoto\nMLP", TANIMOTO, bold_first=True)
+    # the decoder unpacks two 4-bit counts per byte into the fingerprint all three heads read
+    _box(ax, 29, 46, 6.5, 30, "decoder\n2048\ncounts", BUNDLE, fill=0.16)
+
+    _box(ax, 41, 66, 15, 13, "S · surrogate\nGBM", STUDENT, bold_first=True)
+    _box(ax, 41, 44, 15, 13, "H · hard model\nGBM", TEACHER, bold_first=True)
+    _box(ax, 41, 24, 15, 13, "T · Tanimoto\nMLP", TANIMOTO, bold_first=True)
     for y in (66, 44, 24):
-        _arrow(ax, (21.5, 46), (27, y), color=DATA)
+        _arrow(ax, (32.25, 46 + (y - 46) * 0.25), (33.5, y), color=DATA)
 
-    _box(ax, 57, 66, 15, 12, "isotonic\ncorrection", STUDENT, fill=0.09)
-    _box(ax, 57, 44, 15, 12, "isotonic\nH → H_S", TEACHER, fill=0.09)
-    _arrow(ax, (44.5, 66), (49.5, 66), color=STUDENT)
-    _arrow(ax, (44.5, 44), (49.5, 44), color=TEACHER, label="H", label_dy=1.8)
+    _box(ax, 59, 66, 13, 12, "isotonic\ncorrection", STUDENT, fill=0.09)
+    _box(ax, 59, 44, 13, 12, "isotonic\nH → H_S", TEACHER, fill=0.09)
+    _arrow(ax, (48.5, 66), (52.5, 66), color=STUDENT)
+    _arrow(ax, (48.5, 44), (52.5, 44), color=TEACHER)
 
     # everything converges on the blend
     _box(ax, 73, 44, 12, 20, "blend", OUT, bold_first=False)
-    _arrow(ax, (64.5, 66), (69, 50), color=STUDENT)
-    _note(ax, 63, 57, "S", color=STUDENT, ha="right")
-    _arrow(ax, (64.5, 44), (67, 44), color=TEACHER)
-    _note(ax, 57, 35, "h_s", color=TEACHER)
-    _arrow(ax, (44.5, 24), (69, 38), elbow="angle_h", color=TANIMOTO)
-    _note(ax, 56, 20, "a", color=TANIMOTO)
+    _arrow(ax, (65.5, 66), (69, 50), color=STUDENT)
+    _note(ax, 66, 58, "S", color=STUDENT, ha="right")
+    _arrow(ax, (65.5, 44), (67, 44), color=TEACHER)
+    _note(ax, 59, 35, "H_S", color=TEACHER)
+    _arrow(ax, (48.5, 24), (69, 38), elbow="angle_h", color=TANIMOTO)
+    _note(ax, 58, 20, "a", color=TANIMOTO)
 
     _arrow(ax, (79, 44), (86, 44), color=OUT)
     _box(ax, 93, 44, 13, 13, "prediction", OUT)
@@ -425,16 +427,15 @@ def draw_model_onnx(ax) -> None:
         ax,
         52,
         9,
-        "one graph output per teacher column, named after it — plus the channels above, so a report can "
-        "show them",
+        "one graph output per teacher column, named after it — S, H_S and a stay internal",
         color=DATA,
     )
     _note(
         ax,
         52,
         4,
-        "metadata_props carries the featurizer config, the RDKit version and the reference library — "
-        "so predict refuses a mismatched RDKit",
+        "metadata_props carries the fingerprint spec and golden vectors — on load, the runtime "
+        "re-featurizes and re-scores them",
         color=DATA,
     )
 

@@ -48,7 +48,7 @@ olinda predict --model-onnx model.onnx --input my_smiles.csv --output my_output.
 ```
 
 Or, with nothing installed, in the browser at [ersilia-os.github.io/olinda](https://ersilia-os.github.io/olinda/):
-upload the `model.onnx` (or try the built-in example model), paste SMILES, and get the predictions as a table. It all runs locally in the browser;
+upload the `model.onnx`, paste SMILES, and get the predictions as a table. It all runs locally in the browser;
 the model and the molecules never leave your machine.
 
 ## Distilling a model
@@ -63,7 +63,7 @@ Use the following command to obtain a 1-column file with the SMILES structures o
 olinda library -o ersilia_reference_library.csv
 ```
 
-Use this file to make predictions with your model of choice. Feel free to explore models from the [Ersilia Model Hub](https://catalog.ersilia.io), or models trained with [ZairaChem](https://github.com/ersilia-os/zaira-chem). We refer to the result of this predictions as **soft labels**.
+Use this file to make predictions with your model of choice. Feel free to explore models from the [Ersilia Model Hub](https://catalog.ersilia.io), or models trained with [ZairaChem](https://github.com/ersilia-os/zaira-chem). We refer to the result of these predictions as **soft labels**.
 
 ### Training a distilled model
 
@@ -115,4 +115,4 @@ commands need `olinda[train]`.
 
 The [Ersilia Open Source Initiative](https://ersilia.io) is a tech-nonprofit organization fueling sustainable research in the Global South. Ersilia's main asset is the [Ersilia Model Hub](https://github.com/ersilia-os/ersilia), an open-source repository of AI/ML models for antimicrobial drug discovery.
 
-![Ersilia Logo](assets/Ersilia_Plum.png)
+![Ersilia Logo](assets/Ersilia_Brand.png)
