@@ -61,7 +61,8 @@ def predict_file(
     values = model.run(smiles, workers=workers)
     out_path = Path(out_path)
     with open(out_path, "w", newline="") as fp:
-        writer = csv.writer(fp)
+        # \n line endings, as pandas wrote them before; csv's default is \r\n
+        writer = csv.writer(fp, lineterminator="\n")
         writer.writerow(["smiles", *model.columns])
         for smi, row in zip(smiles, values):
             writer.writerow(

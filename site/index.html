@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>olinda</title>
+<link rel="icon" href="data:,">
+</head>
+<body>
+<h1>olinda</h1>
+<p>Run a distilled <a href="https://github.com/ersilia-os/olinda">olinda</a> model on SMILES. Everything
+runs in this browser: the model and the molecules never leave your machine.</p>
+
+<p><label>Model (<code>model.onnx</code>)<br>
+<input type="file" id="model" accept=".onnx"></label></p>
+
+<p><label>SMILES, one per line<br>
+<textarea id="smiles" rows="12" cols="80" spellcheck="false">CCO
+c1ccccc1
+CC(=O)Oc1ccccc1C(=O)O</textarea></label></p>
+
+<p><button id="run" disabled>Predict</button></p>
+
+<p id="status">Loading the featurizer…</p>
+
+<p><a id="download" hidden download="predictions.csv">Download CSV</a></p>
+
+<table id="results" border="1" hidden></table>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

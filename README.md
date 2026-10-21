@@ -9,16 +9,16 @@ gradient-boosting student to reproduce it, and ship the result as a single ONNX 
 Olinda is pip-installable:
 
 ```bash
-pip install olinda                 # run models from Python: numpy, onnxruntime and wasmtime, nothing else
-pip install "olinda[cli]"          # add the `olinda` command
-pip install "olinda[report]"       # add validation reports and their figures
-pip install "olinda[train]"        # add training (XGBoost, LightGBM)
+pip install olinda                 # run models from Python: numpy, onnxruntime, wasmtime
+pip install "olinda[cli]"          # + the `olinda` command: click, rich-click, rich, loguru, tqdm
+pip install "olinda[report]"       # + `olinda validate` and its figures: pandas, pyarrow, matplotlib, onnx, stylia
+pip install "olinda[train]"        # + distillation: XGBoost, LightGBM, lazy-qsar, Optuna, onnxmltools, h5py
 ```
 
-No install needs RDKit: Olinda featurizes molecules with RDKit compiled to WebAssembly, which ships
-inside the package.
+Each extra includes the one above it, so `olinda[train]` installs everything. No install needs RDKit:
+Olinda featurizes molecules with RDKit compiled to WebAssembly, which ships inside the package.
 
-Check that the command-line tool is installed:
+Check that the command-line tool is installed (it needs `olinda[cli]` or above):
 
 ```bash
 olinda --help
@@ -46,6 +46,10 @@ Alternatively, you can use the CLI:
 ```bash
 olinda predict --model-onnx model.onnx --input my_smiles.csv --output my_output.csv
 ```
+
+Or, with nothing installed, in the browser at [ersilia-os.github.io/olinda](https://ersilia-os.github.io/olinda/):
+upload the `model.onnx`, paste SMILES, and get the predictions as a table. It all runs locally in the browser;
+the model and the molecules never leave your machine.
 
 ## Distilling a model
 
@@ -84,6 +88,9 @@ olinda validate --soft-labels my_validation_soft_labels.csv --model-onnx my_mode
 ```
 
 ## Commands
+
+The `olinda` command comes with `olinda[cli]`; `validate` also needs `olinda[report]`, and the distilling
+commands need `olinda[train]`.
 
 | Command | What it does |
 |---|---|

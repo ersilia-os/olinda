@@ -1,0 +1,92 @@
+name: pages
+
+# The web page at https://ersilia-os.github.io/olinda/: paste SMILES, upload a model.onnx, get a table.
+# Everything runs in the visitor's browser with the same WebAssembly RDKit the Python package ships, so
+# the page is only deployed after it has reproduced olinda's Python predictions on a fixture model.
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "wasm/**", ".github/workflows/pages.yml", ".github/workflows/wasm.yml"]
+  pull_request:
+    paths: ["site/**", "wasm/**", ".github/workflows/pages.yml", ".github/workflows/wasm.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ORT_WEB: "1.30.0" # onnxruntime-web, vendored into the page so it depends on no CDN at run time
+
+jobs:
+  wasm:
+    uses: ./.github/workflows/wasm.yml
+
+  build:
+    needs: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rdkit-qmfp-wasm
+          path: olinda/featurizer
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # rdkit_qmfp.wasm uses standardized WebAssembly exception handling (exnref), as browsers do.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+
+      - name: Build a fixture model and score it with Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[train]" pytest
+          python -c "
+          from tests.conftest import build_tiny_model
+          build_tiny_model('/tmp/fixture')
+          "
+          python - <<'PY'
+          import csv
+          rows = [r[0] for r in csv.reader(open("/tmp/fixture/soft.csv"))][1:]
+          extra = ["not_a_smiles", "", "[2H]C", "[H]C([H])([H])O", "CC(=O)Oc1ccccc1C(=O)O", "C" * 60]
+          open("/tmp/fixture/smiles.txt", "w").write("\n".join(rows + extra) + "\n")
+          with open("/tmp/fixture/in.csv", "w") as f:
+              f.write("smiles\n" + "\n".join(rows + extra) + "\n")
+          PY
+          cd /tmp && olinda predict -m /tmp/fixture/model.onnx -i /tmp/fixture/in.csv -o /tmp/fixture/py.csv
+
+      - name: The page's code reproduces the Python predictions
+        working-directory: site
+        run: |
+          cp ../olinda/featurizer/rdkit_qmfp.wasm .
+          npm install --no-save --no-audit --no-fund "onnxruntime-web@$ORT_WEB"
+          node test.mjs /tmp/fixture/model.onnx /tmp/fixture/smiles.txt /tmp/fixture/py.csv
+
+      - name: Assemble the site
+        run: |
+          mkdir -p _site/ort
+          cp site/index.html site/app.js site/olinda.js site/onnxmeta.js _site/
+          cp olinda/featurizer/rdkit_qmfp.wasm _site/
+          dist=site/node_modules/onnxruntime-web/dist
+          cp "$dist/ort.wasm.min.mjs" "$dist/ort-wasm-simd-threaded.mjs" "$dist/ort-wasm-simd-threaded.wasm" _site/ort/
+          ls -la _site _site/ort
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
