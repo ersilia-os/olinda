@@ -1,7 +1,7 @@
-"""RDKit MinimalLib as WebAssembly, run under wasmtime: SMILES in, count-simulation bytes out.
+"""RDKit MinimalLib as WebAssembly, run under wasmtime: SMILES in, packed Morgan count bytes out.
 
 olinda never imports RDKit. ``rdkit_qmfp.wasm`` (built from ``wasm/`` by ``wasm/build.sh``) is RDKit's
-own SMILES parser and Morgan generator, the code RDKit.js runs, compiled to a standalone module that
+own SMILES parser and Morgan generator (MinimalLib, as in RDKit.js), compiled to a standalone module that
 exports plain C functions. It is one platform-independent file, so the wheel stays pure Python.
 
 One instance per process, built on first use. A wasmtime store is not thread-safe, so calls are

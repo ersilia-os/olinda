@@ -5,11 +5,11 @@
 // the Morgan options MinimalLib::morgan_fp_as_bitvect reads, from the same JSON keys with the
 // same defaults.
 //
-// With count simulation at RDKit's default bounds (1, 2, 4, 8), which is the qmfp layout, the
-// fingerprint is computed as true folded counts, quantized and packed here, instead of as RDKit's
-// count-simulation bit vector. The bytes are identical (checked on the whole reference library),
-// and the count fingerprint is cheaper: it skips building a 4x-wide bit vector. Any other options
-// take MinimalLib's own bit-vector path.
+// With "countEncoding": "count4" (olinda's qmfp), the fingerprint is RDKit's folded Morgan count
+// fingerprint over nBits slots, each count clipped at 15 and written as a 4-bit number: two slots
+// per byte, the even slot in the low nibble. Exact counts up to 15 keep everything a model learns
+// from counts (above 15 is 0.03% of nonzero slots), where RDKit's count simulation would bucket
+// 2-3 and 4-7 together and lose accuracy. Without it, MinimalLib's own bit-vector path is used.
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -25,19 +25,16 @@ using namespace RDKit;
 
 namespace {
 
-// Bits per slot under count simulation with RDKit's default count bounds.
-constexpr unsigned int kBitsPerSlot = 4;
-// A true count's thermometer nibble: counts 1, 2-3, 4-7 and >=8 set 1, 2, 3 and 4 low bits.
-constexpr std::uint8_t kNibble[9] = {0x0, 0x1, 0x3, 0x3, 0x7, 0x7, 0x7, 0x7, 0xF};
+constexpr std::uint32_t kCountClip = 15;  // the largest count a nibble holds
 
 struct Morgan {
   std::unique_ptr<FingerprintGenerator<std::uint32_t>> gen;
-  bool counts = false;  // compute counts and pack them, rather than the simulated bit vector
-  unsigned int slots = 0;
+  bool count4 = false;  // 4-bit counts, rather than MinimalLib's bit vector
+  unsigned int nBits = 0;
 };
 
 // MinimalLib::morgan_fp_as_bitvect's options, read from the same JSON keys with the same defaults
-// (Code/MinimalLib/common.h).
+// (Code/MinimalLib/common.h), plus olinda's countEncoding.
 Morgan morgan(const char *details_json) {
   unsigned int radius = 2;
   unsigned int nBits = 2048;
@@ -46,6 +43,7 @@ Morgan morgan(const char *details_json) {
   bool useBondTypes = true;
   bool includeRedundantEnvironments = false;
   bool onlyNonzeroInvariants = false;
+  std::string countEncoding;
   if (details_json && std::strlen(details_json)) {
     std::istringstream ss;
     ss.str(details_json);
@@ -58,15 +56,14 @@ Morgan morgan(const char *details_json) {
     QMFP_OPT_GET(useBondTypes);
     QMFP_OPT_GET(includeRedundantEnvironments);
     QMFP_OPT_GET(onlyNonzeroInvariants);
+    QMFP_OPT_GET(countEncoding);
   }
   Morgan m;
-  m.counts = useCountSimulation && nBits % (2 * kBitsPerSlot) == 0;
-  m.slots = m.counts ? nBits / kBitsPerSlot : nBits;
-  // Counts fold into `slots`; the simulated bit vector spreads the same slots over `nBits` bits.
+  m.count4 = countEncoding == "count4";
+  m.nBits = nBits;
   m.gen.reset(MorganFingerprint::getMorganGenerator<std::uint32_t>(
-      radius, m.counts ? false : useCountSimulation, useChirality, useBondTypes,
-      onlyNonzeroInvariants, includeRedundantEnvironments, nullptr, nullptr,
-      m.counts ? m.slots : nBits));
+      radius, m.count4 ? false : useCountSimulation, useChirality, useBondTypes,
+      onlyNonzeroInvariants, includeRedundantEnvironments, nullptr, nullptr, nBits));
   return m;
 }
 
@@ -86,7 +83,7 @@ __attribute__((export_name("qmfp_featurize_batch"))) int qmfp_featurize_batch(
   } catch (...) {
     return -2;
   }
-  if (fp.counts && static_cast<unsigned int>(nbytes) * 2 != fp.slots) {
+  if (fp.count4 && static_cast<unsigned int>(nbytes) * 2 != fp.nBits) {
     return -1;
   }
   const std::string mol_json = mol_details ? mol_details : "";
@@ -102,13 +99,13 @@ __attribute__((export_name("qmfp_featurize_batch"))) int qmfp_featurize_batch(
       if (!mol || mol->getNumAtoms() == 0) {
         continue;
       }
-      if (fp.counts) {
-        // Slot k's nibble sits in byte k/2: the even slot in the low half, the odd in the high.
+      if (fp.count4) {
+        // Slot k's count sits in byte k/2: the even slot in the low nibble, the odd in the high.
         std::unique_ptr<SparseIntVect<std::uint32_t>> counts{
             fp.gen->getCountFingerprint(*mol)};
         for (const auto &[slot, count] : counts->getNonzeroElements()) {
-          const std::uint8_t nibble = kNibble[count < 8 ? count : 8];
-          row[slot / 2] |= static_cast<std::uint8_t>(nibble << (4 * (slot % 2)));
+          const std::uint32_t c = count < kCountClip ? count : kCountClip;
+          row[slot / 2] |= static_cast<std::uint8_t>(c << (4 * (slot % 2)));
         }
       } else {
         std::unique_ptr<ExplicitBitVect> bits{fp.gen->getFingerprint(*mol)};

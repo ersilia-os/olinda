@@ -126,7 +126,7 @@ def build_bundle(model_dir: str | Path) -> dict:
             ("Parity (max)", f"[bold]{worst:.2e}[/] ≤ {_PARITY_TOL:.0e}"),
             (
                 "Featurizer",
-                f"qmfp r{spec['radius']} · RDKit {featurizer.rdkit_version} (WebAssembly)",
+                f"qmfp r{spec['morgan']['radius']} · RDKit {featurizer.rdkit_version} (WebAssembly)",
             ),
             ("Golden", f"{len(golden['smiles'])} molecules recorded"),
             ("Size", f"[bold]{size_txt}[/]"),

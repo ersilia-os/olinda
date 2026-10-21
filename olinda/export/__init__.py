@@ -1,7 +1,7 @@
 """Fuse a trained model dir into a single, self-describing ``model.onnx``.
 
 Every olinda-owned transform downstream of RDKit is ONNX-able, so a bundle collapses to ONE graph that
-runs on onnxruntime alone. Its input is qmfp bytes, as RDKit MinimalLib or RDKit.js returns them, and a
+runs on onnxruntime alone. Its input is qmfp bytes, RDKit's Morgan counts packed 4 bits per slot, and a
 decoder at the front turns them into the fingerprint every head reads. Two shapes:
 
 - **soft-only**: ``bytes → decoder → soft_model → [soft_correction] → prediction`` (= ``S``).

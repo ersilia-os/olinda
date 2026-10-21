@@ -100,8 +100,8 @@ separately and exercises it, so the boundaries are real.
   signature — `olinda/data/reference.py` is the exemplar.
 - **Dependencies** are pinned exactly. The self-references `olinda[cli]==…` (in `report`) and
   `olinda[report]==…` (in `train`) must be bumped in lockstep with `[project].version`.
-- **One RDKit release everywhere**: `RDKIT_TAG` in `wasm/build.sh`, the `rdkit` pin in `[dev]`, and the
-  RDKit.js version any browser runtime uses. `tests/test_qmfp.py` fails if the first two disagree.
+- **One RDKit release everywhere**: `RDKIT_TAG` in `wasm/build.sh` and the `rdkit` pin in `[dev]`.
+  `tests/test_qmfp.py` fails if they disagree.
 - **`git blame`** — run `git config blame.ignoreRevsFile .git-blame-ignore-revs` once, or the
   whole-repo reformat owns every line.
 - **Tests** smoke-test the documented entry points. They run real fits on a synthetic 240-row library,
@@ -125,10 +125,11 @@ public bucket and built by `scripts/compute_qmfp_library.py`. Never commit datas
   semver and must not be deleted. (It was `archive/master-v2-refactor` until 2026-08-13; there is no
   `master` branch and never was.)
 - Tag `v1.0.0` sits on a 2022 commit with a published release. This is why the 1.x line started at 1.1.0.
-- A model's input is **packed bytes**, `uint8 (N, 1024)`, not a fingerprint. It is exactly what RDKit
-  MinimalLib's `get_morgan_fp_as_bytes` and RDKit.js return (qmfp: Morgan with count simulation), and a
-  decoder inside the graph turns it into the `(N, 2048)` floats the heads read. Runtimes in any language
-  pass those bytes straight through and hold no fingerprint logic, so they cannot drift apart.
+- A model's input is **packed bytes**, `uint8 (N, 1024)`, not a fingerprint: RDKit's folded Morgan
+  counts, clipped at 15, two 4-bit slots per byte (qmfp, `encoding: count4`). A decoder inside the graph
+  turns them into the `(N, 2048)` floats the heads read. Exact counts to 15 lose nothing a model learns
+  from (measured); RDKit's count simulation, which stock RDKit.js offers, cost 0.03–0.05 R², so a browser
+  or Node runtime runs olinda's own WebAssembly module rather than stock RDKit.js.
 - `olinda/featurizer/rdkit_qmfp.wasm` is gitignored, yet the package cannot featurize without it. It is
   RDKit compiled from `wasm/` by `wasm/build.sh` (inside `emscripten/emsdk`); CI builds or restores it
   and packs it into the wheel. In a fresh checkout, run the build once (the command is at the top of the

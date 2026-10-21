@@ -30,7 +30,7 @@ from olinda.train.xgb import detect_training_device
 # native params. Tuned for large-scale (~1.3M rows) sparse Morgan-count QSAR. Only learning_rate and
 # min_split_gain are searched by `olinda tune` (see olinda/train/tune.py); everything else is fixed here.
 CANONICAL_DEFAULTS = {
-    # Histogram bins. qmfp fingerprints take only five values per feature (0, 1, 2, 4, 8), so 64 is
+    # Histogram bins. qmfp fingerprints are counts clipped at 15, sixteen values per feature, so 64 is
     # lossless for them and builds faster and leaner than 128 (benchmarked: more ≈ noise here).
     "max_bin": 64,
     "max_depth": 8,  # deep trees for large N; LightGBM num_leaves = min(2^8-1, 255) saturates at this depth

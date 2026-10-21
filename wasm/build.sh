@@ -10,7 +10,7 @@
 # into wasm/.cache (gitignored) and later runs only relink. Flags follow RDKit's own MinimalLib Docker
 # build (Code/MinimalLib/docker), with the JavaScript bindings swapped for plain C exports.
 set -euxo pipefail
-RDKIT_TAG=Release_2026_09_1  # the RDKit release every olinda featurizer and RDKit.js runtime must share
+RDKIT_TAG=Release_2026_09_1  # must equal the rdkit pin in [dev], the tests' oracle
 BOOST=1.87.0
 ZLIB=1.3.2
 EH="-fwasm-exceptions"

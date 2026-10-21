@@ -1,15 +1,13 @@
 """Full RDKit as the reference that olinda's WebAssembly featurizer must match, byte for byte.
 
 Test-only: the package itself featurizes through RDKit MinimalLib compiled to WebAssembly and
-never imports rdkit. This module mirrors what MinimalLib does with a SMILES, so a mismatch
+never imports rdkit. This module mirrors what that module does with a SMILES, so a mismatch
 means the WebAssembly build drifted, not that two parsers legitimately disagree:
 
 - ``MinimalLib::mol_from_input`` parses with ``sanitize=False`` and the ``removeHs`` option,
   then runs full sanitization; a failure at either step is an invalid molecule.
-- ``MinimalLib::morgan_fp_as_bitvect`` uses RDKit's Morgan generator with count simulation.
-
-It also derives the same bytes the other way round, from true folded counts, which is the
-claim the qmfp format rests on: count simulation is the counts, quantized.
+- the fingerprint is RDKit's folded Morgan count fingerprint, each count clipped at 15 and packed
+  two slots per byte (:mod:`olinda.featurizer.codec`).
 """
 
 from __future__ import annotations
@@ -18,11 +16,11 @@ import re
 
 import numpy as np
 
-from olinda.featurizer.codec import COUNT_TO_LEVEL, pack_levels
+from olinda.featurizer.codec import pack
 
 
 class RDKitOracle:
-    """Featurize SMILES with full RDKit, exactly as MinimalLib would under *spec*."""
+    """Featurize SMILES with full RDKit, exactly as olinda's WebAssembly module would under *spec*."""
 
     def __init__(self, spec: dict):
         from rdkit import RDLogger
@@ -32,11 +30,14 @@ class RDKitOracle:
         self.spec = spec
         self.slots = int(spec["slots"])
         self._explicit_h = re.compile(spec["explicit_h_regex"])
-        self._sim = rfg.GetMorganGenerator(
-            radius=int(spec["radius"]), fpSize=int(spec["nBits"]), countSimulation=True
-        )
+        m = spec["morgan"]
         self._counts = rfg.GetMorganGenerator(
-            radius=int(spec["radius"]), fpSize=self.slots
+            radius=int(m["radius"]),
+            fpSize=int(m["nBits"]),
+            includeChirality=bool(m["useChirality"]),
+            useBondTypes=bool(m["useBondTypes"]),
+            countSimulation=False,
+            includeRedundantEnvironments=bool(m["includeRedundantEnvironments"]),
         )
 
     def parse(self, smiles: str):
@@ -57,22 +58,9 @@ class RDKitOracle:
         except Exception:
             return None
 
-    def simulation_bytes(self, smiles: list[str]):
-        """Count-simulation bits packed little-endian, as ``get_morgan_fp_as_bytes`` returns them."""
-        out = np.zeros((len(smiles), self.slots // 2), dtype=np.uint8)
-        valid = np.zeros(len(smiles), dtype=bool)
-        for i, smi in enumerate(smiles):
-            mol = self.parse(smi)
-            if mol is None:
-                continue
-            bits = self._sim.GetFingerprintAsNumPy(mol).astype(np.uint8)
-            out[i] = np.packbits(bits, bitorder="little")
-            valid[i] = True
-        return out, valid
-
-    def count_bytes(self, smiles: list[str]):
-        """The same bytes from true folded counts: clip at 8, quantize to a level, pack."""
-        levels = np.zeros((len(smiles), self.slots), dtype=np.uint8)
+    def counts(self, smiles: list[str]):
+        """True folded counts, ``(N, slots)``, before clipping, and which rows parsed."""
+        out = np.zeros((len(smiles), self.slots), dtype=np.int64)
         valid = np.zeros(len(smiles), dtype=bool)
         for i, smi in enumerate(smiles):
             mol = self.parse(smi)
@@ -81,6 +69,11 @@ class RDKitOracle:
             for k, c in (
                 self._counts.GetCountFingerprint(mol).GetNonzeroElements().items()
             ):
-                levels[i, k] = COUNT_TO_LEVEL[min(c, 8)]
+                out[i, k] = c
             valid[i] = True
-        return pack_levels(levels), valid
+        return out, valid
+
+    def count_bytes(self, smiles: list[str]):
+        """The model's input bytes: counts clipped at 15, two slots per byte."""
+        counts, valid = self.counts(smiles)
+        return pack(counts), valid

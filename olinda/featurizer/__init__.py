@@ -1,9 +1,9 @@
 """SMILES to qmfp fingerprints: the one featurizer olinda uses, for training and for inference.
 
-A qmfp fingerprint is RDKit's Morgan fingerprint with count simulation, as RDKit MinimalLib and
-RDKit.js compute it (see :mod:`olinda.featurizer.codec` for the layout). olinda computes it through
+A qmfp fingerprint is RDKit's folded Morgan count fingerprint, each count clipped at 15 and packed as
+4 bits (see :mod:`olinda.featurizer.codec` for the layout). olinda computes it through
 :mod:`olinda.featurizer.wasm`, RDKit compiled to WebAssembly, so neither training nor inference needs
-the rdkit package, and both produce exactly the bytes a browser running RDKit.js would.
+the rdkit package, and both produce exactly the same bytes.
 """
 
 from __future__ import annotations
@@ -51,11 +51,7 @@ class QmfpFeaturizer:
         self.spec = validate_spec(spec if spec is not None else default_spec())
         self._explicit_h = re.compile(self.spec["explicit_h_regex"])
         self._fp_details = json.dumps(
-            {
-                "radius": int(self.spec["radius"]),
-                "nBits": int(self.spec["nBits"]),
-                "useCountSimulation": bool(self.spec["useCountSimulation"]),
-            }
+            {**self.spec["morgan"], "countEncoding": self.spec["encoding"]}
         )
         self._mol_details = json.dumps(self.spec["get_mol"])
         self._mol_details_h = json.dumps(self.spec["get_mol_explicit_h"])
@@ -75,7 +71,7 @@ class QmfpFeaturizer:
         return wasm.rdkit_version()
 
     def featurize_bytes(self, smiles) -> tuple[np.ndarray, np.ndarray]:
-        """``(uint8 (N, nBits/8), bool (N,))``: the model's input bytes and which rows are valid."""
+        """``(uint8 (N, slots/2), bool (N,))``: the model's input bytes and which rows are valid."""
         from olinda.featurizer import wasm
 
         smiles = [str(s) for s in smiles]
@@ -101,6 +97,6 @@ class QmfpFeaturizer:
         return out, valid
 
     def transform(self, smiles) -> np.ndarray:
-        """``uint8 (N, slots)`` slot values in {0, 1, 2, 4, 8}: what training reads and models see."""
+        """``uint8 (N, slots)`` slot counts in 0-15: what training reads and models see."""
         packed, _ = self.featurize_bytes(smiles)
         return decode(packed)
