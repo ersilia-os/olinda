@@ -71,14 +71,18 @@ jobs:
           node test.mjs /tmp/fixture/model.onnx /tmp/fixture/smiles.txt /tmp/fixture/py.csv
           node test.mjs /tmp/example.onnx /tmp/fixture/smiles.txt /tmp/fixture/py_example.csv
 
+      # GitHub Pages lets browsers cache every file for 10 minutes, so references are stamped with this
+      # build (and onnxruntime-web's files live under its version): a cached index.html then only ever
+      # loads files from its own build. See scripts/stamp_site.py.
       - name: Assemble the site
         run: |
-          mkdir -p _site/ort
+          mkdir -p "_site/ort/$ORT_WEB"
           cp site/index.html site/app.js site/olinda.js site/onnxmeta.js _site/
           cp olinda/featurizer/rdkit_qmfp.wasm /tmp/example.onnx _site/
           dist=site/node_modules/onnxruntime-web/dist
-          cp "$dist/ort.wasm.min.mjs" "$dist/ort-wasm-simd-threaded.mjs" "$dist/ort-wasm-simd-threaded.wasm" _site/ort/
-          ls -la _site _site/ort
+          cp "$dist/ort.wasm.min.mjs" "$dist/ort-wasm-simd-threaded.mjs" "$dist/ort-wasm-simd-threaded.wasm" "_site/ort/$ORT_WEB/"
+          python scripts/stamp_site.py _site "${GITHUB_SHA::7}" "$ORT_WEB"
+          ls -laR _site
 
       - uses: actions/upload-pages-artifact@v3
         with:
