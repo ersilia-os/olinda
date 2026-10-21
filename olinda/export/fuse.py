@@ -132,7 +132,7 @@ def _fuse(model_dir: Path):
         x_dim = int(sm.metadata.get("x_dim") or n_features)
 
         # soft branch: input → soft_model → [soft correction] → surrogate (double)
-        collect(_soft_model_proto(sm, x_dim), f"{p}sm")
+        collect(_soft_model_proto(sm, x_dim, entry["dir"]), f"{p}sm")
         nodes.append(ident("input", f"{p}sm__input"))
         nodes.append(flat(f"{p}sm__variable", f"{p}soft_raw"))
         soft_raw = f"{p}soft_raw"

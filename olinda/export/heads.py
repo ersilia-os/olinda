@@ -46,13 +46,34 @@ def _prob1_model(in_name: str, out_name: str):
     return helper.make_model(g, opset_imports=[helper.make_opsetid("", _OPSET)])
 
 
-def _soft_model_proto(sm, x_dim: int):
-    """The surrogate regressor as an ONNX ``ModelProto`` (via the backend exporter, through a temp file)."""
+SOFT_ONNX_NAME = "s.onnx"
+
+
+def _soft_model_proto(sm, x_dim: int, column_dir=None):
+    """The surrogate regressor as an ONNX ``ModelProto``.
+
+    Converting a booster walks every node in Python, roughly 15 s or more per column, and a run fuses
+    more than once (`learn-soft`, then `learn-hard`, then any `export`). So the conversion is kept as
+    ``s.onnx`` in *column_dir* and reused for as long as it is newer than the model file it came from.
+    """
     import onnx
 
     from olinda.train.backend import get_backend
 
+    backend = get_backend(sm.backend, "cpu")
+    if column_dir is not None:
+        cached = Path(column_dir) / SOFT_ONNX_NAME
+        source = Path(column_dir) / backend.model_file
+        if (
+            cached.exists()
+            and source.exists()
+            and cached.stat().st_mtime >= source.stat().st_mtime
+        ):
+            return onnx.load(str(cached))
+        backend.to_onnx(sm.model, cached, x_dim)
+        return onnx.load(str(cached))
+
     with tempfile.TemporaryDirectory() as td:
-        p = Path(td) / "s.onnx"
-        get_backend(sm.backend, "cpu").to_onnx(sm.model, p, x_dim)
+        p = Path(td) / SOFT_ONNX_NAME
+        backend.to_onnx(sm.model, p, x_dim)
         return onnx.load(str(p))

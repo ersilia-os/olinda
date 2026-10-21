@@ -227,7 +227,13 @@ def _read_table(path: str | Path):
     if suffix in (".parquet", ".pq"):
         return pd.read_parquet(path)
     sep = "\t" if suffix == ".tsv" else ","
-    return pd.read_csv(path, sep=sep)
+    # pyarrow's multi-threaded reader is several times faster on a 1.36M-row teacher file. It ships with
+    # the [report] extra, so a bare install falls back to pandas' own parser.
+    try:
+        import pyarrow  # noqa: F401
+    except ImportError:
+        return pd.read_csv(path, sep=sep)
+    return pd.read_csv(path, sep=sep, engine="pyarrow")
 
 
 def _verify_smiles_alignment(smiles, descriptors_h5: str | Path) -> int:
@@ -238,7 +244,9 @@ def _verify_smiles_alignment(smiles, descriptors_h5: str | Path) -> int:
     """
     import h5py
 
-    smiles = np.asarray(smiles).astype("U")
+    # Compared as Python strings. A "U" array is as wide as the longest SMILES in the file for every row,
+    # so one long macrocycle turned 1.36M rows into gigabytes.
+    smiles = np.asarray(smiles, dtype=object)
     with h5py.File(str(descriptors_h5), "r") as f:
         ref = f[
             "input"
@@ -252,7 +260,7 @@ def _verify_smiles_alignment(smiles, descriptors_h5: str | Path) -> int:
         # Vectorized chunked comparison (no per-row Python loop over 1.35M rows).
         for start in range(0, n, _VERIFY_CHUNK):
             end = min(start + _VERIFY_CHUNK, n)
-            block = np.asarray(ref[start:end], dtype="U")
+            block = np.asarray(ref[start:end], dtype=object)
             mism = np.flatnonzero(block != smiles[start:end])
             if mism.size:
                 k = start + int(mism[0])

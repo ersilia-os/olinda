@@ -51,6 +51,17 @@ def test_run_returns_one_column_per_task(artifact):
     assert model.columns == ["assay_probability"]
 
 
+def test_parallel_featurization_changes_nothing(artifact):
+    """Workers featurize ahead of the graph; the rows, their order and every number must be the same."""
+    model = OlindaArtifact(artifact)
+    smiles = [*_SM, "not a smiles", *_SM]
+    with pytest.warns(RuntimeWarning, match="could not be parsed"):
+        serial = model.run(smiles, batch_size=3)
+    with pytest.warns(RuntimeWarning, match="could not be parsed"):
+        parallel = model.run(smiles, batch_size=3, workers=2)
+    assert parallel.equals(serial)
+
+
 def test_the_artifact_describes_itself(artifact):
     model = OlindaArtifact(artifact)
     described = model.describe()

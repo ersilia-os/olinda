@@ -53,6 +53,11 @@ def _check_rdkit_version(meta: dict) -> None:
 _BATCH = 4096
 
 
+def _featurize_batch(featurizer, smiles: list[str]) -> np.ndarray:
+    """Featurize one batch in a worker process. Module-level so the pool can pickle a reference to it."""
+    return np.asarray(featurizer.transform(smiles), dtype=np.float32)
+
+
 def _as_smiles_list(smiles) -> list[str]:
     """Normalise user input to a list of SMILES strings, refusing the shapes that would mislead.
 
@@ -305,7 +310,54 @@ class OlindaArtifact:
             self._featurizer.transform([str(s) for s in smiles]), dtype=np.float32
         )
 
-    def run(self, smiles, batch_size: int = _BATCH, progress: bool | None = None):
+    def _featurized_batches(self, smiles: list[str], batch_size: int, workers: int):
+        """Yield ``(batch, fingerprints)`` in input order, featurizing ahead in *workers* processes.
+
+        Featurization is single-threaded RDKit, about 8,000 molecules a second, and on a one- or
+        two-column model it costs more than the graph. With workers, the next batches are featurized
+        while the caller scores the current one. At most ``workers + 1`` batches are in flight, so memory
+        stays bounded on any input size.
+        """
+        batches = [
+            smiles[start : start + batch_size]
+            for start in range(0, len(smiles), batch_size)
+        ]
+        if workers <= 1 or len(batches) < 2:
+            for batch in batches:
+                yield batch, self.featurize(batch)
+            return
+
+        from collections import deque
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(min(workers, len(batches))) as pool:
+            pending: deque = deque()
+            queue = iter(batches)
+            for batch in queue:
+                pending.append(
+                    (batch, pool.submit(_featurize_batch, self._featurizer, batch))
+                )
+                if len(pending) > workers:
+                    break
+            while pending:
+                batch, future = pending.popleft()
+                upcoming = next(queue, None)
+                if upcoming is not None:
+                    pending.append(
+                        (
+                            upcoming,
+                            pool.submit(_featurize_batch, self._featurizer, upcoming),
+                        )
+                    )
+                yield batch, future.result()
+
+    def run(
+        self,
+        smiles,
+        batch_size: int = _BATCH,
+        progress: bool | None = None,
+        workers: int | None = 1,
+    ):
         """Predict for a list of SMILES. This is the only way to run the model.
 
         Parameters
@@ -317,6 +369,11 @@ class OlindaArtifact:
         progress : bool, optional
             Show a progress bar on stderr. Defaults to showing one for multi-batch inputs on a terminal,
             so redirected output and notebooks stay clean.
+        workers : int or None, optional
+            Processes that featurize ahead of the graph; ``None`` means one per CPU. Does not change
+            results. Defaults to 1 because worker processes re-import the calling script on macOS and
+            Windows, so a script that passes more needs an ``if __name__ == "__main__":`` guard.
+            ``olinda predict`` uses every CPU.
 
         Returns
         -------
@@ -332,6 +389,7 @@ class OlindaArtifact:
         and ``T``'s first layer sees nothing but its own bias — so without this an unparseable input would
         return a confident-looking number.
         """
+        import os
         import warnings
 
         import pandas as pd
@@ -340,14 +398,13 @@ class OlindaArtifact:
         batch_size = int(batch_size)
         if batch_size < 1:
             raise ValueError(f"batch_size must be at least 1, got {batch_size}")
+        workers = (os.cpu_count() or 1) if workers is None else int(workers)
 
         wanted = [c["output"] for c in self._columns]
         chunks: list[dict] = []
         n_invalid = 0
         with _Progress(len(smiles), enabled=progress) as bar:
-            for start in range(0, len(smiles), batch_size):
-                batch = smiles[start : start + batch_size]
-                fp = self.featurize(batch)
+            for batch, fp in self._featurized_batches(smiles, batch_size, workers):
                 invalid = fp.sum(axis=1) == 0
                 n_invalid += int(invalid.sum())
                 outs = self._session.run(None, {self._input_name: fp})

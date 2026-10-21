@@ -292,9 +292,36 @@ class LightGBMBackend:
     name = "lightgbm"
     model_file = "model.lgb"
 
+    # Rows sampled from the library to choose the feature bins every column shares.
+    _BIN_SAMPLE_ROWS = 200_000
+
     def __init__(self, device: str = "cpu") -> None:
         """Select the device this engine will train on."""
         self.device = "cpu"  # LightGBM only ever runs on CPU here (its GPU can't use sparse features)
+        self._bin_refs: dict = {}
+
+    def _bin_reference(self, matrix, max_bin: int):
+        """One binned Dataset per library, whose feature bins every column's Datasets reuse.
+
+        Bins describe the features, which every column shares; only the rows and labels differ. Left to
+        itself LightGBM re-samples 200k rows one at a time, in float64, for every column, which costs
+        tens of seconds and briefly ~6.6 GB each time. A fixed sample drawn once from the whole library
+        replaces that.
+        """
+        import lightgbm as lgb
+
+        key = (id(matrix), int(max_bin))
+        if key not in self._bin_refs:
+            rng = np.random.default_rng(0)
+            k = min(matrix.n_rows, self._BIN_SAMPLE_ROWS)
+            idx = np.sort(rng.choice(matrix.n_rows, size=k, replace=False))
+            self._bin_refs[key] = lgb.Dataset(
+                matrix.gather(idx),
+                # The same params as the per-column Datasets, or LightGBM warns that it overrides them.
+                params={"max_bin": int(max_bin), "verbosity": -1},
+                free_raw_data=True,
+            ).construct()
+        return self._bin_refs[key]
 
     def objective_params(self) -> dict:
         """The objective and eval metric, fixed rather than configurable — see the comment below."""
@@ -360,7 +387,7 @@ class LightGBMBackend:
                 free_raw_data=False,
             )
 
-        dtrain = _ds(train_idx)
+        dtrain = _ds(train_idx, reference=self._bin_reference(matrix, max_bin))
         return dtrain, _ds(val_idx, reference=dtrain)
 
     def train(
@@ -400,6 +427,15 @@ class LightGBMBackend:
             "rho": float("nan"),
         }
 
+        def _val_scores(model):
+            # LightGBM keeps a running score for each validation set, so reading it costs O(n_val).
+            # Re-predicting xval would run every tree built so far, which grows quadratically with the
+            # round count. The inner score is private API, so fall back to predicting if it is gone.
+            try:
+                return np.asarray(model._Booster__inner_predict(1), dtype=np.float64)
+            except AttributeError:
+                return np.asarray(model.predict(xval), dtype=np.float64)
+
         with live_status() as update:
 
             def _cb(env):
@@ -414,12 +450,8 @@ class LightGBMBackend:
                 )
                 if va < st["best"]:
                     st["best"], st["best_it"] = va, it
-                if (
-                    it % 100 == 0 and xval is not None
-                ):  # R²/ρ need a val prediction pass — throttle it
-                    _, st["r2"], st["rho"] = _val_stats(
-                        yval, np.asarray(env.model.predict(xval), dtype=np.float64)
-                    )
+                if it % 100 == 0 and xval is not None:
+                    _, st["r2"], st["rho"] = _val_stats(yval, _val_scores(env.model))
                 if it % 25 == 0:
                     # Only what the live table's row cannot show: it already carries R², ρ, the val
                     # loss as RMSE, the round count and the elapsed time (see _row_values).

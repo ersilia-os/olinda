@@ -10,13 +10,21 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def predict_file(model_onnx, input_path, out_path, *, smiles_column: str | None = None):
+def predict_file(
+    model_onnx,
+    input_path,
+    out_path,
+    *,
+    smiles_column: str | None = None,
+    workers: int | None = 1,
+):
     """Predict via the fused ``model.onnx`` and write one column per task.
 
     Goes through the same :class:`~olinda.artifact.OlindaArtifact` the library exposes, so the CLI and a
     Python caller produce identical output. Loading verifies the installed RDKit against the build
     recorded in the model's metadata. ``model_onnx`` may be the artifact itself or a directory holding
-    one. Pass *smiles_column* to name the input's SMILES column instead of auto-detecting it.
+    one. Pass *smiles_column* to name the input's SMILES column instead of auto-detecting it, and
+    *workers* to featurize in parallel (see :meth:`~olinda.artifact.OlindaArtifact.run`).
     """
     import rdkit
 
@@ -39,7 +47,7 @@ def predict_file(model_onnx, input_path, out_path, *, smiles_column: str | None 
         f"model.onnx · [bold]{model.n_columns}[/] column(s) · {head} · {len(smiles):,} SMILES",
         "run",
     )
-    df = model.run(smiles)
+    df = model.run(smiles, workers=workers)
     out_path = Path(out_path)
     df.to_csv(out_path, index=False)
     success(f"predictions ({' · '.join(model.columns)}) → [dim]{out_path}[/]")
