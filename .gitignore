@@ -49,3 +49,10 @@ zairachem_test/
 # the binary and the RDKit build tree never go into git.
 /wasm/.cache/
 olinda/featurizer/*.wasm
+
+# The web page (site/) pulls onnxruntime-web from npm and the featurizer from the wasm build; neither is
+# committed. CI assembles both before deploying.
+/site/node_modules/
+/site/ort/
+/site/rdkit_qmfp.wasm
+/site/package-lock.json

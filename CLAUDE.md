@@ -40,6 +40,7 @@ Package code lives in `olinda/`, **not** `src/olinda/`. Don't "fix" this.
 | `olinda/data/` | the reference library and the run's split |
 | `olinda/featurizer/` | SMILES → qmfp bytes: the spec, the byte codec, and the wasmtime loader for `rdkit_qmfp.wasm` |
 | `wasm/` | the C++ wrapper and build script that compile RDKit to that WebAssembly module |
+| `site/` | the raw web page at ersilia-os.github.io/olinda (`olinda.js` ports inference to JavaScript; `.github/workflows/pages.yml` deploys it after `test.mjs` matches Python) |
 | `olinda/console.py` | user-facing output — see below |
 | `olinda/utils/logging.py` | the levelled logger — see below |
 
