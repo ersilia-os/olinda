@@ -8,6 +8,7 @@ const status = (text) => ($("status").textContent = text);
 let ort;
 let fz;
 let loaded = null; // { file, meta, session, golden } for the model currently chosen
+let example = null; // the example model, once chosen, as a File like an uploaded one
 
 async function init() {
   ort = await import("./ort/ort.wasm.min.mjs");
@@ -15,8 +16,9 @@ async function init() {
   // GitHub Pages cannot enable cross-origin isolation, which threads need; one thread is enough here.
   ort.env.wasm.numThreads = 1;
   fz = await loadFeaturizer(await (await fetch("rdkit_qmfp.wasm")).arrayBuffer());
-  status(`Ready. RDKit ${fz.rdkitVersion} (WebAssembly). Choose a model.onnx.`);
+  status(`Ready. RDKit ${fz.rdkitVersion} (WebAssembly). Choose a model.onnx, or use the example.`);
   $("run").disabled = false;
+  $("example").disabled = false;
 }
 
 async function loadModel(file) {
@@ -67,9 +69,23 @@ function render(columns, rows) {
   link.hidden = false;
 }
 
+async function useExample() {
+  $("example").disabled = true;
+  try {
+    const bytes = await (await fetch("example.onnx")).arrayBuffer();
+    example = new File([bytes], "example.onnx");
+    $("model").value = ""; // the example replaces any uploaded file
+    status("Example model selected (count_sum). Press Predict.");
+  } catch (err) {
+    status(`Error loading the example model: ${err.message}`);
+  } finally {
+    $("example").disabled = false;
+  }
+}
+
 async function run() {
-  const file = $("model").files[0];
-  if (!file) return status("Choose a model.onnx first.");
+  const file = $("model").files[0] || example;
+  if (!file) return status("Choose a model.onnx, or use the example model.");
   const smiles = $("smiles").value.replace(/\n$/, "").split("\n").map((s) => s.trim());
   $("run").disabled = true;
   try {
@@ -92,5 +108,9 @@ async function run() {
 }
 
 $("run").addEventListener("click", run);
-$("model").addEventListener("change", () => (loaded = null));
+$("example").addEventListener("click", useExample);
+$("model").addEventListener("change", () => {
+  loaded = null;
+  example = null; // an uploaded file replaces the example
+});
 init().catch((err) => status(`Error loading the page: ${err.message}`));

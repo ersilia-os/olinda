@@ -12,7 +12,12 @@
 runs in this browser: the model and the molecules never leave your machine.</p>
 
 <p><label>Model (<code>model.onnx</code>)<br>
-<input type="file" id="model" accept=".onnx"></label></p>
+<input type="file" id="model" accept=".onnx"></label>
+or <button id="example" disabled>Use the example model</button></p>
+
+<p>The example model is not a real predictor: its one output, <code>count_sum</code>, is the sum of a
+molecule's Morgan counts (radius 3, 2048 slots, each count capped at 15). It shows how the page and
+the model format work.</p>
 
 <p><label>SMILES, one per line<br>
 <textarea id="smiles" rows="12" cols="80" spellcheck="false">CCO

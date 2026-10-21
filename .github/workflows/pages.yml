@@ -57,18 +57,25 @@ jobs:
           PY
           cd /tmp && olinda predict -m /tmp/fixture/model.onnx -i /tmp/fixture/in.csv -o /tmp/fixture/py.csv
 
+      # The page's example model: a sum of the Morgan counts, with real metadata and golden vectors.
+      - name: Build the example model
+        run: |
+          python scripts/make_example_model.py /tmp/example.onnx
+          cd /tmp && olinda predict -m /tmp/example.onnx -i /tmp/fixture/in.csv -o /tmp/fixture/py_example.csv
+
       - name: The page's code reproduces the Python predictions
         working-directory: site
         run: |
           cp ../olinda/featurizer/rdkit_qmfp.wasm .
           npm install --no-save --no-audit --no-fund "onnxruntime-web@$ORT_WEB"
           node test.mjs /tmp/fixture/model.onnx /tmp/fixture/smiles.txt /tmp/fixture/py.csv
+          node test.mjs /tmp/example.onnx /tmp/fixture/smiles.txt /tmp/fixture/py_example.csv
 
       - name: Assemble the site
         run: |
           mkdir -p _site/ort
           cp site/index.html site/app.js site/olinda.js site/onnxmeta.js _site/
-          cp olinda/featurizer/rdkit_qmfp.wasm _site/
+          cp olinda/featurizer/rdkit_qmfp.wasm /tmp/example.onnx _site/
           dist=site/node_modules/onnxruntime-web/dist
           cp "$dist/ort.wasm.min.mjs" "$dist/ort-wasm-simd-threaded.mjs" "$dist/ort-wasm-simd-threaded.wasm" _site/ort/
           ls -la _site _site/ort

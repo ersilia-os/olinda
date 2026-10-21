@@ -48,7 +48,7 @@ olinda predict --model-onnx model.onnx --input my_smiles.csv --output my_output.
 ```
 
 Or, with nothing installed, in the browser at [ersilia-os.github.io/olinda](https://ersilia-os.github.io/olinda/):
-upload the `model.onnx`, paste SMILES, and get the predictions as a table. It all runs locally in the browser;
+upload the `model.onnx` (or try the built-in example model), paste SMILES, and get the predictions as a table. It all runs locally in the browser;
 the model and the molecules never leave your machine.
 
 ## Distilling a model
