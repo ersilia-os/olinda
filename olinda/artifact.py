@@ -166,7 +166,7 @@ class OlindaArtifact:
         if "olinda.schema_version" not in props:
             if "olinda" in props:
                 raise ValueError(
-                    f"{path} was built by olinda 1.x, which fed Morgan count fingerprints from the rdkit "
+                    f"{path} was built by olinda 1.2 or earlier, which fed Morgan count fingerprints from the rdkit "
                     "package. This olinda reads qmfp models only: rebuild it with `olinda fit`."
                 )
             raise ValueError(

@@ -24,7 +24,7 @@ _S3_PREFIX = "olinda/data"
 # Reference-library descriptors: qmfp radius-3 fingerprints, decoded to uint8 (also producible locally
 # with scripts/compute_qmfp_library.py). This is the only representation olinda uses. The name keeps
 # "morgan" because qmfp is a Morgan fingerprint; the file name changed with the format, so a library
-# cached from olinda 1.x can never be read as this one.
+# cached from olinda 1.2 or earlier can never be read as this one.
 MORGAN_FINGERPRINTS_FILENAME = "erl0_qmfp_r3.h5"
 LEGACY_FILENAME = "erl0_morgan.h5"
 MORGAN_FINGERPRINTS_URL = f"{_S3_BASE}/{_S3_PREFIX}/{MORGAN_FINGERPRINTS_FILENAME}"
@@ -61,7 +61,7 @@ def download_morgan_fingerprints(target_dir: str | None = None) -> Path | None:
     legacy = base_dir / LEGACY_FILENAME
     if legacy.exists():
         echo(
-            f"[dim]{legacy}[/] is the olinda 1.x library, which this olinda cannot read; "
+            f"[dim]{legacy}[/] is the library of olinda 1.2 or earlier, which this olinda cannot read; "
             "delete it to free 2.8 GB",
             "warning",
         )

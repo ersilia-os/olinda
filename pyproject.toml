@@ -1,6 +1,6 @@
 [project]
 name = "olinda"
-version = "2.0.0"
+version = "1.3.0"
 description = "Distil a slow chemistry model into one fast, self-describing ONNX file"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -68,7 +68,7 @@ cli = [
 # CI installs exactly this list and then runs `olinda validate`, so a missing one is a failing build,
 # not a user's traceback.
 report = [
-    "olinda[cli]==2.0.0",  # keep in lockstep with [project].version above
+    "olinda[cli]==1.3.0",  # keep in lockstep with [project].version above
     "matplotlib==3.11.0",
     "onnx==1.22.0",
     "pandas==2.3.0",
@@ -81,7 +81,7 @@ report = [
 # NOTE: lazyqsar[fit]==3.4.2 hard-pins numpy, onnxruntime, pandas, h5py, psutil, loguru, onnxmltools
 # and xgboost — the versions here match what it forces, so changing one means checking lazyqsar first.
 train = [
-    "olinda[report]==2.0.0",  # keep in lockstep with [project].version above
+    "olinda[report]==1.3.0",  # keep in lockstep with [project].version above
     "h5py==3.14.0",
     "lazyqsar[fit]==3.4.2",
     "lightgbm==4.6.0",

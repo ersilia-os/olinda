@@ -150,7 +150,7 @@ def test_an_olinda_1_model_is_refused_with_a_way_forward(tmp_path, artifact):
     legacy.key, legacy.value = "olinda", "{}"
     path = tmp_path / "legacy.onnx"
     onnx.save(model, str(path))
-    with pytest.raises(ValueError, match="olinda 1.x"):
+    with pytest.raises(ValueError, match="olinda 1.2 or earlier"):
         OlindaArtifact(path)
 
 
