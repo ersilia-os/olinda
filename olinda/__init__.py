@@ -1,18 +1,18 @@
 """olinda — a model distillation library.
 
-Morgan fingerprints only reproduce bit-for-bit on the RDKit build a model was fused against, so
-loading an artifact under a different one is refused. That check belongs to the *model*, not to the
-package: every ``model.onnx`` records the build it needs, and :class:`~olinda.artifact.OlindaArtifact`
-compares against it at load time. Importing olinda under any RDKit is fine — training is what pins a
-version, and that constraint lives in ``pyproject.toml``.
+Whether a runtime reproduces the fingerprints a model was trained on is a property of the *model*, not
+of the package: every ``model.onnx`` carries golden vectors, and :class:`~olinda.artifact.OlindaArtifact`
+re-scores them at load time, warning (or raising, when strict) with :class:`GoldenMismatch` if they
+differ. olinda itself never imports rdkit; it featurizes through RDKit compiled to WebAssembly.
 """
 
 import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # import-time cost avoided at runtime; see __getattr__ below
+    from olinda.artifact import GoldenMismatch as GoldenMismatch
+    from olinda.artifact import GoldenMismatchWarning as GoldenMismatchWarning
     from olinda.artifact import OlindaArtifact as OlindaArtifact
-    from olinda.artifact import RDKitVersionMismatch as RDKitVersionMismatch
 
 # Silence matplotlib's "Matplotlib is building the font cache; this may take a moment." notice (emitted
 # by the font_manager logger on first import / stale cache). Set here — before matplotlib is ever lazily
@@ -22,11 +22,11 @@ logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 def __getattr__(name):
     """Expose the inference API lazily, so `import olinda` stays cheap for CLI startup."""
-    if name in ("OlindaArtifact", "RDKitVersionMismatch"):
+    if name in ("OlindaArtifact", "GoldenMismatch", "GoldenMismatchWarning"):
         from olinda import artifact
 
         return getattr(artifact, name)
     raise AttributeError(f"module 'olinda' has no attribute {name!r}")
 
 
-__all__ = ["OlindaArtifact", "RDKitVersionMismatch"]
+__all__ = ["GoldenMismatch", "GoldenMismatchWarning", "OlindaArtifact"]

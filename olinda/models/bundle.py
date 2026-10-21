@@ -5,7 +5,7 @@ import numpy as np
 
 
 class StudentModel:
-    """A trained gradient-boosting student (XGBoost or LightGBM) + optional featurizer/calibrator.
+    """A trained gradient-boosting student (XGBoost or LightGBM) + optional calibrator.
 
     The engine is recorded in ``metadata["backend"]`` and all model I/O (predict/save/load/onnx) is dispatched
     through :mod:`olinda.train.backend`, so a model round-trips regardless of which engine produced it.
@@ -15,7 +15,6 @@ class StudentModel:
     def __init__(
         self,
         booster=None,
-        featurizer=None,
         calibrator=None,
         metadata: dict | None = None,
         backend: str = "xgboost",
@@ -23,7 +22,6 @@ class StudentModel:
     ) -> None:
         self.model = model if model is not None else booster  # native GBM model
         self.booster = self.model  # backward-compat alias
-        self.featurizer = featurizer
         self.calibrator = calibrator
         self.metadata = metadata or {}
         self.backend = self.metadata.get("backend") or backend
@@ -35,19 +33,19 @@ class StudentModel:
 
     def predict(
         self,
-        X=None,
-        smiles: list[str] | None = None,
+        X,
         batch_size: int = 65536,
         calibrate: bool = True,
     ) -> np.ndarray:
-        """Predict for *X*, or featurize *smiles* first when only those are given.
+        """Predict for fingerprints *X* (decoded qmfp slot values, ``(N, slots)``).
+
+        Featurizing is not the student's business: a model learns from fingerprints, and the fused
+        ``model.onnx`` is what turns SMILES into predictions.
 
         Parameters
         ----------
-        X : array-like, optional
-            Fingerprints. Takes precedence over *smiles*.
-        smiles : list of str, optional
-            Featurized with the bundle's own featurizer, so a caller need not rebuild it.
+        X : array-like
+            Fingerprints.
         batch_size : int
             Rows per backend call, to bound peak memory on a large input.
         calibrate : bool
@@ -59,17 +57,7 @@ class StudentModel:
             One prediction per input row.
         """
         be = self._backend()
-        if X is None:
-            if self.featurizer is None or smiles is None:
-                raise ValueError("provide X or (smiles + featurizer)")
-            preds = []
-            for i in range(0, len(smiles), batch_size):
-                Xb = self.featurizer.transform(smiles[i : i + batch_size]).astype(
-                    np.float32
-                )
-                preds.append(be.predict(self.model, Xb))
-            raw = np.concatenate(preds) if preds else np.zeros(0, dtype=np.float32)
-        elif len(X) > batch_size:
+        if len(X) > batch_size:
             preds = [
                 be.predict(self.model, X[i : i + batch_size])
                 for i in range(0, len(X), batch_size)
@@ -90,20 +78,15 @@ class StudentModel:
 
         meta = dict(self.metadata)
         meta["backend"] = self.backend
-        if self.featurizer is not None and hasattr(self.featurizer, "to_dict"):
-            meta["featurizer"] = self.featurizer.to_dict()
-            meta["featurizer_class"] = type(self.featurizer).__name__
 
         with open(out_dir / "train_meta.json", "w") as fp:
             json.dump(meta, fp, indent=2)
 
     @classmethod
-    def load(cls, out_dir: str | Path, featurizer_factory=None):
-        """Load a bundle written by :meth:`save`, restoring its backend, featurizer and calibrator.
+    def load(cls, out_dir: str | Path):
+        """Load a bundle written by :meth:`save`, restoring its backend, metadata and calibrator.
 
         Accepts ``meta.json`` as well as ``train_meta.json`` so runs from before the rename still load.
-        *featurizer_factory* rebuilds the featurizer from the recorded config; without it the bundle
-        loads but can only predict from fingerprints.
         """
         from olinda.train.backend import get_backend
 
@@ -118,10 +101,6 @@ class StudentModel:
         backend = meta.get("backend", "xgboost")
         model = get_backend(backend, "cpu").load(out_dir)
 
-        fz = None
-        if featurizer_factory and "featurizer" in meta:
-            fz = featurizer_factory(meta.get("featurizer_class"), meta["featurizer"])
-
         cal = None
         cal_path = out_dir / "calibrator.json"
         if cal_path.exists():
@@ -129,6 +108,4 @@ class StudentModel:
 
             cal = IsotonicCalibrator.load(cal_path)
 
-        return cls(
-            model=model, featurizer=fz, calibrator=cal, metadata=meta, backend=backend
-        )
+        return cls(model=model, calibrator=cal, metadata=meta, backend=backend)

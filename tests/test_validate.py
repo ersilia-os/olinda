@@ -75,11 +75,11 @@ def fitted(tmp_path_factory):
     restored on teardown. It stays set for the whole module because `validate` reads the library back to
     decide whether the compounds it was handed are the ones the model was fitted on.
     """
-    import h5py
 
     import olinda.data as data_pkg
     import olinda.data.fetch as fetch
-    from olinda.featurizer import MorganCountFeaturizer
+    from olinda.featurizer import QmfpFeaturizer
+    from tests.conftest import write_library
 
     tmp_path = tmp_path_factory.mktemp("validate")
     home = tmp_path / "home"
@@ -89,12 +89,8 @@ def fitted(tmp_path_factory):
     data_pkg.OLINDA_HOME = home
     os.environ["OLINDA_BACKEND"] = "xgboost"
 
-    featurizer = MorganCountFeaturizer()
-    library = (_TRAIN * 17)[:400]
-    x = featurizer.transform(library).astype(np.uint8)
-    with h5py.File(home / "erl0_morgan.h5", "w") as f:
-        f.create_dataset("data", data=x)
-        f.create_dataset("input", data=np.array([s.encode() for s in library]))
+    featurizer = QmfpFeaturizer()
+    library, x = write_library(home, smiles=(_TRAIN * 17)[:400])
 
     def scaled(smiles):
         v = featurizer.transform(smiles)[:, :700].sum(1).astype(np.float64)
@@ -195,7 +191,8 @@ def test_reported_metrics_are_the_ones_olinda_computes(fitted):
     artifact = OlindaArtifact(model)
     soft = pd.read_csv(tmp_path / "heldout_soft.csv")
     expected = regression_metrics(
-        soft[TASK].to_numpy(), artifact.run(soft["smiles"].tolist())[TASK].to_numpy()
+        soft[TASK].to_numpy(),
+        artifact.run(soft["smiles"].tolist())[:, artifact.columns.index(TASK)],
     )
     assert metrics["soft"]["metrics"][TASK]["r2"] == pytest.approx(expected["r2"])
     assert metrics["soft"]["metrics"][TASK]["spearman"] == pytest.approx(
@@ -203,7 +200,7 @@ def test_reported_metrics_are_the_ones_olinda_computes(fitted):
     )
 
     hard = pd.read_csv(tmp_path / "heldout_hard.csv")
-    predicted = artifact.run(hard["smiles"].tolist())[TASK].to_numpy()
+    predicted = artifact.run(hard["smiles"].tolist())[:, artifact.columns.index(TASK)]
     assert metrics["hard"]["metrics"][TASK]["auroc"] == pytest.approx(
         binary_metrics(hard["assay"].to_numpy(), predicted)["auroc"]
     )

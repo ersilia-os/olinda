@@ -44,3 +44,8 @@ wheels/
 
 # ZairaChem distillation experiment (scratch: scripts, inputs, outputs, 174MB CLAMP encoder)
 zairachem_test/
+
+# The WebAssembly featurizer is built from wasm/ (see wasm/build.sh) in CI and packed into the wheel;
+# the binary and the RDKit build tree never go into git.
+/wasm/.cache/
+olinda/featurizer/*.wasm

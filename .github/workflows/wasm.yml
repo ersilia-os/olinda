@@ -1,0 +1,31 @@
+name: wasm
+
+# The WebAssembly featurizer (olinda/featurizer/rdkit_qmfp.wasm): RDKit compiled from source, which
+# takes the best part of an hour, so the finished module is cached under a key made of everything that
+# determines it. It is rebuilt only when wasm/ or the pinned Emscripten image changes, and it never
+# goes into git. Callers download the `rdkit-qmfp-wasm` artifact into olinda/featurizer/.
+on:
+  workflow_call:
+
+env:
+  EMSDK_IMAGE: emscripten/emsdk:6.0.13
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the module if wasm/ is unchanged
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: olinda/featurizer/rdkit_qmfp.wasm
+          key: rdkit-qmfp-wasm-${{ env.EMSDK_IMAGE }}-${{ hashFiles('wasm/build.sh', 'wasm/qmfp_wasm.cpp') }}
+      - name: Build RDKit to WebAssembly
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: docker run --rm -v "$PWD":/work -w /work "$EMSDK_IMAGE" bash wasm/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rdkit-qmfp-wasm
+          path: olinda/featurizer/rdkit_qmfp.wasm
+          if-no-files-found: error

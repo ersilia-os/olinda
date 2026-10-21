@@ -10,11 +10,11 @@ import rich_click as click
     help="Directory to download data into (default: ~/.olinda/).",
 )
 def setup_cmd(target_dir):
-    """Download olinda data from public S3 — the reference-library Morgan fingerprints (``erl0_morgan.h5``).
+    """Download olinda data from public S3 — the reference-library qmfp fingerprints (``erl0_qmfp_r3.h5``).
 
     Anything already present is skipped, so re-running only fetches what is missing. The download is
     best-effort (a warning, not an error, if it isn't on S3 yet); you can generate it locally with
-    ``scripts/compute_morgan_fingerprints.py``.
+    ``scripts/compute_qmfp_library.py``.
     """
     from olinda.console import rule
     from olinda.data.fetch import download_morgan_fingerprints

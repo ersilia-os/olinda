@@ -31,16 +31,23 @@ import rich_click as click
     default=None,
     help="Name of the SMILES column (default: `smiles`/`input`, whichever the file has).",
 )
-def predict_cmd(model_onnx, input_path, out_path, smiles_column):
-    """Run the fused `model.onnx`: verify RDKit, featurize the SMILES column (RDKit Morgan), run the graph.
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Refuse to predict, rather than warn, if this install does not reproduce the model's golden vectors.",
+)
+def predict_cmd(model_onnx, input_path, out_path, smiles_column, strict):
+    """Run the fused `model.onnx`: check its golden vectors, featurize the SMILES column, run the graph.
 
     The input's SMILES column may be called `smiles` or `input` — the latter is what Ersilia writes,
     and a leading `key` column is ignored — or name it outright with --smiles-column.
 
     Writes a `smiles` column followed by one column per task, named after the teacher column it distils.
     For a model with a hard-label head that number is already the blend — the weight `a`
-    happens inside the graph. The featurizer and the RDKit build it needs are read from the model's
-    embedded metadata, so the `.onnx` is the only input. Unparseable SMILES come back as empty cells.
+    happens inside the graph. The fingerprint spec is read from the model's embedded metadata, so the
+    `.onnx` is the only input; SMILES are featurized by RDKit compiled to WebAssembly, with no RDKit
+    install. On load the model's golden molecules are re-scored, which shows whether this install
+    reproduces the fingerprints it was trained on. Unparseable SMILES come back as empty cells.
     """
     from olinda.artifact import MODEL_NAME
     from olinda.console import STEP_COLORS, echo, rule, set_active_color
@@ -64,7 +71,7 @@ def predict_cmd(model_onnx, input_path, out_path, smiles_column):
             f"{model_onnx} does not exist — run `olinda fit` (or `olinda export -m <run dir>`) first"
         )
 
-    from olinda.artifact import RDKitVersionMismatch
+    from olinda.artifact import GoldenMismatch
     from olinda.predict import predict_file
 
     try:
@@ -76,6 +83,7 @@ def predict_cmd(model_onnx, input_path, out_path, smiles_column):
             out_path,
             smiles_column=smiles_column,
             workers=None,
+            strict=strict,
         )
-    except (RDKitVersionMismatch, ValueError, FileNotFoundError) as exc:
+    except (GoldenMismatch, ValueError, FileNotFoundError) as exc:
         raise click.ClickException(str(exc)) from exc

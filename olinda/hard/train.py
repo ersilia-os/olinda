@@ -14,7 +14,7 @@ import numpy as np
 
 from olinda.console import echo, step, summary_panel, sweep_progress
 from olinda.console import path as cpath
-from olinda.featurizer import MorganCountFeaturizer
+from olinda.featurizer import default_spec
 from olinda.hard.gate import _fit_tanimoto, _pearson
 from olinda.hard.layout import (
     H_REFERENCE_NAME,
@@ -70,14 +70,14 @@ def _reference_path() -> Path:
     path = Path(OLINDA_HOME) / MORGAN_FINGERPRINTS_FILENAME
     if not path.exists():
         raise FileNotFoundError(
-            f"reference library {path} not found — run `olinda setup` (or scripts/compute_morgan_fingerprints.py). "
+            f"reference library {path} not found — run `olinda setup` (or scripts/compute_qmfp_library.py). "
             "learn-hard needs it to score H across the reference and calibrate to the soft labels."
         )
     return path
 
 
 def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 50_000):
-    """Score H over every reference compound, aligned to erl0_morgan row order.
+    """Score H over every reference compound, aligned to the reference library's row order.
 
     Reads from the shared in-RAM matrix rather than reopening the library, so a multi-column run pays
     for one load instead of one per scan per column.
@@ -167,12 +167,8 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         X = np.asarray(f["x"][:], dtype=np.float32)
         y = np.asarray(f["y"][:], dtype=np.float64)
         resolved_task = str(f.attrs.get("task", "binary"))
-        featurizer_json = f.attrs.get("featurizer")
-    featurizer_dict = (
-        json.loads(featurizer_json)
-        if featurizer_json
-        else MorganCountFeaturizer().to_dict()
-    )
+        fingerprint_json = f.attrs.get("fingerprint")
+    fingerprint = json.loads(fingerprint_json) if fingerprint_json else default_spec()
     hard_model = _new_hard_model(
         resolved_task
     )  # placeholder gate: raises NotImplementedError for regression
@@ -325,9 +321,8 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
     meta = {
         "task": "binary",
         "n": int(len(y)),
-        "features": "morgan_count",
-        "featurizer": featurizer_dict,
-        "featurizer_class": "MorganCountFeaturizer",
+        "features": "qmfp",
+        "fingerprint": fingerprint,
         "hard_dir": HARD_MODEL_SUBDIR,
         "h_reference": H_REFERENCE_NAME,
         "calibrator": H_TO_S_NAME,

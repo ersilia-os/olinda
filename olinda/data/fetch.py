@@ -4,7 +4,7 @@ Single source of truth for the download URLs, local filenames, and home director
 data artefacts olinda fetches at setup time. Mirrors the lazyqsar convention: everything is
 stored under ``~/.olinda`` and downloaded with a small ``urlretrieve``-based helper.
 
-The reference-library Morgan descriptors (``erl0_morgan.h5``) live in the public ``eosvc-public``
+The reference-library qmfp fingerprints (``erl0_qmfp_r3.h5``) live in the public ``eosvc-public``
 bucket, so they download over plain HTTPS with no credentials and without eosvc installed.
 """
 
@@ -21,9 +21,12 @@ OLINDA_HOME = Path.home() / ".olinda"
 _S3_BASE = "https://eosvc-public.s3.eu-central-1.amazonaws.com"
 _S3_PREFIX = "olinda/data"
 
-# Reference-library descriptors: Morgan count fingerprints (also producible locally with
-# scripts/compute_morgan_fingerprints.py). This is the only representation olinda uses.
-MORGAN_FINGERPRINTS_FILENAME = "erl0_morgan.h5"
+# Reference-library descriptors: qmfp radius-3 fingerprints, decoded to uint8 (also producible locally
+# with scripts/compute_qmfp_library.py). This is the only representation olinda uses. The name keeps
+# "morgan" because qmfp is a Morgan fingerprint; the file name changed with the format, so a library
+# cached from olinda 1.x can never be read as this one.
+MORGAN_FINGERPRINTS_FILENAME = "erl0_qmfp_r3.h5"
+LEGACY_FILENAME = "erl0_morgan.h5"
 MORGAN_FINGERPRINTS_URL = f"{_S3_BASE}/{_S3_PREFIX}/{MORGAN_FINGERPRINTS_FILENAME}"
 
 
@@ -47,14 +50,21 @@ def _safe_download(url: str, dest: Path) -> None:
 
 
 def download_morgan_fingerprints(target_dir: str | None = None) -> Path | None:
-    """Download the reference-library Morgan count-fingerprint HDF5 (``erl0_morgan.h5``) — best-effort.
+    """Download the reference-library qmfp HDF5 (``erl0_qmfp_r3.h5``) — best-effort.
 
     If it hasn't been published to S3 yet (or the download fails), this warns and returns ``None`` rather
     than raising, so ``olinda setup`` still succeeds; you can always generate it locally with
-    ``scripts/compute_morgan_fingerprints.py``.
+    ``scripts/compute_qmfp_library.py``.
     """
     base_dir = Path(target_dir) if target_dir else OLINDA_HOME
     dest = base_dir / MORGAN_FINGERPRINTS_FILENAME
+    legacy = base_dir / LEGACY_FILENAME
+    if legacy.exists():
+        echo(
+            f"[dim]{legacy}[/] is the olinda 1.x library, which this olinda cannot read; "
+            "delete it to free 2.8 GB",
+            "warning",
+        )
     if dest.exists():
         echo(f"already present · [dim]{dest}[/]", "info")
         return dest
@@ -66,7 +76,7 @@ def download_morgan_fingerprints(target_dir: str | None = None) -> Path | None:
     except Exception as exc:
         echo(
             f"reference library not downloaded ({type(exc).__name__}); "
-            "generate locally with scripts/compute_morgan_fingerprints.py",
+            "generate locally with scripts/compute_qmfp_library.py",
             "warning",
         )
         return None

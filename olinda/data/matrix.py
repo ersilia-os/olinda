@@ -26,7 +26,7 @@ class ReferenceMatrix:
     Parameters
     ----------
     x : np.ndarray
-        The descriptor matrix, ``(n, dim)``, normally uint8 as stored in ``erl0_morgan.h5``. May be a
+        The descriptor matrix, ``(n, dim)``, normally uint8 as stored in ``erl0_qmfp_r3.h5``. May be a
         row *prefix* of the library rather than all of it — see :meth:`load`.
     n_file_rows : int, optional
         How many rows the source library actually has, when *x* is only a prefix of it. Defaults to

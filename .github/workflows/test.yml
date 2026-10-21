@@ -6,7 +6,12 @@ on:
   pull_request:
 
 jobs:
+  # Every job below needs the WebAssembly featurizer, which is built (or restored) once here.
+  wasm:
+    uses: ./.github/workflows/wasm.yml
+
   test:
+    needs: wasm
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -14,6 +19,10 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rdkit-qmfp-wasm
+          path: olinda/featurizer
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -25,33 +34,94 @@ jobs:
         run: |
           ruff check .
           ruff format --check .
+      # [dev] carries rdkit as an oracle, so this includes the byte-for-byte WebAssembly-vs-RDKit check.
       - name: Test
         run: pytest -q
 
-  # The base install promises numpy/pandas/rdkit/onnxruntime, the CLI, and nothing more. The job
-  # above can never catch a stray extras-only import on that path, because it has the whole stack.
+  # The base install promises numpy, onnxruntime and wasmtime, and nothing more: no rdkit, no pandas,
+  # no CLI stack. The job above can never catch a stray extras-only import on that path, because it
+  # has everything. This one builds a model with the training stack in one venv, then loads and scores
+  # it with ONLY the base install in another.
   inference-install:
+    needs: wasm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rdkit-qmfp-wasm
+          path: olinda/featurizer
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Build a fixture model with the training stack
+        run: |
+          python -m venv /tmp/trainenv
+          /tmp/trainenv/bin/pip install --upgrade pip
+          # pytest too: the fixture builder lives in tests/conftest.py, which imports pytest.
+          /tmp/trainenv/bin/pip install ".[train]" pytest
+          /tmp/trainenv/bin/python -c "
+          from tests.conftest import build_tiny_model
+          build_tiny_model('/tmp/fixture')
+          "
       - name: Install (no extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install .
           pip install pytest
       - name: Test the inference path
-        run: pytest -q tests/test_inference_install.py
+        env:
+          OLINDA_FIXTURE_MODEL: /tmp/fixture/model.onnx
+        run: |
+          # nothing the base install promised away may be present
+          ! python -c "import rdkit"
+          ! python -c "import pandas"
+          ! python -c "import click"
+          pytest -q tests/test_inference_install.py
       # Run the console script itself, from outside the repo so the checkout cannot shadow the
-      # installed package. Nothing exercised `olinda` on a base install before, which is exactly how
-      # a version shipped whose CLI could not start at all.
-      - name: The CLI starts, and refuses what it cannot do
+      # installed package. On a base install it must name the extra, not print a traceback.
+      - name: The olinda command names the CLI extra
         run: |
           cd /tmp
+          ! olinda --help 2>&1 | tee /tmp/cli.log
+          grep -q 'olinda\[cli\]' /tmp/cli.log
+          ! grep -q "Traceback" /tmp/cli.log
+
+  # `pip install "olinda[cli]"` is how most people run a model: `olinda predict`, still without
+  # rdkit or pandas.
+  cli-install:
+    needs: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rdkit-qmfp-wasm
+          path: olinda/featurizer
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build a fixture model with the training stack
+        run: |
+          python -m venv /tmp/trainenv
+          /tmp/trainenv/bin/pip install --upgrade pip
+          /tmp/trainenv/bin/pip install ".[train]" pytest
+          /tmp/trainenv/bin/python -c "
+          from tests.conftest import build_tiny_model
+          build_tiny_model('/tmp/fixture')
+          "
+      - name: Install (cli extra only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[cli]"
+      - name: Predict, and refuse what this tier cannot do
+        run: |
+          cd /tmp
+          ! python -c "import rdkit"
+          ! python -c "import pandas"
           olinda --help
-          olinda predict --help
+          olinda predict -m /tmp/fixture/model.onnx -i /tmp/fixture/soft.csv -o /tmp/pred.csv
+          head -3 /tmp/pred.csv
           # a distilling command must name its extra rather than dying on an import
           ! olinda fit -s x.csv -m y.onnx 2>&1 | tee /tmp/fit.log
           grep -q "olinda\[train\]" /tmp/fit.log
@@ -62,9 +132,14 @@ jobs:
   # it or not. This one builds a model with [train] in one venv, then scores it with ONLY [report] in
   # another — the same reason `inference-install` exists, one tier up.
   report-install:
+    needs: wasm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rdkit-qmfp-wasm
+          path: olinda/featurizer
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -72,8 +147,6 @@ jobs:
         run: |
           python -m venv /tmp/trainenv
           /tmp/trainenv/bin/pip install --upgrade pip
-          # pytest too: the fixture builder lives in tests/conftest.py, which imports pytest for the
-          # fixtures further down the file.
           /tmp/trainenv/bin/pip install ".[train]" pytest
           /tmp/trainenv/bin/python -c "
           from tests.conftest import build_tiny_model

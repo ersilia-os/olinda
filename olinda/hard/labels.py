@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from olinda.console import echo
-from olinda.featurizer import MorganCountFeaturizer
+from olinda.featurizer import QmfpFeaturizer
 from olinda.hard.layout import HARD_H5_NAME
 
 
@@ -25,10 +25,11 @@ def _detect_task(y: np.ndarray) -> str:
 
 
 def _featurize(smiles, featurizer):
-    """Featurize SMILES, dropping rows RDKit could not parse (all-zero fingerprint)."""
-    X = featurizer.transform([str(s) for s in smiles]).astype(np.float32)
-    valid = X.sum(axis=1) > 0
-    return X, valid
+    """Featurize SMILES; ``valid`` marks the rows RDKit could parse, which the rest drops."""
+    from olinda.featurizer.codec import decode
+
+    packed, valid = featurizer.featurize_bytes([str(s) for s in smiles])
+    return decode(packed).astype(np.float32), valid
 
 
 MIN_HARD_ROWS = 4
@@ -42,6 +43,7 @@ def prepare_hard_labels_wide(
     *,
     task: str = "auto",
     smiles_column: str | None = None,
+    spec: dict | None = None,
 ) -> dict:
     """Featurize a wide hard-label file once and write one ``hard.h5`` per matched column.
 
@@ -62,6 +64,9 @@ def prepare_hard_labels_wide(
     smiles_column : str, optional
         Name of the SMILES column (default: ``smiles``/``input``, else the first column). Which value
         columns are used is already decided by *mapping*.
+    spec : dict, optional
+        The reference library's fingerprint spec, so labelled compounds are featurized exactly as the
+        library was. Defaults to :data:`~olinda.featurizer.QMFP_SPEC`.
 
     Returns
     -------
@@ -82,7 +87,7 @@ def prepare_hard_labels_wide(
     smiles, values = resolve_smiles_frame(
         _read_table(input_path), smiles_column=smiles_column
     )
-    featurizer = MorganCountFeaturizer()
+    featurizer = QmfpFeaturizer(spec)
     X, parsed = _featurize(smiles, featurizer)
     if (~parsed).any():
         echo(f"dropping {int((~parsed).sum())} unparseable SMILES", "warning")
@@ -132,8 +137,8 @@ def prepare_hard_labels_wide(
             f.create_dataset("x", data=xc.astype(np.float32))
             f.create_dataset("y", data=yc.astype(np.float32))
             f.attrs["task"] = resolved
-            f.attrs["features"] = "morgan_count"
-            f.attrs["featurizer"] = json.dumps(featurizer.to_dict())
+            f.attrs["features"] = "qmfp"
+            f.attrs["fingerprint"] = json.dumps(featurizer.spec)
             f.attrs["n_dropped"] = int((~keep).sum())
         out[hard_col] = {
             "task": resolved,

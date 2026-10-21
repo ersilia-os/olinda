@@ -1,4 +1,4 @@
-"""``build_bundle``: fuse a trained run into one ``model.onnx``, then prove it still works."""
+"""``build_bundle``: fuse a trained run into one ``model.onnx``, prove it still works, then write it."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import numpy as np
 
 from olinda.console import STEP_COLORS, echo, rule, success, summary_panel
 from olinda.console import path as cpath
-from olinda.export.fuse import _fuse
-from olinda.export.graph import _save
+from olinda.export.fuse import _fuse, set_props
+from olinda.export.graph import _finalise, _write
 from olinda.export.metadata import MODEL_NAME
 from olinda.export.parity import _PARITY_TOL, _parity_probe
 from olinda.hard.layout import (
@@ -24,24 +24,40 @@ def build_bundle(model_dir: str | Path) -> dict:
     """Fuse a run directory into ``model.onnx``, gated on numeric parity against the Python pipeline.
 
     Every column is checked independently: the graph's output for that column must match a pure-Python
-    recomposition of exactly the same artifacts, so a mis-wired subgraph cannot slip through.
+    recomposition of exactly the same artifacts, so a mis-wired subgraph cannot slip through. The probe
+    enters the graph as bytes, so the decoder in front of the heads is checked too. The golden vectors
+    are computed from the same in-memory graph, and only then is the file written, once.
     """
+    import json
+
     import onnxruntime as ort
 
-    from olinda.featurizer import featurizer_from_meta
+    from olinda.featurizer import QmfpFeaturizer
+    from olinda.golden import compute_golden
     from olinda.models.bundle import StudentModel
 
     model_dir = Path(model_dir)
     rule("olinda · export", style=STEP_COLORS["export"], right=cpath(model_dir))
     model, plan, outputs = _fuse(model_dir)
     echo(f"fusing {len(plan)} column(s) → model.onnx", "run")
-    _save(model, model_dir / MODEL_NAME)
+    _finalise(model)
+    spec = json.loads(
+        next(p.value for p in model.metadata_props if p.key == "olinda.fingerprint")
+    )
+    featurizer = QmfpFeaturizer(spec)
+    sess = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    out_names = [o.name for o in sess.get_outputs()]
+
+    def run(packed):
+        return dict(zip(out_names, sess.run(None, {"input": packed})))
 
     echo("checking parity: model.onnx vs Python reference", "run")
     ref: dict = {}
-    fp = _parity_probe(plan)
+    packed, fp = _parity_probe(plan, spec)
     for entry in plan:
-        sm = StudentModel.load(entry["dir"], featurizer_factory=featurizer_from_meta)
+        sm = StudentModel.load(entry["dir"])
         raw = np.asarray(sm.predict(X=fp, calibrate=False)).ravel()
         surrogate = (
             np.asarray(sm.calibrator.transform(raw)).ravel()
@@ -78,13 +94,7 @@ def build_bundle(model_dir: str | Path) -> dict:
             )
         ref[entry["output"]] = (1.0 - a) * surrogate + a * gsoft
 
-    sess = ort.InferenceSession(
-        (model_dir / MODEL_NAME).read_bytes(), providers=["CPUExecutionProvider"]
-    )
-    got = {
-        o.name: np.asarray(v).ravel()
-        for o, v in zip(sess.get_outputs(), sess.run(None, {"input": fp}))
-    }
+    got = {k: np.asarray(v).ravel() for k, v in run(packed).items()}
     parity = {k: float(np.max(np.abs(got[k] - ref[k]))) for k in outputs}
     worst = max(parity.values())
     if worst > _PARITY_TOL:
@@ -92,6 +102,18 @@ def build_bundle(model_dir: str | Path) -> dict:
         raise RuntimeError(
             f"model.onnx parity failed on column {offender!r}: max abs diff {worst:.2e} > {_PARITY_TOL:.0e}"
         )
+
+    from olinda.metrics import json_safe
+
+    golden = compute_golden(run, featurizer)
+    set_props(
+        model,
+        {
+            "olinda.rdkit_version": featurizer.rdkit_version,
+            "olinda.golden": json.dumps(json_safe(golden)),
+        },
+    )
+    _write(model, model_dir / MODEL_NAME)
 
     n_hard = sum(1 for e in plan if e["has_hard"])
     size_b = (model_dir / MODEL_NAME).stat().st_size
@@ -102,6 +124,11 @@ def build_bundle(model_dir: str | Path) -> dict:
             ("Columns", f"[bold]{len(plan)}[/] · {n_hard} with a hard head"),
             ("Outputs", " · ".join(outputs)),
             ("Parity (max)", f"[bold]{worst:.2e}[/] ≤ {_PARITY_TOL:.0e}"),
+            (
+                "Featurizer",
+                f"qmfp r{spec['radius']} · RDKit {featurizer.rdkit_version} (WebAssembly)",
+            ),
+            ("Golden", f"{len(golden['smiles'])} molecules recorded"),
             ("Size", f"[bold]{size_txt}[/]"),
             ("Saved", f"[dim]{cpath(model_dir / MODEL_NAME)}[/]"),
         ],
