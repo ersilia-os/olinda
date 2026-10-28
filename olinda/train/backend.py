@@ -33,7 +33,7 @@ CANONICAL_DEFAULTS = {
     # Histogram bins. qmfp fingerprints are counts clipped at 15, sixteen values per feature, so 64 is
     # lossless for them and builds faster and leaner than 128 (benchmarked: more ≈ noise here).
     "max_bin": 64,
-    "max_depth": 8,  # XGBoost's depth cap; LightGBM is leaf-capped (num_leaves 255) with no depth limit
+    "max_depth": 8,  # only sets the leaf budget, min(2^depth - 1, 255); neither engine caps depth itself
     "learning_rate": 0.1,  # TUNED (0.05–0.3); 0.1 beat 0.3 by a wide margin on the real split
     "subsample": 0.8,  # row bagging: mild regularization + speed; standard for large-scale GBM
     "colsample": 0.5,  # 1024/2048 features per tree: decorrelation + speed on high-dim sparse (least-impactful knob)
@@ -146,7 +146,10 @@ class XGBoostBackend:
         return {
             "tree_method": "hist",
             "max_bin": int(c["max_bin"]),
-            "max_depth": int(c["max_depth"]),
+            # Mirror LightGBM: grow leaf-wise, capped by leaves alone (no depth limit, 0 = unlimited).
+            "grow_policy": "lossguide",
+            "max_depth": 0,
+            "max_leaves": min(2 ** int(c["max_depth"]) - 1, 255),
             "eta": float(c["learning_rate"]),
             "subsample": float(c["subsample"]),
             "colsample_bytree": float(c["colsample"]),

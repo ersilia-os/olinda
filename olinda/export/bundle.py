@@ -11,7 +11,13 @@ from olinda.console import path as cpath
 from olinda.export.fuse import _fuse, set_props
 from olinda.export.graph import _finalise, _write
 from olinda.export.metadata import MODEL_NAME
-from olinda.export.parity import _PARITY_TOL, _parity_probe
+from olinda.export.parity import (
+    _PARITY_TOL,
+    _RAW_SLACK,
+    _calibrated,
+    _parity_probe,
+    _step_envelope,
+)
 from olinda.hard.layout import (
     H_TO_S_NAME,
     HARD_DIRNAME,
@@ -55,17 +61,16 @@ def build_bundle(model_dir: str | Path) -> dict:
 
     echo("checking parity: model.onnx vs Python reference", "run")
     ref: dict = {}
-    packed, fp = _parity_probe(plan, spec)
+    band: dict = {}
+    packed, fp = _parity_probe(plan, spec, model_dir)
     for entry in plan:
         sm = StudentModel.load(entry["dir"])
         raw = np.asarray(sm.predict(X=fp, calibrate=False)).ravel()
-        surrogate = (
-            np.asarray(sm.calibrator.transform(raw)).ravel()
-            if sm.calibrator is not None
-            else raw.astype(np.float64)
-        )
+        surrogate = _calibrated(sm.calibrator, raw)
+        s_lo, s_hi = _step_envelope(sm.calibrator, raw)
         if not entry["has_hard"]:
             ref[entry["output"]] = surrogate
+            band[entry["output"]] = (s_lo, s_hi)
             continue
 
         from lazyqsar.base.xgboost import BaseXGBArtifact
@@ -77,9 +82,9 @@ def build_bundle(model_dir: str | Path) -> dict:
         g = np.asarray(
             BaseXGBArtifact.load(str(hard_root / HARD_MODEL_SUBDIR)).run(fp)
         )[:, 1].astype(np.float64)
-        gsoft = np.asarray(
-            IsotonicCalibrator.load(hard_root / H_TO_S_NAME).transform(g)
-        ).ravel()
+        gmap = IsotonicCalibrator.load(hard_root / H_TO_S_NAME)
+        gsoft = np.asarray(gmap.transform(g)).ravel()
+        h_lo, h_hi = _step_envelope(gmap, g)
         gate = TanimotoRegressor.load(hard_root / TANIMOTO_DIRNAME)
         a = np.asarray(gate.weight(fp)).ravel()
         # a == 0 everywhere has two very different causes. If the ceiling itself is zero the hard head did
@@ -93,9 +98,24 @@ def build_bundle(model_dir: str | Path) -> dict:
                 "happen — the probe includes that column's own labelled compounds."
             )
         ref[entry["output"]] = (1.0 - a) * surrogate + a * gsoft
+        corners = [
+            (1.0 - w) * s_ + w * h_
+            for w in (np.clip(a - _RAW_SLACK, 0, 1), np.clip(a + _RAW_SLACK, 0, 1))
+            for s_ in (s_lo, s_hi)
+            for h_ in (h_lo, h_hi)
+        ]
+        band[entry["output"]] = (np.minimum.reduce(corners), np.maximum.reduce(corners))
 
     got = {k: np.asarray(v).ravel() for k, v in run(packed).items()}
-    parity = {k: float(np.max(np.abs(got[k] - ref[k]))) for k in outputs}
+    # How far outside the reference's step envelope each output lands (zero when inside it): a calibrator is
+    # a step function, so a raw score that differs by 1e-7 between float32 and float64 can legitimately land
+    # on the neighbouring step. That is not drift, and a flat tolerance would reject good models at scale.
+    parity = {
+        k: float(np.max(np.maximum(band[k][0] - got[k], got[k] - band[k][1]).clip(0)))
+        for k in outputs
+    }
+    plain = {k: float(np.max(np.abs(got[k] - ref[k]))) for k in outputs}
+    worst_plain = max(plain.values())
     worst = max(parity.values())
     if worst > _PARITY_TOL:
         offender = max(parity, key=parity.get)
@@ -123,7 +143,11 @@ def build_bundle(model_dir: str | Path) -> dict:
         [
             ("Columns", f"[bold]{len(plan)}[/] · {n_hard} with a hard head"),
             ("Outputs", " · ".join(outputs)),
-            ("Parity (max)", f"[bold]{worst:.2e}[/] ≤ {_PARITY_TOL:.0e}"),
+            (
+                "Parity (max)",
+                f"[bold]{worst:.2e}[/] ≤ {_PARITY_TOL:.0e} · {len(packed):,} probe rows"
+                f" · raw diff {worst_plain:.1e}",
+            ),
             (
                 "Featurizer",
                 f"qmfp r{spec['morgan']['radius']} · RDKit {featurizer.rdkit_version} (WebAssembly)",
