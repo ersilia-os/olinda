@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 #
-# Inputs live in ../data/example/ (and the library in ../data/), everything the run produces goes to results/.
+# Distil the A. baumannii teacher (eos3804) into a student, with measured hard labels, and validate it.
 #
 #   ./run.sh          the real thing — distil from the full reference library, predict over all of it
 #   ./run.sh check    a fast plumbing check — 20k reference compounds, 10k at predict, tuning included
+#
+# Needs `pip install "olinda[train]"`. Inputs are read from ../data/example/ and ../data/ (see below, and
+# fetch them from the public bucket if you do not have them); everything the run produces goes to results/.
 #
 # `--max-samples` bounds every step that sweeps the library, learn-hard included, so check costs
 # minutes rather than the best part of an hour. 20k rather than a token 1k because T and the blend
 # ceiling need enough neighbours to earn a hard head worth looking at.
 #
 # `check` writes to results/check/ so it can never overwrite a real run.
-# The validate step needs the reporting extra:  pip install "olinda[report]"
 #
 # Columns are named explicitly below. olinda would find them anyway (a `smiles`/`input` column, then
 # the values after it), but naming them means a reordered or extra column in a regenerated file is
@@ -19,11 +21,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SOFT=../data/example/erl0_eos3804_v1.csv               # teacher values over the reference library
-HARD=../data/example/eos3804_hard.csv          # your own measurements
-PRED=../data/example/prediction_set.csv                # the compounds you actually want scored
-LIBRARY=../data/ersilia_reference_library_v0.csv             # the whole library, scored for good measure
-HELDOUT=../data/example/eos3804_prediction_set.csv     # the teacher's own values on PRED — 93% outside the library
+SOFT=../data/example/erl0_eos3804_v1.csv                  # teacher values over the reference library
+HARD=../data/example/eos3804_hard.csv                      # your own measurements
+PRED=../data/example/prediction_set.csv                    # the compounds you actually want scored
+LIBRARY=../data/ersilia_reference_library_v0.csv           # the whole library, scored for good measure
+HELDOUT=../data/example/eos3804_prediction_set.csv         # the teacher's own values on PRED — 93% outside the library
 
 SOFT_COL=abaumannii_inhibition_probability  # the teacher's column, in SOFT and HELDOUT
 HARD_COL=abaumannii_inhibition              # the measured column, in HARD
@@ -51,6 +53,12 @@ case "${1:-}" in
     exit 1
     ;;
 esac
+
+# Fail early, and say where the inputs come from, rather than deep inside `fit`.
+BUCKET=https://eosvc-public.s3.eu-central-1.amazonaws.com/olinda/data
+for f in "$SOFT" "$HARD" "$PRED" "$LIBRARY" "$HELDOUT"; do
+  [ -s "$f" ] || { echo "missing input: $f" >&2; echo "download it from $BUCKET/${f#../data/}" >&2; exit 1; }
+done
 
 mkdir -p "$OUT"
 
