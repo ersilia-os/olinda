@@ -114,7 +114,7 @@ exclude = ["files*", "tests*", "docs*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-# The WebAssembly featurizer, built from wasm/ by wasm/build.sh (in CI for releases) and never committed.
+# The WebAssembly featurizer, built from wasm/ by wasm/build.sh and committed, so that every install carries it.
 olinda = ["featurizer/*.wasm"]
 
 [build-system]

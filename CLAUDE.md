@@ -112,8 +112,8 @@ separately and exercises it, so the boundaries are real.
 
 `data/` is gitignored and backed by [`eosvc`](https://github.com/ersilia-os/eosvc); `access.json` is
 local. The reference library (`~/.olinda/erl0_qmfp_r3.h5`, 2.8 GB) is fetched by `olinda setup` from a
-public bucket and built by `scripts/compute_qmfp_library.py`. Never commit datasets, model artefacts,
-`.onnx` files or the compiled `.wasm`.
+public bucket and built by `scripts/compute_qmfp_library.py`. Never commit datasets, model artefacts
+or `.onnx` files (the one committed binary is the featurizer `.wasm`).
 
 ## Things that look wrong and are not
 
@@ -131,9 +131,9 @@ public bucket and built by `scripts/compute_qmfp_library.py`. Never commit datas
   turns them into the `(N, 2048)` floats the heads read. Exact counts to 15 lose nothing a model learns
   from (measured); RDKit's count simulation, which stock RDKit.js offers, cost 0.03–0.05 R², so a browser
   or Node runtime runs olinda's own WebAssembly module rather than stock RDKit.js.
-- `olinda/featurizer/rdkit_qmfp.wasm` is gitignored, yet the package cannot featurize without it. It is
-  RDKit compiled from `wasm/` by `wasm/build.sh` (inside `emscripten/emsdk`); CI builds or restores it
-  and packs it into the wheel. In a fresh checkout, run the build once (the command is at the top of the
-  script) or download the `rdkit-qmfp-wasm` artifact from a CI run.
+- `olinda/featurizer/rdkit_qmfp.wasm` is **committed** (2.4 MB): the package cannot featurize without it, and a
+  clone or `pip install git+...` must work. It is RDKit compiled from `wasm/` by `wasm/build.sh` (inside
+  `emscripten/emsdk`; the command is at the top of the script). Rebuild and commit it only when `wasm/` or
+  `RDKIT_TAG` changes; the golden vectors are what prove a rebuilt module still reproduces the models.
 - Models carry **golden vectors** instead of an RDKit version pin. On load, `OlindaArtifact` re-featurizes
   and re-scores them: that, not a version string, is the evidence a runtime reproduces the model.
