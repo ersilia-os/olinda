@@ -6,12 +6,7 @@ on:
   pull_request:
 
 jobs:
-  # Every job below needs the WebAssembly featurizer, which is built (or restored) once here.
-  wasm:
-    uses: ./.github/workflows/wasm.yml
-
   test:
-    needs: wasm
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -19,10 +14,6 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: rdkit-qmfp-wasm
-          path: olinda/featurizer
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -43,14 +34,9 @@ jobs:
   # has everything. This one builds a model with the training stack in one venv, then loads and scores
   # it with ONLY the base install in another.
   inference-install:
-    needs: wasm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: rdkit-qmfp-wasm
-          path: olinda/featurizer
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -90,14 +76,9 @@ jobs:
   # `pip install "olinda[cli]"` is how most people run a model: `olinda predict`, still without
   # rdkit or pandas.
   cli-install:
-    needs: wasm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: rdkit-qmfp-wasm
-          path: olinda/featurizer
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -132,14 +113,9 @@ jobs:
   # it or not. This one builds a model with [train] in one venv, then scores it with ONLY [report] in
   # another — the same reason `inference-install` exists, one tier up.
   report-install:
-    needs: wasm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: rdkit-qmfp-wasm
-          path: olinda/featurizer
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

@@ -6,9 +6,9 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ["site/**", "wasm/**", ".github/workflows/pages.yml", ".github/workflows/wasm.yml"]
+    paths: ["site/**", "olinda/featurizer/rdkit_qmfp.wasm", ".github/workflows/pages.yml"]
   pull_request:
-    paths: ["site/**", "wasm/**", ".github/workflows/pages.yml", ".github/workflows/wasm.yml"]
+    paths: ["site/**", "olinda/featurizer/rdkit_qmfp.wasm", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 concurrency:
@@ -19,18 +19,10 @@ env:
   ORT_WEB: "1.30.0" # onnxruntime-web, vendored into the page so it depends on no CDN at run time
 
 jobs:
-  wasm:
-    uses: ./.github/workflows/wasm.yml
-
   build:
-    needs: wasm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: rdkit-qmfp-wasm
-          path: olinda/featurizer
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

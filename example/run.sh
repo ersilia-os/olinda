@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Inputs live in data/, everything the run produces goes to results/.
+# Inputs live in ../data/example/ (and the library in ../data/), everything the run produces goes to results/.
 #
 #   ./run.sh          the real thing — distil from the full reference library, predict over all of it
 #   ./run.sh check    a fast plumbing check — 20k reference compounds, 10k at predict, tuning included
@@ -19,11 +19,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SOFT=data/erl0_eos3804_v1.csv               # teacher values over the reference library
-HARD=data/eos3804_hard.csv          # your own measurements
-PRED=data/prediction_set.csv                # the compounds you actually want scored
-LIBRARY=data/erl0_smiles.csv                # the whole library, scored for good measure
-HELDOUT=data/eos3804_prediction_set.csv     # the teacher's own values on PRED — 93% outside the library
+SOFT=../data/example/erl0_eos3804_v1.csv               # teacher values over the reference library
+HARD=../data/example/eos3804_hard.csv          # your own measurements
+PRED=../data/example/prediction_set.csv                # the compounds you actually want scored
+LIBRARY=../data/ersilia_reference_library_v0.csv             # the whole library, scored for good measure
+HELDOUT=../data/example/eos3804_prediction_set.csv     # the teacher's own values on PRED — 93% outside the library
 
 SOFT_COL=abaumannii_inhibition_probability  # the teacher's column, in SOFT and HELDOUT
 HARD_COL=abaumannii_inhibition              # the measured column, in HARD
@@ -37,7 +37,7 @@ case "${1:-}" in
     ;;
   check)
     OUT=results/check
-    LIBRARY=data/erl0_smiles_first10k.csv
+    LIBRARY=../data/example/erl0_smiles_first10k.csv
     SAMPLE_ARG="--max-samples 20000"
     # Exercise the Optuna pass too, so `check` covers `tune` and the `learn-soft` path that reads the
     # best_params.json it writes — the one stage a plain check never touches. Five trials find nothing

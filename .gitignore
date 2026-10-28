@@ -22,10 +22,9 @@ access.json
 /runs/
 /test_*/
 
-# Example INPUTS and OUTPUTS only — not the directory. example/run.sh and run_stepwise.sh are the
-# worked examples the README points at, so they ship; the teacher values they read are 136MB of
-# reference-library predictions and the results they write are models and reports.
-example/data/
+# Example OUTPUTS only — not the directory. example/run.sh and run_stepwise.sh are the worked examples
+# the README points at, so they ship; the results they write are models and reports. Their inputs live in
+# data/example/ (eosvc).
 example/results/
 
 # Python-generated files
@@ -45,13 +44,12 @@ wheels/
 # ZairaChem distillation experiment (scratch: scripts, inputs, outputs, 174MB CLAMP encoder)
 zairachem_test/
 
-# The WebAssembly featurizer is built from wasm/ (see wasm/build.sh) in CI and packed into the wheel;
-# the binary and the RDKit build tree never go into git.
+# The WebAssembly featurizer (olinda/featurizer/rdkit_qmfp.wasm) is committed, so a clone or a
+# `pip install git+...` can featurize; only the RDKit build tree under wasm/ stays out of git.
 /wasm/.cache/
-olinda/featurizer/*.wasm
 
-# The web page (site/) pulls onnxruntime-web from npm and the featurizer from the wasm build; neither is
-# committed. CI assembles both before deploying.
+# The web page (site/) pulls onnxruntime-web from npm and copies the featurizer from the package; neither
+# copy is committed. CI assembles both before deploying.
 /site/node_modules/
 /site/ort/
 /site/rdkit_qmfp.wasm

@@ -19,8 +19,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# Inputs live in data/, everything the run produces goes to results/.
-DATA=${DATA:-data}
+# Inputs live in ../data/example/, everything the run produces goes to results/.
+DATA=${DATA:-../data/example}
 OUT=${OUT:-results}
 
 SOFT=${SOFT:-$DATA/erl0_eos3804_v1.csv}          # teacher values over the reference library
