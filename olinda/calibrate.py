@@ -115,6 +115,11 @@ class IsotonicCalibrator:
             # Kept so callers can report the magnitude without paying for a second ranking pass.
             self.rank_correlation = _spearman_sign(raw, target)
             self._sign = -1 if self.rank_correlation < 0 else 1
+            if self._sign < 0:
+                logger.warning(
+                    f"calibrator fitted on a decreasing relationship (Spearman {self.rank_correlation:.3f}): "
+                    "the raw scores run opposite to the target"
+                )
         else:
             self._sign = 1 if increasing else -1
         raw = self._sign * raw

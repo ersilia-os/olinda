@@ -190,7 +190,7 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         hard_model.save(str(hard_dir))
         selection = _selection_report(hard_model)
         echo(
-            f"ready · {selection['preset']} preset · {selection['best_iteration']:,} trees",
+            f"ready · {selection['preset']} preset · {selection['best_iteration'] + 1:,} trees",
             "info",
             sub=True,
         )
@@ -346,7 +346,7 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
     rows = [
         (
             "Hard model H",
-            f"[bold]{selection['preset']}[/] · {selection['best_iteration']:,} trees",
+            f"[bold]{selection['preset']}[/] · {selection['best_iteration'] + 1:,} trees",
         ),
         ("Reference scored", f"[bold]{len(gv):,}[/] compounds"),
         (

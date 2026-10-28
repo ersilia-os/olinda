@@ -184,20 +184,21 @@ def prepare_cmd(
 
     # --- per-column value-stratified splits; the descriptor matrix is never copied ------------
     step(2, n_steps, "planning per-column splits")
+    seed = 42
     manifest = runlib.new_manifest(
         soft_labels=soft_labels,
         hard_labels=hard_labels,
         reference={"name": MORGAN_FINGERPRINTS_FILENAME, "n_rows": n_rows, "dim": dim},
         features=features,
         val_frac=val_frac,
-        seed=42,
+        seed=seed,
         limit=max_samples,
     )
     by_id, splits, name_to_id = {}, {}, {}
     for name in selected_cols:
         y = targets[name]
         train_idx, val_idx = split_reference_to_indices(
-            y, val_frac=val_frac, limit=max_samples
+            y, val_frac=val_frac, seed=seed, limit=max_samples
         )[:2]
         entry = runlib.add_column(
             manifest, name=name, y=y, train_idx=train_idx, val_idx=val_idx

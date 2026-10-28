@@ -23,8 +23,8 @@ The end goal is to predict the soft-label distribution informed by the hard labe
 ``<model_dir>/_hard/``. The gate decides *where* to trust ``H``: the blend
 ``prediction = (1-a)·S + a·G_soft`` leans on the hard signal only near the labeled chemistry, and how far it
 can ever lean is capped by ``a_max``, which the head earns from how well its calibrated output reproduces
-the teacher's scale (:func:`_blend_ceiling`) — a head that loses to the surrogate earns zero and the model
-ships soft-only. All stages are fused into a single ``model.onnx`` (see :mod:`olinda.export`) and served by
+the teacher's scale (:func:`_blend_ceiling`) — a head that agrees too little with the teacher earns zero and
+the model ships soft-only. That is in-sample agreement with the teacher, not a test against real labels. All stages are fused into a single ``model.onnx`` (see :mod:`olinda.export`) and served by
 :class:`~olinda.artifact.OlindaArtifact`.
 """
 
