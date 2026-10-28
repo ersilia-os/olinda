@@ -1,29 +1,51 @@
 name: wasm
 
-# The WebAssembly featurizer (olinda/featurizer/rdkit_qmfp.wasm): RDKit compiled from source, which
-# takes the best part of an hour, so the finished module is cached under a key made of everything that
-# determines it. It is rebuilt only when wasm/ or the pinned Emscripten image changes, and it never
-# goes into git. Callers download the `rdkit-qmfp-wasm` artifact into olinda/featurizer/.
+# The WebAssembly featurizer (olinda/featurizer/rdkit_qmfp.wasm) is committed, so every job and every
+# clone already has it. This workflow guards the one way that can go wrong: wasm/ changing without the
+# committed binary being refreshed. It rebuilds RDKit from source in the pinned Emscripten image (the
+# best part of an hour cold, so wasm/.cache is cached), then runs the byte-for-byte RDKit comparison in
+# tests/test_qmfp.py against the module it just built. Emscripten output need not be identical between
+# machines, so a differing hash is reported, not failed; what must hold is that the rebuilt module
+# reproduces RDKit. The rebuilt file is uploaded: to refresh the committed binary, commit that file.
 on:
-  workflow_call:
+  pull_request:
+    paths: ["wasm/**", ".github/workflows/wasm.yml"]
+  workflow_dispatch:
 
 env:
   EMSDK_IMAGE: emscripten/emsdk:6.0.13
 
 jobs:
-  build:
+  rebuild:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Restore the module if wasm/ is unchanged
-        id: cache
+      - name: Keep the committed module for comparison
+        run: cp olinda/featurizer/rdkit_qmfp.wasm /tmp/committed.wasm
+      - name: Restore the RDKit build tree
         uses: actions/cache@v4
         with:
-          path: olinda/featurizer/rdkit_qmfp.wasm
-          key: rdkit-qmfp-wasm-${{ env.EMSDK_IMAGE }}-${{ hashFiles('wasm/build.sh', 'wasm/qmfp_wasm.cpp') }}
+          path: wasm/.cache
+          key: rdkit-qmfp-cache-${{ env.EMSDK_IMAGE }}-${{ hashFiles('wasm/build.sh') }}
+          restore-keys: rdkit-qmfp-cache-${{ env.EMSDK_IMAGE }}-
       - name: Build RDKit to WebAssembly
-        if: steps.cache.outputs.cache-hit != 'true'
         run: docker run --rm -v "$PWD":/work -w /work "$EMSDK_IMAGE" bash wasm/build.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # [dev] carries rdkit, the oracle: the rebuilt module must agree with it byte for byte.
+      - name: The rebuilt module reproduces RDKit
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pytest -q tests/test_qmfp.py
+      - name: Compare with the committed module
+        run: |
+          if cmp -s /tmp/committed.wasm olinda/featurizer/rdkit_qmfp.wasm; then
+            echo "The committed rdkit_qmfp.wasm is identical to a fresh build."
+          else
+            echo "::notice::The rebuild differs from the committed rdkit_qmfp.wasm. Download the artifact and commit it if wasm/ changed."
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: rdkit-qmfp-wasm

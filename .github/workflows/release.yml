@@ -7,22 +7,13 @@ on:
     types: [published]
 
 jobs:
-  # The WebAssembly featurizer is built from wasm/ (or restored from cache) and packed into the wheel.
-  wasm:
-    uses: ./.github/workflows/wasm.yml
-
   publish:
-    needs: wasm
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write # trusted publishing; no API token stored in the repo
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: rdkit-qmfp-wasm
-          path: olinda/featurizer
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
