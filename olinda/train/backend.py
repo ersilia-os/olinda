@@ -33,7 +33,7 @@ CANONICAL_DEFAULTS = {
     # Histogram bins. qmfp fingerprints are counts clipped at 15, sixteen values per feature, so 64 is
     # lossless for them and builds faster and leaner than 128 (benchmarked: more ≈ noise here).
     "max_bin": 64,
-    "max_depth": 8,  # deep trees for large N; LightGBM num_leaves = min(2^8-1, 255) saturates at this depth
+    "max_depth": 8,  # XGBoost's depth cap; LightGBM is leaf-capped (num_leaves 255) with no depth limit
     "learning_rate": 0.1,  # TUNED (0.05–0.3); 0.1 beat 0.3 by a wide margin on the real split
     "subsample": 0.8,  # row bagging: mild regularization + speed; standard for large-scale GBM
     "colsample": 0.5,  # 1024/2048 features per tree: decorrelation + speed on high-dim sparse (least-impactful knob)
@@ -333,10 +333,10 @@ class LightGBMBackend:
         md = int(c["max_depth"])
         return {
             "max_bin": int(c["max_bin"]),
-            "max_depth": md,
-            # Leaf-wise: cap leaves rather than rely on depth alone. (Benchmarked num_leaves 63/127/255 and
-            # min_data_in_leaf 20/100/200 on the real 200k split — all within noise of each other; the real
-            # accuracy lever is learning_rate, not these overfit knobs, so keep the simple mapping.)
+            # Leaf-wise: the leaf count is the only cap. A depth limit of 8 starved 255-leaf trees of their
+            # deep branches; on 100k rows, out-of-library R² vs the teacher rose 0.695 -> 0.734 without it,
+            # at no extra training time. (min_child_weight, colsample, lambda, max_bin: noise.)
+            "max_depth": -1,
             "num_leaves": min(2**md - 1, 255),
             "learning_rate": float(c["learning_rate"]),
             "bagging_fraction": float(c["subsample"]),

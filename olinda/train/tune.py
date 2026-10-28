@@ -66,7 +66,7 @@ def _suggest(trial) -> dict:
     Per the 1.4M-compound gradient-boosting benchmark (J. Cheminformatics 2023), the learning rate and the
     minimum split gain matter most under a budget; ``colsample`` is least relevant. ``max_depth`` is **fixed
     at 8** (``CANONICAL_DEFAULTS``) — the final fit is always ~1.3M rows (deep is right), and for LightGBM
-    ``num_leaves = min(2**depth-1, 255)`` saturates at depth 8, so there is nothing to gain from searching it.
+    LightGBM ignores it (leaf-capped at 255), so there is nothing to gain from searching it.
     learning_rate range brackets the benchmarked sweet spot (~0.1); it needs ``tune_rounds`` high enough
     (≥~2000) that the low end converges, else the short trials bias the study toward high eta.
     """

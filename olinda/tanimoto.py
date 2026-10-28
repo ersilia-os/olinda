@@ -58,9 +58,10 @@ import numpy as np
 T_LO: float = 0.4
 T_HI: float = 0.7
 
-# Ceiling on the blend weight. Even an exact match keeps a third of the surrogate, because the hard head
+# Ceiling on the blend weight. Even an exact match keeps most of the surrogate, because the hard head
 # is trained on far less data and the surrogate carries the teacher's whole view of the library.
-A_CEILING: float = 0.66
+# Cross-validated on real labels (eos3804, 7.7k compounds), AP peaked near 0.33 and fell by 0.66.
+A_CEILING: float = 0.4
 
 # Below this the hard head is not mixed in at all. A few percent of a weakly aligned signal cannot move
 # a prediction enough to be worth the risk of moving it the wrong way, so the dead zone (0, A_MIN)
