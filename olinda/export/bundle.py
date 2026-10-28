@@ -146,7 +146,7 @@ def build_bundle(model_dir: str | Path) -> dict:
             (
                 "Parity (max)",
                 f"[bold]{worst:.2e}[/] ≤ {_PARITY_TOL:.0e} · {len(packed):,} probe rows"
-                f" · raw diff {worst_plain:.1e}",
+                f" · unenveloped {worst_plain:.1e}",
             ),
             (
                 "Featurizer",

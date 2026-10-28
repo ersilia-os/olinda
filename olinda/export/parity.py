@@ -25,7 +25,7 @@ _PARITY_RANDOM = (
 )
 
 
-_RAW_SLACK = 1e-5  # float32-vs-float64 slack on a raw score: tree sums agree to ~5e-7, so this is 20x headroom
+_RAW_SLACK = 3e-5  # float32-vs-float64 slack on a raw score: tree sums agree to ~1e-6 (XGBoost) and ~5e-7 (LightGBM)
 
 
 def _calibrated(calibrator, raw: np.ndarray) -> np.ndarray:
