@@ -14,7 +14,12 @@ from pathlib import Path
 from olinda.export.decoder import DECODED, qmfp_decoder_nodes
 from olinda.export.gate import _tanimoto_model
 from olinda.export.graph import _OPSET, _toposort
-from olinda.export.heads import _blender_model, _prob1_model, _soft_model_proto
+from olinda.export.heads import (
+    _blender_model,
+    _prob1_model,
+    _soft_model_proto,
+    prime_soft_conversions,
+)
 from olinda.export.isotonic import _isotonic_model
 from olinda.export.metadata import PRODUCER_NAME, SCHEMA_VERSION, _bundle_metadata
 from olinda.export.parity import _assert_model_belongs_to
@@ -137,6 +142,12 @@ def _fuse(model_dir: Path):
     inits.extend(dec_inits)
     outputs: list[str] = []
 
+    prime_soft_conversions(
+        [
+            (sm, entry["dir"], int(sm.metadata.get("x_dim") or n_features))
+            for entry, sm in zip(plan, students)
+        ]
+    )
     for entry, sm in zip(plan, students):
         p = (
             entry["id"] + "_"

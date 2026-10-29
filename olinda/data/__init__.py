@@ -13,7 +13,13 @@ from .reference import (
     MAX_COLUMNS as MAX_COLUMNS,
 )
 from .reference import (
+    WARN_HARD_ROWS as WARN_HARD_ROWS,
+)
+from .reference import (
     check_column_budget as check_column_budget,
+)
+from .reference import (
+    check_target as check_target,
 )
 from .reference import (
     load_reference_calcs_frame as load_reference_calcs_frame,
@@ -33,6 +39,8 @@ _LAZY = ("apply_bin_weights", "resolve_regression_weights")
 
 __all__ = [
     "MAX_COLUMNS",
+    "WARN_HARD_ROWS",
+    "check_target",
     "MORGAN_FINGERPRINTS_FILENAME",
     "OLINDA_HOME",
     "check_column_budget",

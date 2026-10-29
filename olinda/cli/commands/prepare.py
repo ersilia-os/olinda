@@ -94,7 +94,9 @@ def prepare_cmd(
     from olinda.data import (
         MORGAN_FINGERPRINTS_FILENAME,
         OLINDA_HOME,
+        WARN_HARD_ROWS,
         check_column_budget,
+        check_target,
         load_reference_calcs_frame,
         match_hard_columns,
         split_reference_to_indices,
@@ -207,11 +209,15 @@ def prepare_cmd(
     for name in selected_cols:
         y = targets[name]
         try:
-            train_idx, val_idx = split_reference_to_indices(
+            train_idx, val_idx, split_info = split_reference_to_indices(
                 y, val_frac=val_frac, seed=seed, limit=max_samples
-            )[:2]
+            )
         except ValueError as exc:
             raise click.ClickException(f"column '{name}': {exc}") from exc
+        try:
+            check_target(name, split_info)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
         entry = runlib.add_column(
             manifest, name=name, y=y, train_idx=train_idx, val_idx=val_idx
         )
@@ -261,6 +267,12 @@ def prepare_cmd(
                 f"{soft_col}: [bold]{info['n']:,}[/] hard rows · {info['task']}{pos}",
                 "run",
             )
+            if info["n"] > WARN_HARD_ROWS:
+                echo(
+                    f"{soft_col}: {info['n']:,} labelled compounds is a lot — the similarity gate compares "
+                    "each against the whole library, so `learn-hard` will take a long time",
+                    "warning",
+                )
 
     runlib.write_manifest(md, manifest)
 

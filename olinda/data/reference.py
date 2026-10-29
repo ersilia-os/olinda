@@ -37,6 +37,43 @@ def check_column_budget(columns) -> None:
         )
 
 
+MIN_TARGET_ROWS = 100
+"""Fewest finite teacher values a column needs: below this there is nothing to hold back for validation."""
+
+WARN_TARGET_ROWS = 1000
+"""Under this many rows the split and early stopping are noisy; allowed, but said out loud."""
+
+WARN_HARD_ROWS = 100_000
+"""A labelled set this large is unusual and makes the similarity gate (one pass over the library per
+labelled compound) take a long time; allowed, but said out loud."""
+
+
+def check_target(name: str, info: dict) -> None:
+    """Refuse a column that cannot be learned, and say so for one that barely can.
+
+    *info* is what :func:`~olinda.data.split.split_reference_to_indices` reports. Rows that are not finite
+    (NaN, or too large for a float32) were already left out of it, so a column of those has no rows here.
+    """
+    n = int(info["n_used"])
+    if n < MIN_TARGET_ROWS:
+        raise ValueError(
+            f"column '{name}' has {n} finite value(s); at least {MIN_TARGET_ROWS} are needed to train "
+            "and validate on. Is the column empty, or is --max-samples very small?"
+        )
+    if info["vmin"] == info["vmax"]:
+        raise ValueError(
+            f"column '{name}' is constant ({info['vmin']:g} on all {n:,} rows), so there is nothing to learn"
+        )
+    if n < WARN_TARGET_ROWS:
+        echo(
+            f"{name}: only {n:,} rows — the validation split is small and results will be noisy",
+            "warning",
+        )
+    dropped = int(info.get("n_dropped") or 0)
+    if dropped:
+        echo(f"{name}: {dropped:,} non-finite value(s) left out", "warning")
+
+
 def match_hard_columns(soft_columns, hard_columns) -> dict:
     """Map each hard-label column onto the soft column it provides hard labels for.
 

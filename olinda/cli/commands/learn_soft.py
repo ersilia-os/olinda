@@ -65,6 +65,12 @@ def learn_soft_cmd(model_dir, num_boost_round, fuse):
         raise click.ClickException(str(exc)) from exc
 
     columns = manifest["columns"]
+    from olinda.export.graph import check_fused_size
+
+    try:
+        check_fused_size(len(columns), num_boost_round)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     features = manifest["features"].get("features", "morgan")
     dim = manifest["reference_library"]["dim"]
     started = time.time()

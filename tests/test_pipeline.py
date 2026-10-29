@@ -231,9 +231,10 @@ def test_a_changed_reference_library_is_refused(tmp_path, library):
 def test_a_hard_head_that_earns_no_weight_ships_soft_only(tmp_path, library):
     """ "One that loses to the surrogate is dropped, leaving the column soft-only" — the README's claim.
 
-    A teacher with no variance to explain gives an undefined R², so the ceiling comes out zero. That has
-    to *disable* the blend, not crash the run and not brick the fuse: with ``a == 0`` the prediction is
-    exactly the surrogate, and the graph must still build, load and predict.
+    A teacher that is noise unrelated to the molecules gives the hard head nothing to explain, so the
+    ceiling comes out zero. That has to *disable* the blend, not crash the run and not brick the fuse: with
+    ``a == 0`` the prediction is exactly the surrogate, and the graph must still build, load and predict.
+    (A truly constant teacher no longer gets this far: `prepare` refuses it.)
     """
     import numpy as np
 
@@ -242,7 +243,11 @@ def test_a_hard_head_that_earns_no_weight_ships_soft_only(tmp_path, library):
     home, smiles, x = library
     flat = tmp_path / "flat.csv"
     pd.DataFrame(
-        {"smiles": smiles, "activity_probability": np.full(len(smiles), 0.42)}
+        {
+            "smiles": smiles,
+            "activity_probability": 0.42
+            + np.random.default_rng(0).normal(0, 1e-3, len(smiles)),
+        }
     ).to_csv(flat, index=False)
     hard = write_hard(tmp_path, smiles, x)
 
@@ -255,7 +260,7 @@ def test_a_hard_head_that_earns_no_weight_ships_soft_only(tmp_path, library):
     meta = json.loads(
         (run_dir / "columns" / "c0" / HARD_DIRNAME / HARD_META_NAME).read_text()
     )
-    assert meta["tanimoto"]["a_max"] == 0.0, "no variance to explain ⇒ no weight earned"
+    assert meta["tanimoto"]["a_max"] == 0.0, "nothing to explain ⇒ no weight earned"
 
     # The fuse must still produce a working model, and with no weight earned it must predict exactly
     # what the surrogate alone predicted — the hard branch contributes nothing.
@@ -323,3 +328,75 @@ def test_a_fit_that_fails_in_prepare_leaves_no_folder_behind(tmp_path, library):
     assert result.exit_code != 0
     assert "must have" in plain(result)
     assert not (tmp_path / "out" / "model").exists()
+
+
+def test_prepare_refuses_a_constant_column(tmp_path, library):
+    home, smiles, x = library
+    flat = tmp_path / "flat.csv"
+    pd.DataFrame({"smiles": smiles, "y": [0.5] * len(smiles)}).to_csv(flat, index=False)
+    result = run_cli(["prepare", "-s", flat, "-m", tmp_path / "run"])
+    assert result.exit_code != 0
+    assert "is constant" in plain(result)
+
+
+def test_prepare_refuses_a_column_with_almost_no_finite_values(tmp_path, library):
+    home, smiles, x = library
+    sparse = tmp_path / "sparse.csv"
+    values = [float("nan")] * len(smiles)
+    values[:3] = [0.1, 0.2, 0.3]
+    pd.DataFrame({"smiles": smiles, "y": values}).to_csv(sparse, index=False)
+    result = run_cli(["prepare", "-s", sparse, "-m", tmp_path / "run"])
+    assert result.exit_code != 0
+    assert "finite value" in plain(result)
+
+
+def test_learn_soft_refuses_a_model_too_big_for_one_onnx_file_before_training(
+    tmp_path, library
+):
+    """The 2 GB limit is only met after every column trains; the worst case is known beforehand."""
+    home, smiles, x = library
+    soft = write_soft(tmp_path, smiles, x, columns=("activity",))
+    run = tmp_path / "run"
+    assert run_cli(["prepare", "-s", soft, "-m", run]).exit_code == 0
+    result = run_cli(["learn-soft", "-m", run, "--num-boost-round", "200000"])
+    assert result.exit_code != 0
+    assert "--num-boost-round" in plain(result) and "limit" in plain(result)
+    assert not (run / "columns" / "c0" / "train_meta.json").exists()
+
+
+def test_boosters_converted_in_parallel_give_the_same_predictions(
+    tmp_path, library, backend, monkeypatch
+):
+    """Large boosters are converted in worker processes; the model they make must be the one a serial run makes."""
+    import onnxruntime as ort
+
+    from olinda.export import heads
+    from olinda.train.backend import CANONICAL_DEFAULTS
+
+    home, smiles, x = library
+    monkeypatch.setitem(CANONICAL_DEFAULTS, "min_child_weight", 1.0)
+    soft = write_soft(tmp_path, smiles, x)
+
+    def build(name, threshold):
+        monkeypatch.setattr(heads, "_PARALLEL_MIN_BYTES", threshold)
+        run = tmp_path / name
+        assert (
+            run_cli(["prepare", "-s", soft, "-m", run, "--val-frac", "0.2"]).exit_code
+            == 0
+        )
+        assert (
+            run_cli(["learn-soft", "-m", run, "--num-boost-round", "40"]).exit_code == 0
+        )
+        return run
+
+    parallel = build("parallel", 0)  # every booster counts as large
+    serial = build("serial", 10**12)  # none does
+    probe = x[:50].astype("uint8")
+    from olinda.featurizer.codec import pack
+
+    outs = []
+    for run in (parallel, serial):
+        s = ort.InferenceSession(str(run / "model.onnx"))
+        outs.append(s.run(None, {"input": pack(probe)}))
+    for a, b in zip(*outs):
+        assert np.array_equal(a, b)
