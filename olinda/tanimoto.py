@@ -63,6 +63,12 @@ T_HI: float = 0.7
 # Cross-validated on real labels (eos3804, 7.7k compounds), AP peaked near 0.33 and fell by 0.66.
 A_CEILING: float = 0.4
 
+# The same cap for a head trained on continuous labels. PROVISIONAL: 0.4 was cross-validated on binary
+# labels (average precision), and nothing equivalent has been measured for regression, so this starts
+# lower. A regression head's error is unbounded where a probability's is not, and its calibrated output
+# is a mean, which a hard measurement is noisier than. Raise it only against real held-out measurements.
+A_CEILING_REGRESSION: float = 0.25
+
 # Below this the hard head is not mixed in at all. A few percent of a weakly aligned signal cannot move
 # a prediction enough to be worth the risk of moving it the wrong way, so the dead zone (0, A_MIN)
 # collapses to zero and the model ships soft-only rather than carrying a token hard branch.

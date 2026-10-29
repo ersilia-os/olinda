@@ -73,7 +73,7 @@ Assuming you have your soft labels calculated, you can simply get a distilled (s
 olinda fit --soft-labels my_soft_labels.csv --model-onnx my_model.onnx
 ```
 
-Optionally, you can provide **hard labels** (ground truth) if you have them. For now, only binary (1/0) labels are allowed as hard labels.
+Optionally, you can provide **hard labels** (ground truth) if you have them. Hard labels can be binary (1/0) or continuous measurements; olinda detects which per column (`--task` overrides). A continuous head is capped at a lower blend weight than a binary one (0.25 against 0.4), a provisional figure that has not yet been validated against real measurements.
 
 ```bash
 olinda fit --soft-labels my_soft_labels.csv --hard-labels my_hard_labels.csv --model-onnx my_model.onnx

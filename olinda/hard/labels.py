@@ -33,6 +33,9 @@ def _featurize(smiles, featurizer):
 
 
 MIN_HARD_ROWS = 4
+MIN_REGRESSION_ROWS = (
+    20  # fewer and a continuous head has nothing to fit or to be calibrated against
+)
 MIN_PER_CLASS = 2  # below this a class-stratified train/val split is impossible
 
 
@@ -126,9 +129,16 @@ def prepare_hard_labels_wide(
                     "Drop the column or supply more labels."
                 )
         else:
-            raise NotImplementedError(
-                f"hard column '{hard_col}' looks continuous; only binary hard labels is supported today"
-            )
+            if len(yc) < MIN_REGRESSION_ROWS:
+                raise ValueError(
+                    f"hard column '{hard_col}' has {len(yc)} usable row(s); a continuous column needs at "
+                    f"least {MIN_REGRESSION_ROWS} to learn from. Supply more labels or drop the column."
+                )
+            if float(np.ptp(yc)) == 0.0:
+                raise ValueError(
+                    f"hard column '{hard_col}' holds a single value ({yc[0]:g}), so there is nothing to learn. "
+                    "Drop the column."
+                )
 
         perm = np.random.RandomState(42).permutation(len(yc))
         xc, yc = xc[perm], yc[perm]

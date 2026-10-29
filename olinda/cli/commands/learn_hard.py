@@ -15,7 +15,7 @@ from olinda.cli.guards import require_train
     help="A run prepared with --hard-labels; artifacts go under columns/<id>/_hard/.",
 )
 def learn_hard_cmd(model_dir):
-    """Learn from hard (binary) labels and calibrate them onto the soft-label scale — four clear steps.
+    """Learn from hard labels (binary or continuous) and calibrate them onto the soft-label scale — four clear steps.
 
     Runs once per matched column, reading that column's `hard.h5` (from `prepare --hard-labels`): (1) trains
     `H`, the hard-label model; (2) scores `H` across the full reference library (`erl0_qmfp_r3.h5`,
