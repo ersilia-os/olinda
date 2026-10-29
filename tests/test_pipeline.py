@@ -471,3 +471,157 @@ def test_an_unreadable_kept_conversion_is_made_again(tmp_path, library, monkeypa
     proto = heads._soft_model_proto(sm, int(sm.metadata["x_dim"]), column)
     onnx.checker.check_model(proto)
     assert (column / heads.SOFT_ONNX_NAME).stat().st_size > 100
+
+
+def _write_continuous_hard(
+    tmp_path, smiles, x, column="activity", scale=40.0, skewed=False
+):
+    """Measurements on their own scale (here ~5 to ~45), not a probability: a concentration, say.
+
+    ``skewed`` makes them positive with a long right tail, which lazy-qsar trains with a Tweedie objective.
+    """
+    from tests.conftest import _target
+
+    take = np.arange(0, len(smiles), 3)
+    rng = np.random.default_rng(3)
+    values = 5.0 + scale * _target(x, 0)[take] + rng.normal(0, 0.5, len(take))
+    if skewed:
+        values = 10.0 * np.exp(
+            4.0 * _target(x, 0)[take] + rng.normal(0, 0.1, len(take))
+        )
+    path = tmp_path / "hard_continuous.csv"
+    pd.DataFrame({"smiles": [smiles[i] for i in take], column: values}).to_csv(
+        path, index=False
+    )
+    return path
+
+
+@pytest.mark.parametrize("skewed", [False, True], ids=["gaussian", "skewed-positive"])
+def test_continuous_hard_labels_blend_into_the_prediction(tmp_path, library, skewed):
+    """A regression head is fused, calibrated onto the teacher's scale, and capped lower than a classifier."""
+    from olinda.hard import HARD_DIRNAME, HARD_META_NAME
+    from olinda.tanimoto import A_CEILING_REGRESSION
+
+    home, smiles, x = library
+    soft = write_soft(tmp_path, smiles, x, columns=("activity", "solubility"))
+    hard = _write_continuous_hard(tmp_path, smiles, x, skewed=skewed)
+    run_dir = _steps(soft, tmp_path / "run", hard)
+    if skewed:  # the case whose export drops the link function: make sure it is the one being run
+        from olinda.hard import HARD_MODEL_SUBDIR
+
+        fit = json.loads(
+            (
+                run_dir
+                / "columns"
+                / "c0"
+                / HARD_DIRNAME
+                / HARD_MODEL_SUBDIR
+                / "xgboost.json"
+            ).read_text()
+        )
+        assert fit["params"]["objective"] == "reg:tweedie"
+
+    meta = json.loads(
+        (run_dir / "columns" / "c0" / HARD_DIRNAME / HARD_META_NAME).read_text()
+    )
+    assert meta["task"] == "regression"
+    assert 0.0 < meta["tanimoto"]["a_max"] <= A_CEILING_REGRESSION
+    assert meta["tanimoto"]["a_max_ceiling"] == A_CEILING_REGRESSION
+
+    artifact = OlindaArtifact(run_dir)
+    heads = {h["role"]: h for h in artifact.heads_for("activity_probability")}
+    assert heads["hard"]["task"]["type"] == "regression"
+    assert artifact.roles_for("solubility_probability") == ["soft"]
+
+    # the published number is still the blend of the surrogate and the *calibrated* head, and that
+    # calibrated head lives on the teacher's scale rather than the labels' (5 to 45)
+    parts = peek_internals(
+        run_dir / "model.onnx", smiles[:12], ("c0_s", "c0_h_s", "c0_a")
+    )
+    a = parts["c0_a"]
+    np.testing.assert_allclose(
+        parts["activity_probability"],
+        (1.0 - a) * parts["c0_s"] + a * parts["c0_h_s"],
+        atol=1e-9,
+    )
+    assert parts["c0_h_s"].max() <= 1.0 + 1e-9
+    assert np.any(a > 0.0), "the hard head earned no weight at all"
+
+
+def test_a_binary_head_keeps_its_own_ceiling(tmp_path, library):
+    """Adding a regression head must not move the classification path."""
+    from olinda.hard import HARD_DIRNAME, HARD_META_NAME
+    from olinda.tanimoto import A_CEILING
+
+    home, smiles, x = library
+    soft = write_soft(tmp_path, smiles, x, columns=("activity",))
+    run_dir = _steps(soft, tmp_path / "run", write_hard(tmp_path, smiles, x))
+    meta = json.loads(
+        (run_dir / "columns" / "c0" / HARD_DIRNAME / HARD_META_NAME).read_text()
+    )
+    assert meta["task"] == "binary"
+    assert meta["tanimoto"]["a_max_ceiling"] == A_CEILING
+
+
+@pytest.mark.parametrize(
+    "values,fragment",
+    [
+        (lambda n: np.full(n, 3.5), "single value"),
+        (lambda n: np.linspace(0, 1, n)[:10], "needs at least"),
+    ],
+)
+def test_unusable_continuous_hard_labels_are_refused_at_prepare(
+    tmp_path, library, values, fragment
+):
+    home, smiles, x = library
+    soft = write_soft(tmp_path, smiles, x, columns=("activity",))
+    take = np.arange(0, 90)
+    vals = values(len(take))
+    hard = tmp_path / "bad.csv"
+    pd.DataFrame(
+        {"smiles": [smiles[i] for i in take[: len(vals)]], "activity": vals + 0.1}
+    ).to_csv(hard, index=False)
+    result = run_cli(["prepare", "-s", soft, "-m", tmp_path / "run", "-h", hard])
+    assert result.exit_code != 0 and fragment in plain(result)
+    assert "Traceback" not in result.output
+
+
+def test_the_blend_ceiling_can_be_lowered_but_not_raised_past_the_default():
+    from olinda.hard.gate import _blend_ceiling
+    from olinda.tanimoto import A_CEILING
+
+    assert _blend_ceiling(0.9) == A_CEILING  # the classifier's, unchanged
+    assert _blend_ceiling(0.9, 0.25) == 0.25
+    assert _blend_ceiling(0.15, 0.25) == pytest.approx(0.15)  # R² still binds
+    assert _blend_ceiling(0.05, 0.25) == 0.0  # and still switches the blend off
+    assert _blend_ceiling(float("nan"), 0.25) == 0.0
+
+
+def test_a_regressor_export_may_be_offset_but_not_reordered(tmp_path):
+    """A converter that adds a constant is harmless (the map is fitted on the ONNX); one that scrambles is not."""
+    from olinda.hard import train as hard_train
+
+    margin = np.linspace(-2, 3, 50)
+
+    class Booster:
+        def inplace_predict(self, X, iteration_range, predict_type):
+            return margin[: len(X)]
+
+    class Model:
+        params_ = {"objective": "reg:tweedie"}
+        booster_ = Booster()
+        best_iteration_ = 0
+
+    X = np.zeros((50, 4))
+
+    class Offset:
+        def run(self, X):
+            return margin[: len(X)] + 113.78
+
+    class Scrambled:
+        def run(self, X):
+            return np.random.default_rng(0).permutation(margin[: len(X)])
+
+    hard_train._check_regressor_export(Model(), Offset(), X)
+    with pytest.raises(RuntimeError, match="does not follow its booster"):
+        hard_train._check_regressor_export(Model(), Scrambled(), X)

@@ -29,22 +29,58 @@ from olinda.hard.layout import (
 
 
 def _new_hard_model(task: str):
-    """The hard-label model H. Binary → a plain, portfolio-selected XGBoost classifier (regression raises).
+    """The hard-label model H: a plain, portfolio-selected XGBoost classifier (binary) or regressor (continuous).
 
     We use lazy-qsar only for its portfolio/preset selection and booster training — ``calibrated=False`` turns
     OFF lazy-qsar's internal probability calibrator, so ``H`` outputs raw ``predict_proba``. This keeps the
     reference scoring, prediction, and the exported ONNX all on the same raw probability (no hidden calibration
     step), which is what makes ``H``'s ONNX faithful. The teacher-scale mapping is our own separate ``h_to_s``
-    isotonic calibrator (step 3). Continuous hard labels would need a regressor — a planned placeholder.
+    isotonic calibrator (step 3). A continuous head is lazy-qsar's ``BaseXGBRegressor``, which has no
+    calibrator to switch off: its output is the booster's prediction in the labels' own units.
     """
-    from lazyqsar.base.xgboost import BaseXGBClassifier
+    from lazyqsar.base.xgboost import BaseXGBClassifier, BaseXGBRegressor
 
     if task == "binary":
         return BaseXGBClassifier(calibrated=False)
-    raise NotImplementedError(
-        f"hard-label task {task!r} is not supported yet — only binary (lazy-qsar XGBoost classifier). "
-        "A regressor path is a planned placeholder."
-    )
+    if task == "regression":
+        return BaseXGBRegressor()
+    raise ValueError(f"unknown hard-label task {task!r}")
+
+
+def _regressor_margin(model, x) -> np.ndarray:
+    """A hard regressor's raw score: the booster's margin, before any link function."""
+    return np.asarray(
+        model.booster_.inplace_predict(
+            np.asarray(x, dtype=np.float32),
+            iteration_range=(0, int(model.best_iteration_) + 1),
+            predict_type="margin",
+        ),
+        dtype=np.float64,
+    ).ravel()
+
+
+def _check_regressor_export(hard_model, artifact, X) -> None:
+    """Refuse a regression head whose saved ONNX does not follow the booster it was exported from.
+
+    ``H`` is shipped as its ONNX, so the library is scored through the ONNX (see :func:`_score_reference`)
+    and the isotonic map is fitted to exactly what ships. That makes the *level* of the exported score
+    irrelevant, and it has to be: for a Tweedie objective, which lazy-qsar picks for skewed non-negative
+    labels, the export is the margin plus a constant of its own (the base score, added without the log
+    link). What must hold is that the ONNX is the booster's margin up to that constant, because a
+    converter that reorders compounds would ship a head that predicts something else. An offset is
+    allowed; a difference that varies from compound to compound is not.
+    """
+    rows = np.asarray(X[: min(len(X), 500)], dtype=np.float32)
+    margin = _regressor_margin(hard_model, rows)
+    onnx = np.asarray(artifact.run(rows), dtype=np.float64).ravel()
+    spread = max(1e-9, float(np.ptp(margin)))
+    drift = float(np.ptp(onnx - margin)) / spread
+    if not drift < 1e-3:
+        raise RuntimeError(
+            f"the exported hard-label regressor does not follow its booster (the two differ by {drift:.1e} "
+            f"of the score's range from one compound to the next; objective "
+            f"{getattr(hard_model, 'params_', {}).get('objective')!r}). Not shipping it."
+        )
 
 
 def _selection_report(hard_model) -> dict:
@@ -76,7 +112,9 @@ def _reference_path() -> Path:
     return path
 
 
-def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 50_000):
+def _score_reference(
+    model, task: str, n_features: int, matrix, chunk: int = 50_000, artifact=None
+):
     """Score H over every reference compound, aligned to the reference library's row order.
 
     Reads from the shared in-RAM matrix rather than reopening the library, so a multi-column run pays
@@ -101,7 +139,9 @@ def _score_reference(model, task: str, n_features: int, matrix, chunk: int = 50_
     with sweep_progress("scoring", n) as tick:
         for start in range(0, n, chunk):
             xb = np.asarray(matrix.x[start : start + chunk], dtype=np.float32)
-            if direct:
+            if artifact is not None:
+                g = artifact.run(xb)
+            elif direct:
                 g = booster.inplace_predict(
                     xb, iteration_range=(0, int(model.best_iteration_) + 1)
                 )
@@ -172,10 +212,9 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         resolved_task = str(f.attrs.get("task", "binary"))
         fingerprint_json = f.attrs.get("fingerprint")
     fingerprint = json.loads(fingerprint_json) if fingerprint_json else default_spec()
-    hard_model = _new_hard_model(
-        resolved_task
-    )  # placeholder gate: raises NotImplementedError for regression
-    y = y.astype(int)  # binary labels (past the gate)
+    hard_model = _new_hard_model(resolved_task)
+    if resolved_task == "binary":
+        y = y.astype(int)
 
     with warnings.catch_warnings():
         warnings.simplefilter(
@@ -184,13 +223,27 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
 
         # === Step 1/4 — train the hard-label classifier H ======================
         step(1, 4, "training the hard-label model H")
-        echo(
-            f"{len(y):,} labelled compounds · {int(y.sum()):,} positive ({y.mean():.1%})",
-            "info",
-            sub=True,
-        )
+        if resolved_task == "binary":
+            echo(
+                f"{len(y):,} labelled compounds · {int(y.sum()):,} positive ({y.mean():.1%})",
+                "info",
+                sub=True,
+            )
+        else:
+            echo(
+                f"{len(y):,} labelled compounds · values {y.min():.4g} to {y.max():.4g} "
+                f"(median {np.median(y):.4g})",
+                "info",
+                sub=True,
+            )
         hard_model.fit(X, y)
         hard_model.save(str(hard_dir))
+        artifact = None
+        if resolved_task == "regression":
+            from lazyqsar.base.xgboost import BaseXGBArtifact
+
+            artifact = BaseXGBArtifact.load(str(hard_dir))
+            _check_regressor_export(hard_model, artifact, X)
         selection = _selection_report(hard_model)
         echo(
             f"ready · {selection['preset']} preset · {selection['best_iteration'] + 1:,} trees",
@@ -200,7 +253,9 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
 
         # === Step 2/4 — score H across the reference library ===================
         step(2, 4, "scoring H across the reference library")
-        g_ref = _score_reference(hard_model, "binary", X.shape[1], matrix)
+        g_ref = _score_reference(
+            hard_model, resolved_task, X.shape[1], matrix, artifact=artifact
+        )
         with h5py.File(hard_root / H_REFERENCE_NAME, "w") as f:
             f.create_dataset("g", data=g_ref.astype(np.float32))
         echo(f"saved → {H_REFERENCE_NAME}", "info", sub=True)
@@ -253,12 +308,18 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         # pulled matplotlib into every training run, which is what made the CLI pause on its font cache.
 
         # === Step 4/4 — train T, the Tanimoto regressor ========================
-        from olinda.tanimoto import A_CEILING, T_HI, T_LO
+        from olinda.tanimoto import A_CEILING, A_CEILING_REGRESSION, T_HI, T_LO
 
         step(4, 4, "learning T · Tanimoto to the labelled set")
         hard_bits = (X > 0).astype(np.float32)
         ad_clf, ad_counts = _fit_tanimoto(
-            hard_bits, X.shape[1], matrix, T_LO, T_HI, alignment_r2
+            hard_bits,
+            X.shape[1],
+            matrix,
+            T_LO,
+            T_HI,
+            alignment_r2,
+            ceiling=A_CEILING_REGRESSION if resolved_task == "regression" else None,
         )
         ad_clf.save(hard_root / TANIMOTO_DIRNAME)
         echo(
@@ -294,7 +355,8 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         else:
             echo(
                 f"blend weight ramps 0 → [bold]{ad_counts['a_max']:.3f}[/] across similarity {T_LO} → "
-                f"{T_HI} · ceiling from R²={alignment_r2:.3f}, capped at {A_CEILING}",
+                f"{T_HI} · ceiling from R²={alignment_r2:.3f}, capped at "
+                f"{A_CEILING_REGRESSION if resolved_task == 'regression' else A_CEILING}",
                 "run",
             )
 
@@ -318,11 +380,13 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         "sim_lo": T_LO,
         "sim_hi": T_HI,
         "artifact": TANIMOTO_DIRNAME,
-        "a_max_ceiling": A_CEILING,
+        "a_max_ceiling": A_CEILING_REGRESSION
+        if resolved_task == "regression"
+        else A_CEILING,
         **ad_counts,
     }
     meta = {
-        "task": "binary",
+        "task": resolved_task,
         "n": int(len(y)),
         "features": "qmfp",
         "fingerprint": fingerprint,
@@ -366,7 +430,7 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
     summary_panel("olinda · learn-hard", rows, border_style="green", icon="✓")
 
     return {
-        "task": "binary",
+        "task": resolved_task,
         "n": int(len(y)),
         "hard_dir": str(hard_dir),
         "selection": selection,

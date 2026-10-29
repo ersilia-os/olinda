@@ -20,7 +20,7 @@ def _pearson(a: np.ndarray, b: np.ndarray) -> float:
     return float("nan") if d == 0 else float((ac * bc).sum() / d)
 
 
-def _blend_ceiling(alignment_r2: float) -> float:
+def _blend_ceiling(alignment_r2: float, ceiling: float | None = None) -> float:
     """Cap the blend weight by how closely the calibrated hard signal reproduces the teacher's scale.
 
     Takes **R²**, not a correlation. Pearson is invariant to affine transformation, so a signal that is
@@ -59,8 +59,8 @@ def _blend_ceiling(alignment_r2: float) -> float:
     r2 = float(alignment_r2)
     if not np.isfinite(r2):
         return 0.0
-    ceiling = min(A_CEILING, max(0.0, r2))
-    return float(ceiling) if ceiling >= A_MIN else 0.0
+    cap = min(A_CEILING if ceiling is None else float(ceiling), max(0.0, r2))
+    return float(cap) if cap >= A_MIN else 0.0
 
 
 def _fit_tanimoto(
@@ -71,6 +71,7 @@ def _fit_tanimoto(
     sim_hi: float,
     alignment_r2: float,
     chunk: int = 50_000,
+    ceiling: float | None = None,
 ):
     """Learn T: regress each reference compound's 1-NN Tanimoto to the labelled set.
 
@@ -88,6 +89,9 @@ def _fit_tanimoto(
     alignment_r2 : float
         ``R²(calibrated H_S, soft)`` over the reference library, which caps the blend weight — see
         :func:`_blend_ceiling`.
+    ceiling : float, optional
+        The most the head may ever weigh, when that is not :data:`~olinda.tanimoto.A_CEILING` — a
+        continuous head has its own (see :data:`~olinda.tanimoto.A_CEILING_REGRESSION`).
 
     Returns
     -------
@@ -146,7 +150,7 @@ def _fit_tanimoto(
             matrix.n_cols,
             (xval, sim[val_idx]),
             progress=report,
-            a_max=_blend_ceiling(alignment_r2) if reachable else 0.0,
+            a_max=_blend_ceiling(alignment_r2, ceiling) if reachable else 0.0,
             sim_lo=sim_lo,
             sim_hi=sim_hi,
         )

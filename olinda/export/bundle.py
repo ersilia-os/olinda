@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,7 @@ from olinda.export.parity import (
 from olinda.hard.layout import (
     H_TO_S_NAME,
     HARD_DIRNAME,
+    HARD_META_NAME,
     HARD_MODEL_SUBDIR,
     TANIMOTO_DIRNAME,
 )
@@ -35,7 +37,6 @@ def build_bundle(model_dir: str | Path) -> dict:
     enters the graph as bytes, so the decoder in front of the heads is checked too. The golden vectors
     are computed from the same in-memory graph, and only then is the file written, once.
     """
-    import json
 
     import onnxruntime as ort
 
@@ -80,9 +81,15 @@ def build_bundle(model_dir: str | Path) -> dict:
         from olinda.tanimoto import TanimotoRegressor
 
         hard_root = entry["dir"] / HARD_DIRNAME
-        g = np.asarray(
+        with open(hard_root / HARD_META_NAME) as fp_meta:
+            hard_task = json.load(fp_meta).get("task", "binary")
+        scores = np.asarray(
             BaseXGBArtifact.load(str(hard_root / HARD_MODEL_SUBDIR)).run(fp)
-        )[:, 1].astype(np.float64)
+        )
+        # a classifier's score is P(class 1); a regressor's is the one column it returns, in label units
+        g = (scores.ravel() if hard_task == "regression" else scores[:, 1]).astype(
+            np.float64
+        )
         gmap = IsotonicCalibrator.load(hard_root / H_TO_S_NAME)
         gsoft = np.asarray(gmap.transform(g)).ravel()
         h_lo, h_hi = _step_envelope(gmap, g)
