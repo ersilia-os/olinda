@@ -1,4 +1,4 @@
-"""Training the student: splits, the boosting backends, the tuner and the per-column loop.
+"""Training the student: splits, the boosting backends and the per-column loop.
 
 Nothing here is importable on a base install, which is the point — the boosting stack is an order of
 magnitude larger than what running a model needs. :func:`require_train_extra` is the one exception,
@@ -15,7 +15,6 @@ _TRAIN_MODULES = (
     ("lightgbm", "train on CPU"),
     ("onnx", "build the fused model"),
     ("onnxmltools", "convert boosters to ONNX"),
-    ("optuna", "tune hyperparameters"),
     ("lazyqsar", "fit the hard-label head"),
 )
 

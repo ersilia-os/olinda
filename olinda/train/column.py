@@ -9,7 +9,6 @@ validation plot into that column's directory.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 
@@ -53,8 +52,7 @@ def train_one_column(
             weight_range=reweight_info.get("weight_range") if weighted else None,
         )
 
-    tuned_params = resolve_tuned_params(model_dir, col_dir, backend_name)
-    canonical = {**CANONICAL_DEFAULTS, **tuned_params}
+    canonical = dict(CANONICAL_DEFAULTS)
     native_params = {**be.translate(canonical), **be.objective_params()}
 
     xval = matrix.gather(val_idx)
@@ -86,10 +84,6 @@ def train_one_column(
             "backend": backend_name,
             "objective": "squarederror",
             "reweight": reweight_info,
-            "hyperparams": {
-                "source": "tuned" if tuned_params else "defaults",
-                "tuned": tuned_params or None,
-            },
         },
     )
     student.save(col_dir)
@@ -121,45 +115,3 @@ def train_one_column(
         )
     del xval
     return {"name": col["name"], "metrics": metrics, "n_trees": res.n_trees}
-
-
-def resolve_tuned_params(model_dir: Path, col_dir: Path, backend_name: str) -> dict:
-    """Tuned hyperparameters for a column: its own ``best_params.json``, else the run-level one."""
-    path = next(
-        (
-            p
-            for p in (col_dir / runlib.PARAMS_NAME, model_dir / runlib.PARAMS_NAME)
-            if p.exists()
-        ),
-        None,
-    )
-    if path is None:
-        echo(
-            "no best_params.json — using built-in defaults (`olinda tune -m` to tune)",
-            "info",
-        )
-        return {}
-
-    with open(path) as fp:
-        tuned = json.load(fp)
-    tag = tuned.pop("backend", None)  # a tag, not a hyperparameter
-    if tag and tag != backend_name:
-        echo(
-            f"best_params.json was tuned on {tag}; its canonical params still apply to {backend_name}",
-            "warning",
-        )
-    unknown = [k for k in tuned if k not in CANONICAL_DEFAULTS]
-    if unknown:
-        echo(
-            f"ignoring unrecognized best_params.json keys {unknown} — re-run `olinda tune`",
-            "warning",
-        )
-        for k in unknown:
-            tuned.pop(k)
-    shown = " · ".join(
-        f"{k}={v}"
-        for k, v in tuned.items()
-        if k in ("learning_rate", "max_depth", "min_split_gain", "min_child_weight")
-    )
-    echo(f"tuned hyperparameters from {path.name} — {shown}", "run")
-    return tuned

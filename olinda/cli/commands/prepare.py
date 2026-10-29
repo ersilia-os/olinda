@@ -14,12 +14,14 @@ from olinda.cli.options import parse_label_columns
     "--soft-labels",
     "-s",
     required=True,
+    type=click.Path(exists=True, dir_okay=False),
     help="Teacher (soft) values over the reference library (SMILES + value columns, same order as the library).",
 )
 @click.option(
     "--hard-labels",
     "-h",
     default=None,
+    type=click.Path(exists=True, dir_okay=False),
     help="Optional CSV/TSV/Parquet of your own compounds (SMILES + one label column) for `learn-hard`.",
 )
 @click.option(
@@ -46,7 +48,7 @@ from olinda.cli.options import parse_label_columns
 @click.option(
     "--hard-label-columns",
     default=None,
-    help="Comma-separated measurement columns to use (default: every column matching a teacher task).",
+    help="Comma-separated measurement columns to use (default: every column in the file; each must match a teacher task).",
 )
 def prepare_cmd(
     soft_labels,
@@ -92,7 +94,9 @@ def prepare_cmd(
     from olinda.data import (
         MORGAN_FINGERPRINTS_FILENAME,
         OLINDA_HOME,
+        WARN_HARD_ROWS,
         check_column_budget,
+        check_target,
         load_reference_calcs_frame,
         match_hard_columns,
         split_reference_to_indices,
@@ -102,6 +106,13 @@ def prepare_cmd(
     set_active_color(STEP_COLORS["prepare"])
     rule("olinda · prepare", style=STEP_COLORS["prepare"], right=cpath(model_dir))
     md = Path(model_dir)
+    # Column directories are named by position and keep their boosters and hard heads, so preparing over
+    # an old run would fuse the previous run's models under the new run's names.
+    if runlib.is_run_dir(md):
+        raise click.ClickException(
+            f"{md} already holds a prepared run — delete it to start over, or use a new --model-dir "
+            f"(`olinda learn-soft -m {md}` resumes it)"
+        )
     md.mkdir(parents=True, exist_ok=True)
 
     descriptors = OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME
@@ -184,21 +195,29 @@ def prepare_cmd(
 
     # --- per-column value-stratified splits; the descriptor matrix is never copied ------------
     step(2, n_steps, "planning per-column splits")
+    seed = 42
     manifest = runlib.new_manifest(
         soft_labels=soft_labels,
         hard_labels=hard_labels,
         reference={"name": MORGAN_FINGERPRINTS_FILENAME, "n_rows": n_rows, "dim": dim},
         features=features,
         val_frac=val_frac,
-        seed=42,
+        seed=seed,
         limit=max_samples,
     )
     by_id, splits, name_to_id = {}, {}, {}
     for name in selected_cols:
         y = targets[name]
-        train_idx, val_idx = split_reference_to_indices(
-            y, val_frac=val_frac, limit=max_samples
-        )[:2]
+        try:
+            train_idx, val_idx, split_info = split_reference_to_indices(
+                y, val_frac=val_frac, seed=seed, limit=max_samples
+            )
+        except ValueError as exc:
+            raise click.ClickException(f"column '{name}': {exc}") from exc
+        try:
+            check_target(name, split_info)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
         entry = runlib.add_column(
             manifest, name=name, y=y, train_idx=train_idx, val_idx=val_idx
         )
@@ -248,6 +267,12 @@ def prepare_cmd(
                 f"{soft_col}: [bold]{info['n']:,}[/] hard rows · {info['task']}{pos}",
                 "run",
             )
+            if info["n"] > WARN_HARD_ROWS:
+                echo(
+                    f"{soft_col}: {info['n']:,} labelled compounds is a lot — the similarity gate compares "
+                    "each against the whole library, so `learn-hard` will take a long time",
+                    "warning",
+                )
 
     runlib.write_manifest(md, manifest)
 

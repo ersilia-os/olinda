@@ -28,8 +28,7 @@ def learn_soft_cmd(model_dir, num_boost_round, fuse):
 
     The engine is auto-selected by device — XGBoost on a CUDA GPU, LightGBM on CPU (``OLINDA_BACKEND``
     overrides). The loss is squared error (well-conditioned, ONNX-safe); skew/imbalance is handled by
-    reweighting, not the loss. If a prior ``olinda tune -m <model-dir>`` wrote ``best_params.json`` there,
-    those hyperparameters are used; otherwise built-in defaults.
+    reweighting, not the loss. The hyperparameters are the built-in defaults.
 
     Sample reweighting is **automatic**: olinda weights the target only when it is imbalanced (auto-picking
     KDE / bins), leaving balanced targets unweighted. When active it applies to train AND val together so
@@ -66,6 +65,12 @@ def learn_soft_cmd(model_dir, num_boost_round, fuse):
         raise click.ClickException(str(exc)) from exc
 
     columns = manifest["columns"]
+    from olinda.export.graph import check_fused_size
+
+    try:
+        check_fused_size(len(columns), num_boost_round)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     features = manifest["features"].get("features", "morgan")
     dim = manifest["reference_library"]["dim"]
     started = time.time()

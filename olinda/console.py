@@ -78,7 +78,6 @@ STEP_COLORS = {
     "setup": "cyan",
     "library": "cyan",
     "prepare": "cyan",
-    "tune": "bright_yellow",
     "learn-soft": "green",
     "learn-hard": "magenta",
     "export": "bright_cyan",

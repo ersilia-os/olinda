@@ -23,12 +23,14 @@ from olinda.cli.options import parse_label_columns
     "--soft-labels",
     "-s",
     default=None,
+    type=click.Path(exists=True, dir_okay=False),
     help="Held-out teacher values (SMILES + value columns). Any size, any order.",
 )
 @click.option(
     "--hard-labels",
     "-h",
     default=None,
+    type=click.Path(exists=True, dir_okay=False),
     help="Held-out measurements (SMILES + binary columns).",
 )
 @click.option(
@@ -43,7 +45,7 @@ from olinda.cli.options import parse_label_columns
 @click.option(
     "--soft-label-columns",
     default=None,
-    help="Comma-separated columns of --soft-labels to score (default: every column matching a task).",
+    help="Comma-separated columns of --soft-labels to score (default: every column in the file; each must match a task).",
 )
 @options.hard_smiles_column()
 @click.option(

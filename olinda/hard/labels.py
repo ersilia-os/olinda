@@ -85,7 +85,9 @@ def prepare_hard_labels_wide(
     from olinda.run import column_dir
 
     smiles, values = resolve_smiles_frame(
-        _read_table(input_path), smiles_column=smiles_column
+        _read_table(input_path),
+        smiles_column=smiles_column,
+        label_columns=list(mapping),
     )
     featurizer = QmfpFeaturizer(spec)
     X, parsed = _featurize(smiles, featurizer)

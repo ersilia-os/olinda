@@ -12,7 +12,6 @@ from olinda.cli.commands.learn_soft import learn_soft_cmd
 # `fit` runs the pipeline by calling these commands' callbacks directly, so they are
 # dependencies rather than neighbours.
 from olinda.cli.commands.prepare import prepare_cmd
-from olinda.cli.commands.tune import tune_cmd
 from olinda.cli.guards import require_train
 
 
@@ -21,12 +20,14 @@ from olinda.cli.guards import require_train
     "--soft-labels",
     "-s",
     required=True,
+    type=click.Path(exists=True, dir_okay=False),
     help="Teacher (soft) values over the reference library (SMILES + one or more value columns, library order).",
 )
 @click.option(
     "--hard-labels",
     "-h",
     default=None,
+    type=click.Path(exists=True, dir_okay=False),
     help="Optional CSV/TSV/Parquet of your own compounds (SMILES + one label column) → adds a hard head.",
 )
 @click.option(
@@ -52,20 +53,6 @@ from olinda.cli.guards import require_train
     show_default=True,
     help="learn-soft upper cap; early stopping decides.",
 )
-@click.option(
-    "--tune/--no-tune",
-    "do_tune",
-    default=False,
-    show_default=True,
-    help="Run an Optuna tuning pass before learn-soft.",
-)
-@click.option(
-    "--trials",
-    default=100,
-    type=int,
-    show_default=True,
-    help="Optuna trials (only with --tune).",
-)
 @options.soft_smiles_column()
 @click.option(
     "--soft-label-columns",
@@ -76,7 +63,7 @@ from olinda.cli.guards import require_train
 @click.option(
     "--hard-label-columns",
     default=None,
-    help="Comma-separated measurement columns to use (default: every column matching a teacher task).",
+    help="Comma-separated measurement columns to use (default: every column in the file; each must match a teacher task).",
 )
 def fit_cmd(
     soft_labels,
@@ -86,19 +73,17 @@ def fit_cmd(
     max_samples,
     val_frac,
     num_boost_round,
-    do_tune,
-    trials,
     soft_smiles_column,
     soft_label_columns,
     hard_smiles_column,
     hard_label_columns,
 ):
-    """Distill a teacher into a student end-to-end: prepare → (tune) → learn-soft → (learn-hard) → clean.
+    """Distill a teacher into a student end-to-end: prepare → learn-soft → (learn-hard) → clean.
 
     Runs the fit-pipeline sub-commands in order. `--model-onnx runs/foo.onnx` builds the run in `runs/foo/`
     and, once everything has fused, moves the model to `runs/foo.onnx` and deletes that folder — so the
     only thing left is the self-describing artifact, which is all `olinda predict` needs. With
-    `--hard-labels` a hard head is learned and fused in; with `--tune` an Optuna pass precedes `learn-soft`.
+    `--hard-labels` a hard head is learned and fused in.
 
     Drive the steps individually against `-m runs/foo` if you want to keep the per-column boosters, metrics
     and plots.
@@ -143,20 +128,28 @@ def fit_cmd(
     )
 
     model_dir = str(work)
-    prepare_cmd.callback(
-        soft_labels=soft_labels,
-        hard_labels=hard_labels,
-        model_dir=model_dir,
-        task=task,
-        max_samples=max_samples,
-        val_frac=val_frac,
-        soft_smiles_column=soft_smiles_column,
-        soft_label_columns=soft_label_columns,
-        hard_smiles_column=hard_smiles_column,
-        hard_label_columns=hard_label_columns,
-    )
-    if do_tune:
-        tune_cmd.callback(model_dir=model_dir, trials=trials, max_rows=100_000)
+    created = not work.exists()
+    try:
+        prepare_cmd.callback(
+            soft_labels=soft_labels,
+            hard_labels=hard_labels,
+            model_dir=model_dir,
+            task=task,
+            max_samples=max_samples,
+            val_frac=val_frac,
+            soft_smiles_column=soft_smiles_column,
+            soft_label_columns=soft_label_columns,
+            hard_smiles_column=hard_smiles_column,
+            hard_label_columns=hard_label_columns,
+        )
+    except BaseException:
+        # A failed prepare (a bad file, a mismatched library) has produced nothing to resume, so the folder this
+        # run made for it is just debris. One that already existed is not ours to remove.
+        if created and not runlib.is_run_dir(work):
+            import shutil
+
+            shutil.rmtree(work, ignore_errors=True)
+        raise
     # With hard labels, learn-hard fuses the run itself, so a soft-only fuse here would be thrown away.
     learn_soft_cmd.callback(
         model_dir=model_dir,
@@ -170,7 +163,6 @@ def fit_cmd(
 
     pipeline = (
         "prepare → "
-        + ("tune → " if do_tune else "")
         + "learn-soft"
         + (" → learn-hard" if hard_labels else "")
         + " → clean"

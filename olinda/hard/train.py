@@ -143,8 +143,11 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
     hard_path = model_dir / HARD_H5_NAME
     if not hard_path.exists():
         raise FileNotFoundError(
-            f"no {HARD_H5_NAME} in {model_dir} — run `olinda prepare --hard-labels <file> -m {model_dir}` first"
+            f"no {HARD_H5_NAME} in {model_dir} — run `olinda prepare -s <teacher> --hard-labels <file> -m <run dir>` first"
         )
+    # hard_meta.json is written last and is what says "this head is complete", so an interrupted re-run
+    # must not leave the previous one behind next to half-new files.
+    (model_dir / HARD_DIRNAME / HARD_META_NAME).unlink(missing_ok=True)
     if soft is None:
         raise ValueError(
             "train_hard needs this column's reference-aligned soft labels; the caller reads them "
@@ -190,7 +193,7 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         hard_model.save(str(hard_dir))
         selection = _selection_report(hard_model)
         echo(
-            f"ready · {selection['preset']} preset · {selection['best_iteration']:,} trees",
+            f"ready · {selection['preset']} preset · {selection['best_iteration'] + 1:,} trees",
             "info",
             sub=True,
         )
@@ -346,7 +349,7 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
     rows = [
         (
             "Hard model H",
-            f"[bold]{selection['preset']}[/] · {selection['best_iteration']:,} trees",
+            f"[bold]{selection['preset']}[/] · {selection['best_iteration'] + 1:,} trees",
         ),
         ("Reference scored", f"[bold]{len(gv):,}[/] compounds"),
         (

@@ -13,7 +13,6 @@ from olinda.cli.commands.library import library_cmd
 from olinda.cli.commands.predict import predict_cmd
 from olinda.cli.commands.prepare import prepare_cmd
 from olinda.cli.commands.setup import setup_cmd
-from olinda.cli.commands.tune import tune_cmd
 from olinda.cli.commands.validate import validate_cmd
 from olinda.cli.rendering import COMMAND_PANELS, configure_help
 
@@ -23,7 +22,6 @@ _COMMANDS = {
     "fit": fit_cmd,
     "prepare": prepare_cmd,
     "learn-soft": learn_soft_cmd,
-    "tune": tune_cmd,
     "learn-hard": learn_hard_cmd,
     "export": export_cmd,
     "clean": clean_cmd,

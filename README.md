@@ -12,7 +12,7 @@ Olinda is pip-installable:
 pip install olinda                 # run models from Python: numpy, onnxruntime, wasmtime
 pip install "olinda[cli]"          # + the `olinda` command: click, rich-click, rich, loguru, tqdm
 pip install "olinda[report]"       # + `olinda validate` and its figures: pandas, pyarrow, matplotlib, onnx, stylia
-pip install "olinda[train]"        # + distillation: XGBoost, LightGBM, lazy-qsar, Optuna, onnxmltools, h5py
+pip install "olinda[train]"        # + distillation: XGBoost, LightGBM, lazy-qsar, onnxmltools, h5py
 ```
 
 Each extra includes the one above it, so `olinda[train]` installs everything. No install needs RDKit:
@@ -105,7 +105,6 @@ commands need `olinda[train]`.
 | Command | What it does |
 |---|---|
 | `prepare` | Set up a run directory from the soft (and hard) labels |
-| `tune` | Search hyperparameters for `learn-soft` with Optuna |
 | `learn-soft` | Train the surrogate on the teacher's soft labels |
 | `learn-hard` | Train on hard labels and calibrate onto the soft-label scale |
 | `export` | Rebuild `model.onnx` for a trained run |

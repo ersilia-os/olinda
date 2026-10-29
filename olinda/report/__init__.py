@@ -185,7 +185,7 @@ def _predict(artifact, smiles, echo=None) -> "dict[str, np.ndarray]":
         warnings.simplefilter(
             "ignore", RuntimeWarning
         )  # unparseable SMILES are counted, not warned twice
-        values = artifact.run(smiles, progress=False)
+        values = artifact.run(smiles, progress=False, workers=None)
     if echo:
         echo(f"scored [bold]{len(smiles):,}[/] compounds", "run")
     return {c: values[:, i] for i, c in enumerate(artifact.columns)}

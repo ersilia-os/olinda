@@ -158,9 +158,12 @@ class OlindaArtifact:
         self.path = path
         options = ort.SessionOptions()
         options.log_severity_level = 3
-        self._session = ort.InferenceSession(
-            str(path), options, providers=["CPUExecutionProvider"]
-        )
+        try:
+            self._session = ort.InferenceSession(
+                str(path), options, providers=["CPUExecutionProvider"]
+            )
+        except ort.capi.onnxruntime_pybind11_state.InvalidProtobuf as exc:
+            raise ValueError(f"{path} is not an ONNX model file") from exc
 
         props = self._session.get_modelmeta().custom_metadata_map
         if "olinda.schema_version" not in props:

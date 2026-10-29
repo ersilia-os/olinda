@@ -13,6 +13,7 @@ untested for a while.
 from __future__ import annotations
 
 import json
+import os
 
 import numpy as np
 import pytest
@@ -231,9 +232,10 @@ def test_a_changed_reference_library_is_refused(tmp_path, library):
 def test_a_hard_head_that_earns_no_weight_ships_soft_only(tmp_path, library):
     """ "One that loses to the surrogate is dropped, leaving the column soft-only" — the README's claim.
 
-    A teacher with no variance to explain gives an undefined R², so the ceiling comes out zero. That has
-    to *disable* the blend, not crash the run and not brick the fuse: with ``a == 0`` the prediction is
-    exactly the surrogate, and the graph must still build, load and predict.
+    A teacher that is noise unrelated to the molecules gives the hard head nothing to explain, so the
+    ceiling comes out zero. That has to *disable* the blend, not crash the run and not brick the fuse: with
+    ``a == 0`` the prediction is exactly the surrogate, and the graph must still build, load and predict.
+    (A truly constant teacher no longer gets this far: `prepare` refuses it.)
     """
     import numpy as np
 
@@ -242,7 +244,11 @@ def test_a_hard_head_that_earns_no_weight_ships_soft_only(tmp_path, library):
     home, smiles, x = library
     flat = tmp_path / "flat.csv"
     pd.DataFrame(
-        {"smiles": smiles, "activity_probability": np.full(len(smiles), 0.42)}
+        {
+            "smiles": smiles,
+            "activity_probability": 0.42
+            + np.random.default_rng(0).normal(0, 1e-3, len(smiles)),
+        }
     ).to_csv(flat, index=False)
     hard = write_hard(tmp_path, smiles, x)
 
@@ -255,7 +261,7 @@ def test_a_hard_head_that_earns_no_weight_ships_soft_only(tmp_path, library):
     meta = json.loads(
         (run_dir / "columns" / "c0" / HARD_DIRNAME / HARD_META_NAME).read_text()
     )
-    assert meta["tanimoto"]["a_max"] == 0.0, "no variance to explain ⇒ no weight earned"
+    assert meta["tanimoto"]["a_max"] == 0.0, "nothing to explain ⇒ no weight earned"
 
     # The fuse must still produce a working model, and with no weight earned it must predict exactly
     # what the surrogate alone predicted — the hard branch contributes nothing.
@@ -295,3 +301,173 @@ def test_selecting_columns_decides_what_the_model_predicts(tmp_path, library):
     assert r.exit_code != 0
     assert "absent" in plain(r)
     assert not (tmp_path / "nope" / "columns").exists()
+
+
+def test_prepare_refuses_a_directory_that_already_holds_a_run(tmp_path, library):
+    """Re-preparing over an old run would fuse its boosters and hard heads under the new run's names."""
+    home, smiles, x = library
+    soft = write_soft(tmp_path, smiles, x, columns=("activity",))
+    run = tmp_path / "run"
+    assert run_cli(["prepare", "-s", soft, "-m", run]).exit_code == 0
+    again = run_cli(["prepare", "-s", soft, "-m", run])
+    assert again.exit_code != 0
+    assert "already holds a prepared run" in plain(again)
+
+
+def test_a_missing_input_file_is_a_usage_error_not_a_traceback(tmp_path, library):
+    result = run_cli(["prepare", "-s", tmp_path / "nope.csv", "-m", tmp_path / "run"])
+    assert result.exit_code == 2
+    assert "does not exist" in plain(result)
+    assert not (tmp_path / "run").exists()
+
+
+def test_a_fit_that_fails_in_prepare_leaves_no_folder_behind(tmp_path, library):
+    home, smiles, x = library
+    short = tmp_path / "short.csv"
+    pd.DataFrame({"smiles": smiles[:5], "y": [0.1] * 5}).to_csv(short, index=False)
+    result = run_cli(["fit", "-s", short, "-m", tmp_path / "out" / "model.onnx"])
+    assert result.exit_code != 0
+    assert "must have" in plain(result)
+    assert not (tmp_path / "out" / "model").exists()
+
+
+def test_prepare_refuses_a_constant_column(tmp_path, library):
+    home, smiles, x = library
+    flat = tmp_path / "flat.csv"
+    pd.DataFrame({"smiles": smiles, "y": [0.5] * len(smiles)}).to_csv(flat, index=False)
+    result = run_cli(["prepare", "-s", flat, "-m", tmp_path / "run"])
+    assert result.exit_code != 0
+    assert "is constant" in plain(result)
+
+
+def test_prepare_refuses_a_column_with_almost_no_finite_values(tmp_path, library):
+    home, smiles, x = library
+    sparse = tmp_path / "sparse.csv"
+    values = [float("nan")] * len(smiles)
+    values[:3] = [0.1, 0.2, 0.3]
+    pd.DataFrame({"smiles": smiles, "y": values}).to_csv(sparse, index=False)
+    result = run_cli(["prepare", "-s", sparse, "-m", tmp_path / "run"])
+    assert result.exit_code != 0
+    assert "finite value" in plain(result)
+
+
+def test_learn_soft_refuses_a_model_too_big_for_one_onnx_file_before_training(
+    tmp_path, library
+):
+    """The 2 GB limit is only met after every column trains; the worst case is known beforehand."""
+    home, smiles, x = library
+    soft = write_soft(tmp_path, smiles, x, columns=("activity",))
+    run = tmp_path / "run"
+    assert run_cli(["prepare", "-s", soft, "-m", run]).exit_code == 0
+    result = run_cli(["learn-soft", "-m", run, "--num-boost-round", "200000"])
+    assert result.exit_code != 0
+    assert "--num-boost-round" in plain(result) and "limit" in plain(result)
+    assert not (run / "columns" / "c0" / "train_meta.json").exists()
+
+
+def test_boosters_converted_in_parallel_give_the_same_predictions(
+    tmp_path, library, backend, monkeypatch
+):
+    """Large boosters are converted in worker processes; the model they make must be the one a serial run makes.
+
+    The booster is trained once and fused twice. Training two boosters would compare two trainings, and
+    multithreaded boosting is not bit-for-bit repeatable across machines.
+    """
+    import shutil
+
+    import onnxruntime as ort
+
+    from olinda.export import heads
+    from olinda.featurizer.codec import pack
+    from olinda.train.backend import CANONICAL_DEFAULTS
+
+    home, smiles, x = library
+    monkeypatch.setitem(CANONICAL_DEFAULTS, "min_child_weight", 1.0)
+    soft = write_soft(tmp_path, smiles, x)
+    monkeypatch.setattr(
+        heads, "_PARALLEL_MIN_BYTES", 0
+    )  # every booster counts as large
+    parallel = tmp_path / "parallel"
+    assert (
+        run_cli(["prepare", "-s", soft, "-m", parallel, "--val-frac", "0.2"]).exit_code
+        == 0
+    )
+    assert (
+        run_cli(["learn-soft", "-m", parallel, "--num-boost-round", "40"]).exit_code
+        == 0
+    )
+
+    serial = tmp_path / "serial"
+    shutil.copytree(parallel, serial)
+    for kept in serial.glob("columns/*/" + heads.SOFT_ONNX_NAME):
+        kept.unlink()  # so the fuse has to convert again
+    (serial / "model.onnx").unlink()
+    monkeypatch.setattr(heads, "_PARALLEL_MIN_BYTES", 10**12)  # none does
+    assert run_cli(["export", "-m", serial]).exit_code == 0
+
+    probe = pack(x[:50].astype("uint8"))
+    outs = [
+        ort.InferenceSession(str(run / "model.onnx")).run(None, {"input": probe})
+        for run in (parallel, serial)
+    ]
+    for a, b in zip(*outs):
+        assert np.array_equal(a, b)
+
+
+def test_conversion_workers_are_bounded_by_free_memory():
+    """Four 260 MB boosters would need ~7 GB each; a machine without that must convert fewer at once."""
+    from olinda.export import heads
+
+    big = 260_000_000
+    assert heads._convert_workers(8, big, available=64 * 2**30) == min(
+        8, os.cpu_count() or 1, heads._MAX_CONVERT_WORKERS
+    )
+    assert heads._convert_workers(8, big, available=16 * 2**30) <= 1
+    assert heads._convert_workers(8, big, available=0) == 1
+    assert heads._convert_workers(8, 10**6, available=None) <= 2  # unknown is scarce
+
+
+def test_a_killed_conversion_leaves_no_file_to_be_trusted(tmp_path):
+    """The converter writes in place; the file the fuse trusts must only ever appear whole."""
+    from olinda.export import heads
+
+    class Dies:
+        def to_onnx(self, model, path, input_dim):
+            path.write_bytes(b"half a model")
+            raise MemoryError
+
+    final = tmp_path / heads.SOFT_ONNX_NAME
+    with pytest.raises(MemoryError):
+        heads._convert_to(Dies(), None, 4, final)
+    assert list(tmp_path.iterdir()) == []
+
+    class Works:
+        def to_onnx(self, model, path, input_dim):
+            path.write_bytes(b"whole")
+
+    heads._convert_to(Works(), None, 4, final)
+    assert final.read_bytes() == b"whole" and [p.name for p in tmp_path.iterdir()] == [
+        heads.SOFT_ONNX_NAME
+    ]
+
+
+def test_an_unreadable_kept_conversion_is_made_again(tmp_path, library, monkeypatch):
+    """A corrupt ``s.onnx`` newer than its booster passes the freshness test, so it is also read."""
+    import onnx
+
+    from olinda.export import heads
+    from olinda.models.bundle import StudentModel
+    from olinda.train.backend import CANONICAL_DEFAULTS
+
+    home, smiles, x = library
+    monkeypatch.setitem(CANONICAL_DEFAULTS, "min_child_weight", 1.0)
+    soft = write_soft(tmp_path, smiles, x, columns=("activity",))
+    run = tmp_path / "run"
+    assert run_cli(["prepare", "-s", soft, "-m", run]).exit_code == 0
+    assert run_cli(["learn-soft", "-m", run, "--num-boost-round", "20"]).exit_code == 0
+    column = run / "columns" / "c0"
+    sm = StudentModel.load(column)
+    (column / heads.SOFT_ONNX_NAME).write_bytes(b"truncated")
+    proto = heads._soft_model_proto(sm, int(sm.metadata["x_dim"]), column)
+    onnx.checker.check_model(proto)
+    assert (column / heads.SOFT_ONNX_NAME).stat().st_size > 100

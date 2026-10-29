@@ -20,7 +20,6 @@ COMMAND_PANELS = [
         "name": "Fit pipeline commands",
         "commands": [
             "prepare",
-            "tune",
             "learn-soft",
             "learn-hard",
             "export",

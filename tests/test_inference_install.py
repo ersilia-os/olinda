@@ -32,7 +32,6 @@ _TRAIN_AND_REPORT = (
     "lazyqsar",
     "onnx",
     "onnxmltools",
-    "optuna",
     "stylia",
     "matplotlib",
 )
@@ -133,7 +132,11 @@ def test_a_distilling_command_names_the_extra_it_needs():
         f"sys.modules.update({{m: None for m, _ in {list(_TRAIN_MODULES)!r}}});"
         "from olinda.cli import cli;"
         "from click.testing import CliRunner;"
-        "r = CliRunner().invoke(cli, ['fit', '-s', 'x.csv', '-m', 'y.onnx']);"
+        # The input must exist: click checks it before the command body, and so before the guard.
+        "import os, tempfile;"
+        "f = os.path.join(tempfile.mkdtemp(), 'x.csv');"
+        "open(f, 'w').write('smiles,y\\n');"
+        "r = CliRunner().invoke(cli, ['fit', '-s', f, '-m', 'y.onnx']);"
         "print(r.exit_code);"
         "print(r.output)"
     )

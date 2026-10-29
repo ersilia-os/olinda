@@ -19,9 +19,10 @@ never leaves the run.
 
     a = a_max * ramp(predicted similarity)
 
-The ramp says *where* the hard signal may speak; ``a_max`` says *how loudly*, and is earned by the hard
-head beating the surrogate out-of-fold on the labelled compounds (:mod:`olinda.hard`). A head
-that loses gets ``a_max = 0`` and the model ships soft-only.
+The ramp says *where* the hard signal may speak; ``a_max`` says *how loudly*. It is capped by how well the
+calibrated hard head reproduces the teacher's scale over the reference library (:func:`olinda.hard.gate._blend_ceiling`)
+— an in-sample agreement with the teacher, not a comparison against real labels. A head that agrees too
+little gets ``a_max = 0`` and the model ships soft-only.
 
 This replaced a pair of Bernoulli Naive-Bayes classifiers over similarity *buckets*. Measured on a real
 run, that gate opened the hard channel on 32.6% of the library against a true rate of ~7%, with 0.013
@@ -57,9 +58,10 @@ import numpy as np
 T_LO: float = 0.4
 T_HI: float = 0.7
 
-# Ceiling on the blend weight. Even an exact match keeps a third of the surrogate, because the hard head
+# Ceiling on the blend weight. Even an exact match keeps most of the surrogate, because the hard head
 # is trained on far less data and the surrogate carries the teacher's whole view of the library.
-A_CEILING: float = 0.66
+# Cross-validated on real labels (eos3804, 7.7k compounds), AP peaked near 0.33 and fell by 0.66.
+A_CEILING: float = 0.4
 
 # Below this the hard head is not mixed in at all. A few percent of a weakly aligned signal cannot move
 # a prediction enough to be worth the risk of moving it the wrong way, so the dead zone (0, A_MIN)

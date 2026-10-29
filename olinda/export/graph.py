@@ -13,6 +13,27 @@ _OPSET = 16
 _PROTOBUF_LIMIT = 2 * 1024**3  # a single serialized ModelProto cannot exceed this
 
 
+_BYTES_PER_TREE = 18_000
+"""What one tree adds to the fused file: measured at 150 MB for a 9,970-tree column and 304 MB for three."""
+
+
+def check_fused_size(n_columns: int, num_boost_round: int) -> None:
+    """Refuse a run whose largest possible model would not fit in one ONNX file.
+
+    The limit is on the *serialized* graph and is only met once every column has trained, which is hours in
+    for a full-size run. A column grows to at most ``num_boost_round`` trees, so the worst case is known
+    before anything trains.
+    """
+    worst = n_columns * num_boost_round * _BYTES_PER_TREE
+    if worst >= _PROTOBUF_LIMIT:
+        fits = int(_PROTOBUF_LIMIT // (n_columns * _BYTES_PER_TREE))
+        raise ValueError(
+            f"{n_columns} column(s) of up to {num_boost_round:,} trees would make a model of about "
+            f"{worst / 1e9:.1f} GB, over ONNX's {_PROTOBUF_LIMIT / 1e9:.1f} GB limit. Use "
+            f"--num-boost-round {fits - fits % 100} or less, or distil fewer columns at a time."
+        )
+
+
 def _strip_dead_attributes(model) -> int:
     """Drop tree attributes that carry no information; returns the bytes saved.
 

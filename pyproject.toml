@@ -60,7 +60,7 @@ cli = [
 ]
 # Scoring a model and reporting on it: `olinda validate`, and the figures training writes along the
 # way. Enough to inspect a model.onnx you were handed, without any of the *learning* stack — no
-# xgboost, lightgbm, optuna, lazyqsar or h5py. onnx reads the graph's own calibration curves and
+# xgboost, lightgbm, lazyqsar or h5py. onnx reads the graph's own calibration curves and
 # stylia/matplotlib draw; matplotlib is pinned rather than left to stylia's floor because it is what
 # actually renders the figures, and a drifting version changes them. pandas holds the label tables,
 # and pyarrow is its parquet engine (and lets `olinda predict` read parquet).
@@ -86,7 +86,6 @@ train = [
     "lazyqsar[fit]==3.4.2",
     "lightgbm==4.6.0",
     "onnxmltools==1.16.0",
-    "optuna==4.9.0",
     "psutil==7.0.0",
     "xgboost==3.2.0",
 ]
