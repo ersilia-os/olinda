@@ -3,7 +3,7 @@
 # Distil the A. baumannii teacher (eos3804) into a student, with measured hard labels, and validate it.
 #
 #   ./run.sh          the real thing — distil from the full reference library, predict over all of it
-#   ./run.sh check    a fast plumbing check — 20k reference compounds, 10k at predict, tuning included
+#   ./run.sh check    a fast plumbing check — 20k reference compounds, 10k at predict
 #
 # Needs `pip install "olinda[train]"`. Inputs are read from ../data/example/ and ../data/ (see below, and
 # fetch them from the public bucket if you do not have them); everything the run produces goes to results/.
@@ -32,7 +32,6 @@ HARD_COL=abaumannii_inhibition              # the measured column, in HARD
 
 OUT=results
 SAMPLE_ARG=""
-TUNE_ARG=""
 
 case "${1:-}" in
   "")
@@ -41,12 +40,6 @@ case "${1:-}" in
     OUT=results/check
     LIBRARY=../data/example/erl0_smiles_first10k.csv
     SAMPLE_ARG="--max-samples 20000"
-    # Exercise the Optuna pass too, so `check` covers `tune` and the `learn-soft` path that reads the
-    # best_params.json it writes — the one stage a plain check never touches. Five trials find nothing
-    # worth keeping (the study warm-starts with two known-good configs and searches three more); the
-    # point here is that the stage runs and its output is picked up, not the hyperparameters. Tuning is
-    # single-column only, which is why this rides on the one named column below.
-    TUNE_ARG="--tune --trials 5"
     ;;
   *)
     echo "usage: $0 [check]" >&2
@@ -64,7 +57,7 @@ mkdir -p "$OUT"
 
 # shellcheck disable=SC2086
 olinda fit --soft-labels "$SOFT" --hard-labels "$HARD" --model-onnx "$OUT/model_eos3804.onnx" \
-  --soft-label-columns "$SOFT_COL" --hard-label-columns "$HARD_COL" $SAMPLE_ARG $TUNE_ARG
+  --soft-label-columns "$SOFT_COL" --hard-label-columns "$HARD_COL" $SAMPLE_ARG
 olinda predict --model-onnx "$OUT/model_eos3804.onnx" --input "$PRED" --output "$OUT/output_eos3804.csv"
 olinda predict --model-onnx "$OUT/model_eos3804.onnx" --input "$LIBRARY" --output "$OUT/output_erl0_eos3804.csv"
 

@@ -4,7 +4,6 @@
 # look at what it learned, and only then decide to add the hard-label head.
 #
 #   ./run_stepwise.sh prepare    read the teacher + hard columns, plan each column's split
-#   ./run_stepwise.sh tune       optional Optuna pass (single-column runs only)
 #   ./run_stepwise.sh soft       train the surrogate; fuses a working soft-only model.onnx
 #   ./run_stepwise.sh check      metrics, plots and a smoke prediction  <- stop here and look
 #   ./run_stepwise.sh hard       train + calibrate the hard-label head, re-fuse
@@ -45,11 +44,6 @@ case "${1:-}" in
     [ -e "$RUN/manifest.json" ] && die "$RUN is already prepared — delete it to start over"
     # shellcheck disable=SC2086
     run olinda prepare --soft-labels "$SOFT" --hard-labels "$HARD" --model-dir "$RUN" $SAMPLE_ARG
-    ;;
-
-  tune)
-    [ -f "$RUN/manifest.json" ] || die "run '$0 prepare' first"
-    run olinda tune --model-dir "$RUN" --trials "${TRIALS:-100}"
     ;;
 
   soft)

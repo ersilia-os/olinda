@@ -12,7 +12,6 @@ from olinda.cli.commands.learn_soft import learn_soft_cmd
 # `fit` runs the pipeline by calling these commands' callbacks directly, so they are
 # dependencies rather than neighbours.
 from olinda.cli.commands.prepare import prepare_cmd
-from olinda.cli.commands.tune import tune_cmd
 from olinda.cli.guards import require_train
 
 
@@ -52,20 +51,6 @@ from olinda.cli.guards import require_train
     show_default=True,
     help="learn-soft upper cap; early stopping decides.",
 )
-@click.option(
-    "--tune/--no-tune",
-    "do_tune",
-    default=False,
-    show_default=True,
-    help="Run an Optuna tuning pass per soft column before learn-soft (up to ~15 min each).",
-)
-@click.option(
-    "--trials",
-    default=100,
-    type=int,
-    show_default=True,
-    help="Optuna trials (only with --tune).",
-)
 @options.soft_smiles_column()
 @click.option(
     "--soft-label-columns",
@@ -86,19 +71,17 @@ def fit_cmd(
     max_samples,
     val_frac,
     num_boost_round,
-    do_tune,
-    trials,
     soft_smiles_column,
     soft_label_columns,
     hard_smiles_column,
     hard_label_columns,
 ):
-    """Distill a teacher into a student end-to-end: prepare → (tune) → learn-soft → (learn-hard) → clean.
+    """Distill a teacher into a student end-to-end: prepare → learn-soft → (learn-hard) → clean.
 
     Runs the fit-pipeline sub-commands in order. `--model-onnx runs/foo.onnx` builds the run in `runs/foo/`
     and, once everything has fused, moves the model to `runs/foo.onnx` and deletes that folder — so the
     only thing left is the self-describing artifact, which is all `olinda predict` needs. With
-    `--hard-labels` a hard head is learned and fused in; with `--tune` an Optuna pass precedes `learn-soft`.
+    `--hard-labels` a hard head is learned and fused in.
 
     Drive the steps individually against `-m runs/foo` if you want to keep the per-column boosters, metrics
     and plots.
@@ -155,8 +138,6 @@ def fit_cmd(
         hard_smiles_column=hard_smiles_column,
         hard_label_columns=hard_label_columns,
     )
-    if do_tune:
-        tune_cmd.callback(model_dir=model_dir, trials=trials, max_rows=100_000)
     # With hard labels, learn-hard fuses the run itself, so a soft-only fuse here would be thrown away.
     learn_soft_cmd.callback(
         model_dir=model_dir,
@@ -170,7 +151,6 @@ def fit_cmd(
 
     pipeline = (
         "prepare → "
-        + ("tune → " if do_tune else "")
         + "learn-soft"
         + (" → learn-hard" if hard_labels else "")
         + " → clean"

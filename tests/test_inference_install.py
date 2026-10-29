@@ -32,7 +32,6 @@ _TRAIN_AND_REPORT = (
     "lazyqsar",
     "onnx",
     "onnxmltools",
-    "optuna",
     "stylia",
     "matplotlib",
 )

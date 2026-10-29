@@ -33,7 +33,7 @@ Package code lives in `olinda/`, **not** `src/olinda/`. Don't "fix" this.
 | | |
 |---|---|
 | `olinda/cli/` | one module per command in `commands/`, assembled by `create_cli.py` |
-| `olinda/train/` | the boosting engines, tuning, per-column training |
+| `olinda/train/` | the boosting engines, per-column training |
 | `olinda/hard/` | the hard-label head: `labels`, `gate`, `train`, and `layout` for the on-disk names |
 | `olinda/export/` | the fuse: stage graphs, metadata, parity checking, `build_bundle` |
 | `olinda/report/` | `olinda validate` and its figures |

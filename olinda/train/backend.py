@@ -6,7 +6,7 @@ LightGBM (much faster / lower-memory on large CPU workloads; its GPU can't use s
 ever runs on CPU here). ``OLINDA_BACKEND=xgboost|lightgbm|auto`` overrides.
 
 Hyperparameters are kept in **canonical, backend-agnostic names** (:data:`CANONICAL_DEFAULTS`) so that
-``choose_objective``, ``tune``, ``best_params.json`` and the paste-ready block are portable; each backend
+``choose_objective`` and the paste-ready block are portable; each backend
 translates canonical → its native parameter names, and maps the canonical objective *kind*
 (``squarederror|logistic|pseudohuber``) to its native objective + eval metric.
 """
@@ -27,18 +27,18 @@ from olinda.train.xgb import detect_training_device
 # over 0.3 for BOTH engines (XGBoost R² 0.70→0.76, LightGBM 0.68→0.78) and still converges within the
 # 5000-round cap; 0.05 barely helps and blows the round budget. Matches QSAR literature (eta 0.05–0.1).
 # Structural defaults in engine-agnostic ("canonical") names — each backend's translate() maps them to its
-# native params. Tuned for large-scale (~1.3M rows) sparse Morgan-count QSAR. Only learning_rate and
-# min_split_gain are searched by `olinda tune` (see olinda/train/tune.py); everything else is fixed here.
+# native params. Set for large-scale (~1.3M rows) sparse Morgan-count QSAR and fixed: hyperparameters found
+# on subsamples did not transfer to the 1.36M-row fit, so there is no tuning step.
 CANONICAL_DEFAULTS = {
     # Histogram bins. qmfp fingerprints are counts clipped at 15, sixteen values per feature, so 64 is
     # lossless for them and builds faster and leaner than 128 (benchmarked: more ≈ noise here).
     "max_bin": 64,
     "max_depth": 8,  # only sets the leaf budget, min(2^depth - 1, 255); neither engine caps depth itself
-    "learning_rate": 0.1,  # TUNED (0.05–0.3); 0.1 beat 0.3 by a wide margin on the real split
+    "learning_rate": 0.1,  # 0.1 beat 0.3 by a wide margin on the real split
     "subsample": 0.8,  # row bagging: mild regularization + speed; standard for large-scale GBM
     "colsample": 0.5,  # 1024/2048 features per tree: decorrelation + speed on high-dim sparse (least-impactful knob)
     "min_child_weight": 200.0,  # ≈ min samples/leaf (via min_sum_hessian for L2); LightGBM: use hundreds at ~1M+ rows
-    "min_split_gain": 0.0,  # TUNED (0–5); minimum loss reduction required to split
+    "min_split_gain": 0.0,  # minimum loss reduction required to split
     "reg_lambda": 1.0,  # L2 penalty (XGBoost default)
     "reg_alpha": 0.0,  # L1 penalty off (safe default)
 }
@@ -213,7 +213,7 @@ class XGBoostBackend:
             booster, best_it, best_score, metric, booster.num_boosted_rounds()
         )
 
-    # -- tune path (in-RAM subset, per-round pruning hook) --
+    # -- in-memory datasets --
     def dataset(self, X, y, weight, max_bin, reference=None):
         """Wrap in-memory arrays as this engine's dataset type, reusing *reference*'s binning if given."""
         import xgboost as xgb
@@ -221,39 +221,6 @@ class XGBoostBackend:
         return xgb.QuantileDMatrix(
             X, label=y, weight=weight, max_bin=max_bin, ref=reference
         )
-
-    def train_trial(
-        self, dtrain, dval, native_params, num_boost_round, early_stopping, on_iteration
-    ):
-        """Fit one tuning trial and report its best score, with pruning wired to the study."""
-        import xgboost as xgb
-
-        p = dict(native_params)
-        p["nthread"] = os.cpu_count() or 0
-        if self.device == "cuda":
-            p["device"] = "cuda"
-        em = p.get("eval_metric", "rmse")
-        metric = em[-1] if isinstance(em, (list, tuple)) else em
-
-        class _CB(xgb.callback.TrainingCallback):
-            def after_iteration(self, model, epoch, evals_log):
-                try:
-                    score = evals_log["val"][metric][-1]
-                except (KeyError, IndexError):
-                    return False
-                on_iteration(epoch, float(score))  # may raise to prune/stop
-                return False
-
-        booster = xgb.train(
-            p,
-            dtrain,
-            num_boost_round=num_boost_round,
-            evals=[(dval, "val")],
-            early_stopping_rounds=early_stopping,
-            verbose_eval=False,
-            callbacks=[_CB()],
-        )
-        return float(booster.best_score), int(booster.best_iteration), metric
 
     # -- persistence / inference --
     def predict(self, model, X):
@@ -495,7 +462,7 @@ class LightGBMBackend:
         )
         return TrainResult(booster, best_it, best_score, metric, n_trees)
 
-    # -- tune path (in-RAM subset, per-round pruning hook) --
+    # -- in-memory datasets --
     def dataset(self, X, y, weight, max_bin, reference=None):
         """Wrap in-memory arrays as this engine's dataset type, reusing *reference*'s binning if given."""
         import lightgbm as lgb
@@ -507,33 +474,6 @@ class LightGBMBackend:
             params={"max_bin": int(max_bin), "verbosity": -1},
             reference=reference,
             free_raw_data=False,
-        )
-
-    def train_trial(
-        self, dtrain, dval, native_params, num_boost_round, early_stopping, on_iteration
-    ):
-        """Fit one tuning trial and report its best score, with pruning wired to the study."""
-        import lightgbm as lgb
-
-        metric = self._metric_name(native_params)
-
-        def _cb(env):
-            for name, mname, val, _ in env.evaluation_result_list:
-                if name == "val" and mname == metric:
-                    on_iteration(env.iteration, float(val))  # may raise to prune/stop
-
-        booster = lgb.train(
-            native_params,
-            dtrain,
-            num_boost_round=num_boost_round,
-            valid_sets=[dval],
-            valid_names=["val"],
-            callbacks=[lgb.early_stopping(early_stopping, verbose=False), _cb],
-        )
-        return (
-            float(booster.best_score["val"][metric]),
-            int(booster.best_iteration),
-            metric,
         )
 
     # -- persistence / inference --

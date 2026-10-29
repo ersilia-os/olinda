@@ -35,7 +35,7 @@ def test_random_probe_rows_are_deterministic_sparse_counts():
     assert a.max() <= 15 and (a > 0).sum(axis=1).min() >= 5
 
 
-def test_a_corrupted_leaf_stops_the_export(tmp_path, library, backend):
+def test_a_corrupted_leaf_stops_the_export(tmp_path, library, backend, monkeypatch):
     """One wrong leaf in one column's trees must fail the export rather than ship a quietly wrong model."""
     import onnx
 
@@ -47,7 +47,9 @@ def test_a_corrupted_leaf_stops_the_export(tmp_path, library, backend):
     )
     # at the default min_child_weight a 240-row library never splits: one constant leaf, which the
     # calibrator clamps, so a corrupted leaf would be invisible to any check
-    (run / "best_params.json").write_text('{"min_child_weight": 1}')
+    from olinda.train.backend import CANONICAL_DEFAULTS
+
+    monkeypatch.setitem(CANONICAL_DEFAULTS, "min_child_weight", 1.0)
     assert run_cli(["learn-soft", "-m", run, "--num-boost-round", "40"]).exit_code == 0
     assert run_cli(["export", "-m", run]).exit_code == 0
     (run / "model.onnx").unlink()

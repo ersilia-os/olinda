@@ -83,16 +83,16 @@ def test_fit_calls_every_pipeline_callback_with_arguments_they_accept():
     """`fit` drives the pipeline by calling its siblings' callbacks directly, not through click.
 
     That bypasses click's parameter handling, so a renamed or dropped option is not caught anywhere
-    else — and nothing in the suite runs `olinda tune` or `fit --tune` at all. ``create_autospec``
-    raises TypeError on any keyword the real callback would reject, so this validates all five call
-    sites against their real signatures without doing any work.
+    else — and nothing else in the suite would notice. ``create_autospec``
+    raises TypeError on any keyword the real callback would reject, so this validates every call
+    site against their real signatures without doing any work.
     """
     from click.testing import CliRunner
 
     from olinda.cli import cli
 
     fit = cli.commands["fit"]
-    siblings = ["prepare", "tune", "learn-soft", "learn-hard", "clean"]
+    siblings = ["prepare", "learn-soft", "learn-hard", "clean"]
     module = sys.modules[fit.callback.__module__]
 
     calls = {}
@@ -110,7 +110,7 @@ def test_fit_calls_every_pipeline_callback_with_arguments_they_accept():
 
     try:
         result = CliRunner().invoke(
-            cli, ["fit", "-s", "teacher.csv", "-m", "out/model.onnx", "--tune"]
+            cli, ["fit", "-s", "teacher.csv", "-m", "out/model.onnx"]
         )
     finally:
         for name, callback in originals.items():
@@ -122,5 +122,4 @@ def test_fit_calls_every_pipeline_callback_with_arguments_they_accept():
     assert calls["prepare"].call_count == 1, (
         f"fit did not reach prepare (exit={result.exit_code}): {result.output}"
     )
-    assert calls["tune"].call_count == 1, "fit --tune did not reach tune"
     assert calls["learn-soft"].call_count == 1, "fit did not reach learn-soft"

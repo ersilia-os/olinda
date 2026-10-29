@@ -9,7 +9,6 @@ vectors and one manifest describing the whole run. A single-column run is simply
       manifest.json      the authoritative description of the run
       targets.h5         one reference-aligned y per column, keyed by column id
       splits.h5          per-column train/val row indices
-      best_params.json   tuned hyperparameters, if `olinda tune` ran
       columns/<id>/      that column's model, metrics, plots and hard-label head
       model.onnx         all columns fused into one artifact
 
@@ -36,7 +35,6 @@ RUN_SCHEMA = "olinda.run.v1"
 COLUMNS_DIRNAME = "columns"
 TARGETS_NAME = "targets.h5"
 SPLITS_NAME = "splits.h5"
-PARAMS_NAME = "best_params.json"
 MODEL_NAME = "model.onnx"
 
 

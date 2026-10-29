@@ -282,14 +282,13 @@ def draw_pipeline(ax) -> None:
     steps = [
         ("setup", "erl0_qmfp_r3.h5\nreference fingerprints", False),
         ("prepare", "manifest.json\ntargets.h5 · splits.h5", False),
-        ("tune", "best_params.json", True),
         ("learn-soft", "columns/<id>/\nbooster · metrics · plots", False),
         ("learn-hard", "columns/<id>/_hard/\ncalibrator · gate", True),
         ("export", "model.onnx\nrebuilt on demand", True),
         ("clean", "model.onnx\nand nothing else", False),
     ]
-    xs = [8.0 + i * 14.0 for i in range(len(steps))]
-    w = 12.0
+    xs = [9.0 + i * 16.0 for i in range(len(steps))]
+    w = 13.0
 
     for (name, artifact, optional), x in zip(steps, xs):
         _box(ax, x, 68, w, 11, name, STUDENT if not optional else DATA, dashed=optional)
@@ -299,9 +298,8 @@ def draw_pipeline(ax) -> None:
     for x0, x1 in zip(xs[:-1], xs[1:]):
         _arrow(ax, (x0 + w / 2, 68), (x1 - w / 2, 68))
 
-    _note(ax, xs[2], 78.5, "optional", color=DATA)
-    _note(ax, xs[4], 78.5, "only with hard labels", color=DATA)
-    _note(ax, xs[5], 78.5, "implicit: each fuses as it ends", color=DATA)
+    _note(ax, xs[3], 78.5, "only with hard labels", color=DATA)
+    _note(ax, xs[4], 78.5, "implicit: each fuses as it ends", color=DATA)
 
     # `fit` chains prepare → clean, fusing along the way
     ax.plot(
@@ -321,17 +319,17 @@ def draw_pipeline(ax) -> None:
         zorder=3,
     )
 
-    _arrow(ax, (xs[-1], 38.5), (81, 24), elbow="angle_v", color=BUNDLE)
+    _arrow(ax, (xs[-1], 38.5), (xs[-1], 24.5), color=BUNDLE)
     _box(
         ax,
-        46,
+        54,
         18,
-        64,
+        76,
         13,
         "olinda predict  -m <run dir>  -i compounds.csv  -o predictions.csv",
         BUNDLE,
     )
-    _note(ax, 46, 7, "every step shares one --model-dir / -m", color=DATA)
+    _note(ax, 54, 7, "every step shares one --model-dir / -m", color=DATA)
 
     stylia.label(
         ax, xlabel="", ylabel="", title="One run directory, one command per step"
