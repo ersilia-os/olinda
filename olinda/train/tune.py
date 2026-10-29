@@ -5,6 +5,8 @@ GPU, LightGBM on CPU) and fixing the objective + reweighting exactly the way ``o
 the best hyperparameters (learning-rate sensitivity breakdown), writes a backend-tagged ``best_params.json``
 (canonical param names, portable across engines), and prints a paste-ready ``CANONICAL_DEFAULTS`` block.
 
+One study per column: columns train independently, so each is tuned on its own target and split.
+
 Time-bounded and blazing fast: a hard ``time_budget`` (checked every round), study-level ``patience``
 (stop once converged), warm-started from known-good configs, Hyperband pruning, live progress, graceful
 Ctrl-C. Driven by the ``olinda tune`` CLI command.
@@ -78,8 +80,8 @@ def _suggest(trial) -> dict:
     }
 
 
-def _load_subset(run_dir: Path, max_rows: int | None, seed: int):
-    """Load a random train/val subsample for the run's single column; also returns the full split size.
+def _load_subset(run_dir: Path, col: dict, max_rows: int | None, seed: int):
+    """Load a random train/val subsample for one column of the run; also returns the full split size.
 
     The full split is far larger than a study needs, so rows are drawn at random (rather than sliced)
     while preserving the split's train:val proportion.
@@ -89,13 +91,6 @@ def _load_subset(run_dir: Path, max_rows: int | None, seed: int):
     from olinda.data.matrix import ReferenceMatrix
 
     manifest = runlib.read_manifest(run_dir)
-    columns = manifest["columns"]
-    if len(columns) != 1:
-        raise RuntimeError(
-            f"this run has {len(columns)} columns; `olinda tune` supports single-column runs only. "
-            "Train the multi-column run with the built-in defaults, or prepare one column at a time."
-        )
-    col = columns[0]
     y = runlib.read_target(run_dir, col["id"])
     train_idx, val_idx = runlib.read_split(run_dir, col["id"])
 
@@ -126,6 +121,7 @@ def _load_subset(run_dir: Path, max_rows: int | None, seed: int):
 
 def run_tuning(
     in_dir: str | Path,
+    column: str | None = None,
     *,
     max_rows: int | None = 100000,
     trials: int = 100,
@@ -135,12 +131,14 @@ def run_tuning(
     patience: int = 12,
     reweight: str = "auto",
     seed: int = 42,
-    out: str | Path = "best_params.json",
+    out: str | Path | None = None,
 ) -> dict:
     """Run the short Optuna study on the auto-selected backend and report/persist the best hyperparameters.
 
-    Returns the tuned canonical params (also written to ``out`` with a ``backend`` tag). Optuna is imported
-    lazily; a missing ``[train]`` extra raises a friendly error.
+    *column* is a column name or id (optional only for a one-column run). Columns train independently, so each
+    gets its own study; the result is written to that column's ``best_params.json`` unless *out* says otherwise,
+    which is where ``learn-soft`` looks first. Returns the tuned canonical params (written with a ``backend``
+    tag). Optuna is imported lazily; a missing ``[train]`` extra raises a friendly error.
     """
     try:
         import optuna
@@ -150,15 +148,31 @@ def run_tuning(
         ) from e
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+    from olinda import run as runlib
+
     in_dir = Path(in_dir)
-    rule("olinda · tune", style="green", right=str(in_dir))
+    manifest = runlib.read_manifest(in_dir)
+    if column is None:
+        if len(manifest["columns"]) != 1:
+            raise RuntimeError(
+                f"this run has {len(manifest['columns'])} columns; name one, or tune them all with `olinda tune`."
+            )
+        col = manifest["columns"][0]
+    else:
+        try:
+            col = runlib.find_column(manifest, column)
+        except KeyError as exc:
+            raise RuntimeError(exc.args[0]) from exc
+    if out is None:
+        out = runlib.column_dir(in_dir, col["id"]) / runlib.PARAMS_NAME
+    rule("olinda · tune", style="green", right=f"{in_dir} · {col['name']}")
     backend_name, device, backend_reason = select_backend()
     be = get_backend(backend_name, device)
     engine_banner(backend_name, device, backend_reason)
 
     # Subsample train+val to ~max_rows total, preserving the split's train:val proportion so the tuning
     # val fraction matches what `prepare` produced.
-    xtr, ytr, xva, yva, total = _load_subset(in_dir, max_rows, seed)
+    xtr, ytr, xva, yva, total = _load_subset(in_dir, col, max_rows, seed)
 
     # Single squared-error objective (like `olinda learn-soft`); reweighting resolved the same way.
     obj_native = be.objective_params()

@@ -57,7 +57,7 @@ from olinda.cli.guards import require_train
     "do_tune",
     default=False,
     show_default=True,
-    help="Run an Optuna tuning pass before learn-soft.",
+    help="Run an Optuna tuning pass per soft column before learn-soft (up to ~15 min each).",
 )
 @click.option(
     "--trials",
