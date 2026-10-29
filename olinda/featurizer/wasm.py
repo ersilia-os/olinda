@@ -10,7 +10,9 @@ serialised with a lock; parallelism comes from processes, each with its own inst
 
 from __future__ import annotations
 
+import atexit
 import contextlib
+import gc
 import threading
 from pathlib import Path
 
@@ -103,6 +105,21 @@ class _Module:
             for ptr in (*ptrs, p_out, p_valid):
                 self._free(self.store, ptr)
         return out, valid
+
+
+def _release() -> None:
+    """Drop the instance while the interpreter is still whole.
+
+    Left to interpreter shutdown, wasmtime's destructors run after the modules they call into have been
+    cleared, and every process that featurized anything ends with a wall of ``'NoneType' object is not
+    callable`` tracebacks (harmless, but they read as a crash). At ``atexit`` everything is still alive.
+    """
+    global _module
+    _module = None
+    gc.collect()
+
+
+atexit.register(_release)
 
 
 def module() -> _Module:
