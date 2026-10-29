@@ -13,6 +13,7 @@ untested for a while.
 from __future__ import annotations
 
 import json
+import os
 
 import numpy as np
 import pytest
@@ -400,3 +401,62 @@ def test_boosters_converted_in_parallel_give_the_same_predictions(
         outs.append(s.run(None, {"input": pack(probe)}))
     for a, b in zip(*outs):
         assert np.array_equal(a, b)
+
+
+def test_conversion_workers_are_bounded_by_free_memory():
+    """Four 260 MB boosters would need ~7 GB each; a machine without that must convert fewer at once."""
+    from olinda.export import heads
+
+    big = 260_000_000
+    assert heads._convert_workers(8, big, available=64 * 2**30) == min(
+        8, os.cpu_count() or 1, heads._MAX_CONVERT_WORKERS
+    )
+    assert heads._convert_workers(8, big, available=16 * 2**30) <= 1
+    assert heads._convert_workers(8, big, available=0) == 1
+    assert heads._convert_workers(8, 10**6, available=None) <= 2  # unknown is scarce
+
+
+def test_a_killed_conversion_leaves_no_file_to_be_trusted(tmp_path):
+    """The converter writes in place; the file the fuse trusts must only ever appear whole."""
+    from olinda.export import heads
+
+    class Dies:
+        def to_onnx(self, model, path, input_dim):
+            path.write_bytes(b"half a model")
+            raise MemoryError
+
+    final = tmp_path / heads.SOFT_ONNX_NAME
+    with pytest.raises(MemoryError):
+        heads._convert_to(Dies(), None, 4, final)
+    assert list(tmp_path.iterdir()) == []
+
+    class Works:
+        def to_onnx(self, model, path, input_dim):
+            path.write_bytes(b"whole")
+
+    heads._convert_to(Works(), None, 4, final)
+    assert final.read_bytes() == b"whole" and [p.name for p in tmp_path.iterdir()] == [
+        heads.SOFT_ONNX_NAME
+    ]
+
+
+def test_an_unreadable_kept_conversion_is_made_again(tmp_path, library, monkeypatch):
+    """A corrupt ``s.onnx`` newer than its booster passes the freshness test, so it is also read."""
+    import onnx
+
+    from olinda.export import heads
+    from olinda.models.bundle import StudentModel
+    from olinda.train.backend import CANONICAL_DEFAULTS
+
+    home, smiles, x = library
+    monkeypatch.setitem(CANONICAL_DEFAULTS, "min_child_weight", 1.0)
+    soft = write_soft(tmp_path, smiles, x, columns=("activity",))
+    run = tmp_path / "run"
+    assert run_cli(["prepare", "-s", soft, "-m", run]).exit_code == 0
+    assert run_cli(["learn-soft", "-m", run, "--num-boost-round", "20"]).exit_code == 0
+    column = run / "columns" / "c0"
+    sm = StudentModel.load(column)
+    (column / heads.SOFT_ONNX_NAME).write_bytes(b"truncated")
+    proto = heads._soft_model_proto(sm, int(sm.metadata["x_dim"]), column)
+    onnx.checker.check_model(proto)
+    assert (column / heads.SOFT_ONNX_NAME).stat().st_size > 100

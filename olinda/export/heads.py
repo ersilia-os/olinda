@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -56,8 +57,19 @@ test-sized model is milliseconds and would only pay for starting a process.
 """
 
 _MAX_CONVERT_WORKERS = 4
-"""Most boosters converted at once. Each worker holds one whole booster and its ONNX graph, so this is a
-memory bound as much as a CPU one."""
+"""Most boosters converted at once, however much memory there is."""
+
+_CONVERT_BYTES_PER_FILE_BYTE = 25
+_CONVERT_BASE_BYTES = 400_000_000
+"""What one conversion peaks at, measured on LightGBM boosters of 300 to 1,200 trees: about 0.53 MB per
+tree on top of ~200 MB, which is ~22x the booster file (~25 KB a tree). The factor is rounded up, so a
+10,000-tree column (~260 MB on disk) is budgeted ~7 GB. The same peak is paid by a serial conversion; running
+several side by side multiplies it, which is what :func:`_convert_workers` keeps inside the free memory."""
+
+_MEMORY_SHARE = 0.7
+"""Share of the memory that is free that conversions may plan to use, leaving the rest to the parent."""
+
+_PARTIAL_SUFFIX = ".partial"
 
 
 def _cached_soft_path(backend, column_dir) -> Path | None:
@@ -71,6 +83,48 @@ def _cached_soft_path(backend, column_dir) -> Path | None:
     ):
         return cached
     return None
+
+
+def _available_memory() -> int | None:
+    """Bytes of memory free right now, or ``None`` when this platform cannot say."""
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().available)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def _convert_workers(n_jobs: int, largest_bytes: int, available: int | None) -> int:
+    """How many boosters may convert at once: bounded by cores, the cap, and the memory they would need.
+
+    One means "serial". Unknown memory is treated as scarce rather than plentiful, because the failure it
+    guards against, the OS killing a worker, costs the whole conversion.
+    """
+    by_cpu = min(n_jobs, os.cpu_count() or 1, _MAX_CONVERT_WORKERS)
+    if available is None:
+        return min(by_cpu, 2)
+    per_worker = largest_bytes * _CONVERT_BYTES_PER_FILE_BYTE + _CONVERT_BASE_BYTES
+    return max(1, min(by_cpu, int(available * _MEMORY_SHARE // per_worker)))
+
+
+def _convert_to(backend, model, x_dim: int, final: Path) -> None:
+    """Convert *model* so that *final* only ever appears whole.
+
+    The converter writes in place, and a process killed mid-write (an out-of-memory kill, Ctrl-C) would
+    leave a truncated file that the newer-than-the-booster test would then trust. So it writes beside
+    *final* and renames, which is atomic on one filesystem.
+    """
+    partial = final.with_name(f"{final.name}.{os.getpid()}{_PARTIAL_SUFFIX}")
+    try:
+        backend.to_onnx(model, partial, x_dim)
+        os.replace(partial, final)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def _soft_model_proto(sm, x_dim: int, column_dir=None):
@@ -87,9 +141,13 @@ def _soft_model_proto(sm, x_dim: int, column_dir=None):
     backend = get_backend(sm.backend, "cpu")
     if column_dir is not None:
         cached = _cached_soft_path(backend, column_dir)
-        if cached is None:
-            cached = Path(column_dir) / SOFT_ONNX_NAME
-            backend.to_onnx(sm.model, cached, x_dim)
+        if cached is not None:
+            try:
+                return onnx.load(str(cached))
+            except Exception:  # noqa: BLE001
+                cached.unlink(missing_ok=True)  # unreadable, so convert it again below
+        cached = Path(column_dir) / SOFT_ONNX_NAME
+        _convert_to(backend, sm.model, x_dim, cached)
         return onnx.load(str(cached))
 
     with tempfile.TemporaryDirectory() as td:
@@ -117,23 +175,28 @@ def prime_soft_conversions(jobs) -> None:
     from olinda.train.backend import get_backend
 
     todo = []
+    largest = 0
     for sm, column_dir, x_dim in jobs:
         backend = get_backend(sm.backend, "cpu")
         source = Path(column_dir) / backend.model_file
+        for stray in Path(column_dir).glob(f"*{_PARTIAL_SUFFIX}"):
+            stray.unlink(missing_ok=True)  # left by a conversion that was killed
         if _cached_soft_path(backend, column_dir) is not None or not source.exists():
             continue
         if source.stat().st_size >= _PARALLEL_MIN_BYTES:
             todo.append((str(column_dir), x_dim))
+            largest = max(largest, source.stat().st_size)
     if len(todo) < 2:
         return
 
     import multiprocessing
-    import os
     from concurrent.futures import ProcessPoolExecutor
 
     from olinda.console import echo
 
-    workers = min(len(todo), os.cpu_count() or 1, _MAX_CONVERT_WORKERS)
+    workers = _convert_workers(len(todo), largest, _available_memory())
+    if workers < 2:
+        return  # not enough free memory to hold two conversions; the fuse converts one at a time
     echo(
         f"converting {len(todo)} boosters to ONNX · [dim]{workers} at a time[/]", "run"
     )
@@ -145,3 +208,6 @@ def prime_soft_conversions(jobs) -> None:
             list(pool.map(_convert_in_worker, *zip(*todo)))
     except Exception as exc:  # noqa: BLE001
         echo(f"parallel conversion failed ({exc}); converting one by one", "warning")
+        for column_dir, _ in todo:  # a killed worker may have left half a file
+            for stray in Path(column_dir).glob(f"*{_PARTIAL_SUFFIX}"):
+                stray.unlink(missing_ok=True)
