@@ -474,7 +474,7 @@ def test_an_unreadable_kept_conversion_is_made_again(tmp_path, library, monkeypa
 
 
 def _write_continuous_hard(
-    tmp_path, smiles, x, column="activity", scale=40.0, skewed=False
+    tmp_path, smiles, x, column="activity", scale=40.0, skewed=False, unit=1.0
 ):
     """Measurements on their own scale (here ~5 to ~45), not a probability: a concentration, say.
 
@@ -496,15 +496,21 @@ def _write_continuous_hard(
     return path
 
 
-@pytest.mark.parametrize("skewed", [False, True], ids=["gaussian", "skewed-positive"])
-def test_continuous_hard_labels_blend_into_the_prediction(tmp_path, library, skewed):
+@pytest.mark.parametrize(
+    "skewed,unit",
+    [(False, 1.0), (True, 1.0), (True, 1e5), (False, 1e-6)],
+    ids=["gaussian", "skewed-positive", "skewed-in-the-millions", "tiny-units"],
+)
+def test_continuous_hard_labels_blend_into_the_prediction(
+    tmp_path, library, skewed, unit
+):
     """A regression head is fused, calibrated onto the teacher's scale, and capped lower than a classifier."""
     from olinda.hard import HARD_DIRNAME, HARD_META_NAME
     from olinda.tanimoto import A_CEILING_REGRESSION
 
     home, smiles, x = library
     soft = write_soft(tmp_path, smiles, x, columns=("activity", "solubility"))
-    hard = _write_continuous_hard(tmp_path, smiles, x, skewed=skewed)
+    hard = _write_continuous_hard(tmp_path, smiles, x, skewed=skewed, unit=unit)
     run_dir = _steps(soft, tmp_path / "run", hard)
     if skewed:  # the case whose export drops the link function: make sure it is the one being run
         from olinda.hard import HARD_MODEL_SUBDIR
@@ -546,6 +552,17 @@ def test_continuous_hard_labels_blend_into_the_prediction(tmp_path, library, ske
     )
     assert parts["c0_h_s"].max() <= 1.0 + 1e-9
     assert np.any(a > 0.0), "the hard head earned no weight at all"
+
+
+def test_label_scale_is_a_positive_magnitude_for_any_labels():
+    from olinda.hard.train import _label_scale
+
+    assert _label_scale(np.array([2e6, 4e6])) == pytest.approx(3e6)
+    assert _label_scale(np.array([-3.0, 3.0])) == pytest.approx(
+        3.0
+    )  # sign does not cancel
+    assert _label_scale(np.array([0.0, 0.0])) == 1.0  # nothing to divide by
+    assert _label_scale(np.array([np.nan])) == 1.0
 
 
 def test_a_binary_head_keeps_its_own_ceiling(tmp_path, library):
@@ -625,3 +642,36 @@ def test_a_regressor_export_may_be_offset_but_not_reordered(tmp_path):
     hard_train._check_regressor_export(Model(), Offset(), X)
     with pytest.raises(RuntimeError, match="does not follow its booster"):
         hard_train._check_regressor_export(Model(), Scrambled(), X)
+
+
+def test_labels_in_the_millions_export_only_once_scaled():
+    """Why `_label_scale` exists: lazy-qsar's Tweedie export carries an offset of about the labels' mean."""
+    import tempfile
+    import warnings
+
+    from lazyqsar.base.xgboost import BaseXGBArtifact, BaseXGBRegressor
+
+    from olinda.hard.train import _check_regressor_export, _label_scale
+
+    rng = np.random.default_rng(0)
+    X = (rng.random((600, 256)) < 0.08).astype(np.float32) * rng.integers(
+        1, 6, (600, 256)
+    )
+    w = rng.normal(0, 1, 256) * (rng.random(256) < 0.1)
+    lin = X @ w
+    y = 1e6 * 10.0 * np.exp(lin / lin.std())
+
+    def export_ok(labels):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = BaseXGBRegressor().fit(X, labels)
+        with tempfile.TemporaryDirectory() as td:
+            model.save(td)
+            try:
+                _check_regressor_export(model, BaseXGBArtifact.load(td), X)
+            except RuntimeError:
+                return False
+        return True
+
+    assert not export_ok(y), "this is the failure the scaling prevents"
+    assert export_ok(y / _label_scale(y))

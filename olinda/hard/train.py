@@ -47,6 +47,19 @@ def _new_hard_model(task: str):
     raise ValueError(f"unknown hard-label task {task!r}")
 
 
+def _label_scale(y: np.ndarray) -> float:
+    """What to divide continuous labels by so the head trains on values of order one.
+
+    Dividing by a positive constant changes nothing the pipeline keeps: the isotonic map onto the teacher's
+    scale is monotone and is fitted to the scaled head's own output. What it does change is numerics. The
+    exported Tweedie graph carries an offset of about the labels' mean, and float32 resolves a spread of
+    order one only up to an offset of a few hundred; labels in the millions were rejected for exactly
+    that. Squared-error and pseudo-Huber heads also stop depending on the labels' unit.
+    """
+    scale = float(np.mean(np.abs(y)))
+    return scale if np.isfinite(scale) and scale > 0 else 1.0
+
+
 def _regressor_margin(model, x) -> np.ndarray:
     """A hard regressor's raw score: the booster's margin, before any link function."""
     return np.asarray(
@@ -213,8 +226,13 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
         fingerprint_json = f.attrs.get("fingerprint")
     fingerprint = json.loads(fingerprint_json) if fingerprint_json else default_spec()
     hard_model = _new_hard_model(resolved_task)
+    label_scale = 1.0
     if resolved_task == "binary":
         y = y.astype(int)
+    else:
+        y_original = y
+        label_scale = _label_scale(y)
+        y = y / label_scale
 
     with warnings.catch_warnings():
         warnings.simplefilter(
@@ -231,8 +249,8 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
             )
         else:
             echo(
-                f"{len(y):,} labelled compounds · values {y.min():.4g} to {y.max():.4g} "
-                f"(median {np.median(y):.4g})",
+                f"{len(y):,} labelled compounds · values {y_original.min():.4g} to {y_original.max():.4g} "
+                f"(median {np.median(y_original):.4g})",
                 "info",
                 sub=True,
             )
@@ -388,6 +406,7 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
     meta = {
         "task": resolved_task,
         "n": int(len(y)),
+        "label_scale": label_scale,
         "features": "qmfp",
         "fingerprint": fingerprint,
         "hard_dir": HARD_MODEL_SUBDIR,
