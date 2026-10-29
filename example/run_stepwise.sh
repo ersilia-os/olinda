@@ -81,7 +81,7 @@ if smoke.exists():
     import pandas as pd
     q = pd.read_csv(smoke)["smiles"].tolist()
     t0 = time.time()
-    df = model.run(q, progress=False)
+    df = pd.DataFrame(model.run(q, progress=False), columns=model.columns)
     print(f"\n  smoke prediction · {len(df):,} molecules in {time.time() - t0:.1f}s")
     print("   ", df.describe().loc[["min", "mean", "max"]].to_string().replace("\n", "\n    "))
     bad = int(df[model.columns].isna().any(axis=1).sum())

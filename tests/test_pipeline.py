@@ -295,3 +295,31 @@ def test_selecting_columns_decides_what_the_model_predicts(tmp_path, library):
     assert r.exit_code != 0
     assert "absent" in plain(r)
     assert not (tmp_path / "nope" / "columns").exists()
+
+
+def test_prepare_refuses_a_directory_that_already_holds_a_run(tmp_path, library):
+    """Re-preparing over an old run would fuse its boosters and hard heads under the new run's names."""
+    home, smiles, x = library
+    soft = write_soft(tmp_path, smiles, x, columns=("activity",))
+    run = tmp_path / "run"
+    assert run_cli(["prepare", "-s", soft, "-m", run]).exit_code == 0
+    again = run_cli(["prepare", "-s", soft, "-m", run])
+    assert again.exit_code != 0
+    assert "already holds a prepared run" in plain(again)
+
+
+def test_a_missing_input_file_is_a_usage_error_not_a_traceback(tmp_path, library):
+    result = run_cli(["prepare", "-s", tmp_path / "nope.csv", "-m", tmp_path / "run"])
+    assert result.exit_code == 2
+    assert "does not exist" in plain(result)
+    assert not (tmp_path / "run").exists()
+
+
+def test_a_fit_that_fails_in_prepare_leaves_no_folder_behind(tmp_path, library):
+    home, smiles, x = library
+    short = tmp_path / "short.csv"
+    pd.DataFrame({"smiles": smiles[:5], "y": [0.1] * 5}).to_csv(short, index=False)
+    result = run_cli(["fit", "-s", short, "-m", tmp_path / "out" / "model.onnx"])
+    assert result.exit_code != 0
+    assert "must have" in plain(result)
+    assert not (tmp_path / "out" / "model").exists()

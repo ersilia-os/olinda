@@ -20,12 +20,14 @@ from olinda.cli.guards import require_train
     "--soft-labels",
     "-s",
     required=True,
+    type=click.Path(exists=True, dir_okay=False),
     help="Teacher (soft) values over the reference library (SMILES + one or more value columns, library order).",
 )
 @click.option(
     "--hard-labels",
     "-h",
     default=None,
+    type=click.Path(exists=True, dir_okay=False),
     help="Optional CSV/TSV/Parquet of your own compounds (SMILES + one label column) → adds a hard head.",
 )
 @click.option(
@@ -61,7 +63,7 @@ from olinda.cli.guards import require_train
 @click.option(
     "--hard-label-columns",
     default=None,
-    help="Comma-separated measurement columns to use (default: every column matching a teacher task).",
+    help="Comma-separated measurement columns to use (default: every column in the file; each must match a teacher task).",
 )
 def fit_cmd(
     soft_labels,
@@ -126,18 +128,28 @@ def fit_cmd(
     )
 
     model_dir = str(work)
-    prepare_cmd.callback(
-        soft_labels=soft_labels,
-        hard_labels=hard_labels,
-        model_dir=model_dir,
-        task=task,
-        max_samples=max_samples,
-        val_frac=val_frac,
-        soft_smiles_column=soft_smiles_column,
-        soft_label_columns=soft_label_columns,
-        hard_smiles_column=hard_smiles_column,
-        hard_label_columns=hard_label_columns,
-    )
+    created = not work.exists()
+    try:
+        prepare_cmd.callback(
+            soft_labels=soft_labels,
+            hard_labels=hard_labels,
+            model_dir=model_dir,
+            task=task,
+            max_samples=max_samples,
+            val_frac=val_frac,
+            soft_smiles_column=soft_smiles_column,
+            soft_label_columns=soft_label_columns,
+            hard_smiles_column=hard_smiles_column,
+            hard_label_columns=hard_label_columns,
+        )
+    except BaseException:
+        # A failed prepare (a bad file, a mismatched library) has produced nothing to resume, so the folder this
+        # run made for it is just debris. One that already existed is not ours to remove.
+        if created and not runlib.is_run_dir(work):
+            import shutil
+
+            shutil.rmtree(work, ignore_errors=True)
+        raise
     # With hard labels, learn-hard fuses the run itself, so a soft-only fuse here would be thrown away.
     learn_soft_cmd.callback(
         model_dir=model_dir,

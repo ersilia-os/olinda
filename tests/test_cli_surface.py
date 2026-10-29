@@ -79,7 +79,7 @@ def test_every_command_appears_in_exactly_one_help_panel():
     assert len(listed) == len(set(listed)), "a command is listed in two panels"
 
 
-def test_fit_calls_every_pipeline_callback_with_arguments_they_accept():
+def test_fit_calls_every_pipeline_callback_with_arguments_they_accept(tmp_path):
     """`fit` drives the pipeline by calling its siblings' callbacks directly, not through click.
 
     That bypasses click's parameter handling, so a renamed or dropped option is not caught anywhere
@@ -108,9 +108,11 @@ def test_fit_calls_every_pipeline_callback_with_arguments_they_accept():
             if value is command:
                 setattr(module, attribute, command)
 
+    teacher = tmp_path / "teacher.csv"
+    teacher.write_text("smiles,y\nCCO,1\n")
     try:
         result = CliRunner().invoke(
-            cli, ["fit", "-s", "teacher.csv", "-m", "out/model.onnx"]
+            cli, ["fit", "-s", str(teacher), "-m", str(tmp_path / "model.onnx")]
         )
     finally:
         for name, callback in originals.items():

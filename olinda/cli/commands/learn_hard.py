@@ -118,7 +118,10 @@ def learn_hard_cmd(model_dir):
     # Re-fuse the served bundle so every column's hard head is included.
     from olinda.export import build_bundle
 
-    build_bundle(md)
+    try:
+        build_bundle(md)
+    except (ValueError, FileNotFoundError) as exc:
+        raise click.ClickException(str(exc)) from exc
     summary_panel(
         "olinda · learn-hard",
         [

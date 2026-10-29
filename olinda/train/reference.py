@@ -115,7 +115,7 @@ def train_regression(
     dval: xgb.QuantileDMatrix,
     *,
     params: dict | None = None,
-    num_boost_round: int = 5000,
+    num_boost_round: int = 10000,
     early_stopping_rounds: int = 50,
     seed: int = 42,
     log_every: int = 100,
@@ -135,7 +135,7 @@ def train_regression(
     p["nthread"] = os.cpu_count() or 0
     if device == "cuda":
         p["device"] = "cuda"
-    # objective/eval_metric normally come from choose_objective via `params`; fall back to XGBoost's own
+    # objective/eval_metric normally come in via `params`; fall back to XGBoost's own
     # default (reg:squarederror / rmse) for a bare call. The early-stop metric is the LAST eval_metric.
     objective = p.get("objective", "reg:squarederror")
     em = p.get("eval_metric", "rmse")

@@ -72,3 +72,38 @@ def test_a_corrupted_leaf_stops_the_export(tmp_path, library, backend, monkeypat
     result = run_cli(["export", "-m", run])
     assert result.exit_code != 0, result.output
     assert not (run / "model.onnx").exists()
+
+
+def test_the_parity_scale_grows_with_the_values_and_never_shrinks_the_tolerance():
+    from olinda.export.parity import value_scale
+
+    assert value_scale(np.array([0.2, 0.9])) == 1.0, (
+        "probabilities keep the absolute tolerance"
+    )
+    assert value_scale(np.array([-4000.0, 10.0])) == 4000.0
+    assert value_scale(np.array([])) == 1.0
+
+
+def test_a_column_in_the_thousands_still_exports(
+    tmp_path, library, backend, monkeypatch
+):
+    """float32 rounding on values near 5,000 is ~5e-4, which an absolute 1e-4 check would reject."""
+    import pandas as pd
+
+    from olinda.train.backend import CANONICAL_DEFAULTS
+
+    home, smiles, x = library
+    soft = write_soft(tmp_path, smiles, x, columns=("activity",))
+    frame = pd.read_csv(soft)
+    value = [c for c in frame.columns if c != "smiles"][0]
+    frame[value] = 3000 + 6000 * (frame[value] - frame[value].min()) / (
+        frame[value].max() - frame[value].min()
+    )
+    frame.to_csv(soft, index=False)
+    monkeypatch.setitem(CANONICAL_DEFAULTS, "min_child_weight", 1.0)
+    run = tmp_path / "run"
+    assert (
+        run_cli(["prepare", "-s", soft, "-m", run, "--val-frac", "0.2"]).exit_code == 0
+    )
+    assert run_cli(["learn-soft", "-m", run, "--num-boost-round", "40"]).exit_code == 0
+    assert (run / "model.onnx").is_file()

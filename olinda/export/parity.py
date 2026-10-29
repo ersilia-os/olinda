@@ -28,11 +28,21 @@ _PARITY_RANDOM = (
 _RAW_SLACK = 3e-5  # float32-vs-float64 slack on a raw score: tree sums agree to ~1e-6 (XGBoost) and ~5e-7 (LightGBM)
 
 
+def value_scale(values: np.ndarray) -> float:
+    """How much larger than one the column's values run, which is how far float32 rounding scales with them.
+
+    A float32 holds about seven digits, so on a column of values near 5,000 it is off by ~5e-4 per value
+    before any model is involved. The tolerances above are absolute and were set on probabilities.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    return max(1.0, float(np.abs(values).max())) if values.size else 1.0
+
+
 def _calibrated(calibrator, raw: np.ndarray) -> np.ndarray:
     """A raw score through its calibrator, or unchanged when there is none."""
     if calibrator is None:
         return np.asarray(raw, dtype=np.float64)
-    return np.asarray(calibrator.transform(raw)).ravel()
+    return np.asarray(calibrator.transform(raw, dtype=np.float64)).ravel()
 
 
 def _step_envelope(calibrator, raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -42,8 +52,10 @@ def _step_envelope(calibrator, raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     disagree by 1e-7 about which side of a boundary a score sits on. The jump is bounded by the envelope
     here, which is what the parity check compares against instead of one flat number.
     """
-    a = _calibrated(calibrator, np.asarray(raw, dtype=np.float64) - _RAW_SLACK)
-    b = _calibrated(calibrator, np.asarray(raw, dtype=np.float64) + _RAW_SLACK)
+    raw = np.asarray(raw, dtype=np.float64)
+    slack = _RAW_SLACK * value_scale(raw)
+    a = _calibrated(calibrator, raw - slack)
+    b = _calibrated(calibrator, raw + slack)
     return np.minimum(a, b), np.maximum(a, b)
 
 

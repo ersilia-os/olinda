@@ -145,12 +145,17 @@ class IsotonicCalibrator:
         )
         return self
 
-    def transform(self, raw: np.ndarray) -> np.ndarray:
-        """Apply the fitted monotonic calibration map."""
+    def transform(self, raw: np.ndarray, dtype=np.float32) -> np.ndarray:
+        """Apply the fitted monotonic calibration map.
+
+        *dtype* is float32 because that is what a served model returns; the export's parity check asks for
+        float64, since float32 rounding on a column whose values run into the thousands is itself larger
+        than the tolerance it is checked against.
+        """
         if not self.is_fitted:
             raise RuntimeError("calibrator not fitted")
         raw = np.asarray(raw, dtype=np.float64).ravel()
-        return np.interp(self._sign * raw, self._x, self._y).astype(np.float32)
+        return np.interp(self._sign * raw, self._x, self._y).astype(dtype)
 
     def save(self, path: str | Path) -> None:
         """Save calibrator anchors to JSON."""

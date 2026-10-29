@@ -255,8 +255,8 @@ def _verify_smiles_alignment(smiles, descriptors_h5: str | Path) -> int:
         n = int(f["input"].shape[0])
         if len(smiles) != n:
             raise ValueError(
-                f"calculations file has {len(smiles)} rows but the descriptors library has {n}. "
-                "It must contain exactly the same molecules, in the same order."
+                f"your --soft-labels file has {len(smiles):,} rows, but it must have {n:,}: one per line of the "
+                "reference library, in the same order (`olinda library` writes that list of SMILES)."
             )
         # Vectorized chunked comparison (no per-row Python loop over 1.35M rows).
         for start in range(0, n, _VERIFY_CHUNK):

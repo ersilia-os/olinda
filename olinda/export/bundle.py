@@ -17,6 +17,7 @@ from olinda.export.parity import (
     _calibrated,
     _parity_probe,
     _step_envelope,
+    value_scale,
 )
 from olinda.hard.layout import (
     H_TO_S_NAME,
@@ -110,17 +111,22 @@ def build_bundle(model_dir: str | Path) -> dict:
     # How far outside the reference's step envelope each output lands (zero when inside it): a calibrator is
     # a step function, so a raw score that differs by 1e-7 between float32 and float64 can legitimately land
     # on the neighbouring step. That is not drift, and a flat tolerance would reject good models at scale.
+    # Relative to the column's scale: float32 rounding grows with the values, so 1e-4 absolute is right for a
+    # probability and unreachable for a column of concentrations in the thousands.
     parity = {
         k: float(np.max(np.maximum(band[k][0] - got[k], got[k] - band[k][1]).clip(0)))
+        / value_scale(ref[k])
         for k in outputs
     }
-    plain = {k: float(np.max(np.abs(got[k] - ref[k]))) for k in outputs}
+    plain = {
+        k: float(np.max(np.abs(got[k] - ref[k]))) / value_scale(ref[k]) for k in outputs
+    }
     worst_plain = max(plain.values())
     worst = max(parity.values())
     if worst > _PARITY_TOL:
         offender = max(parity, key=parity.get)
         raise RuntimeError(
-            f"model.onnx parity failed on column {offender!r}: max abs diff {worst:.2e} > {_PARITY_TOL:.0e}"
+            f"model.onnx parity failed on column {offender!r}: max abs diff {worst:.2e} (relative to the column's scale) > {_PARITY_TOL:.0e}"
         )
 
     from olinda.metrics import json_safe

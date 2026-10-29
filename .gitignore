@@ -10,7 +10,6 @@ access.json
 /train.h5
 /val.h5
 /*.png
-/best_params.json
 
 # Findings report written by the repository-auditing skill. Regenerated on demand, and it is a
 # working note about the repo rather than part of it.

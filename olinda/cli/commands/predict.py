@@ -21,6 +21,7 @@ import rich_click as click
     "-i",
     "input_path",
     required=True,
+    type=click.Path(exists=True, dir_okay=False),
     help="CSV/TSV/Parquet with a `smiles` (or `input`) column.",
 )
 @click.option(

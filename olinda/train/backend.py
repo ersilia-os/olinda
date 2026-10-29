@@ -6,7 +6,7 @@ LightGBM (much faster / lower-memory on large CPU workloads; its GPU can't use s
 ever runs on CPU here). ``OLINDA_BACKEND=xgboost|lightgbm|auto`` overrides.
 
 Hyperparameters are kept in **canonical, backend-agnostic names** (:data:`CANONICAL_DEFAULTS`) so that
-``choose_objective`` and the paste-ready block are portable; each backend
+the objective kinds are portable; each backend
 translates canonical → its native parameter names, and maps the canonical objective *kind*
 (``squarederror|logistic|pseudohuber``) to its native objective + eval metric.
 """
@@ -25,7 +25,7 @@ from olinda.train.xgb import detect_training_device
 # Single source of truth for default hyperparameters, in canonical (engine-agnostic) names.
 # learning_rate=0.1 (not 0.3): benchmarked on the real 200k Morgan split, 0.1 gave a large accuracy gain
 # over 0.3 for BOTH engines (XGBoost R² 0.70→0.76, LightGBM 0.68→0.78) and still converges within the
-# 5000-round cap; 0.05 barely helps and blows the round budget. Matches QSAR literature (eta 0.05–0.1).
+# 10,000-round cap; 0.05 barely helps and blows the round budget. Matches QSAR literature (eta 0.05–0.1).
 # Structural defaults in engine-agnostic ("canonical") names — each backend's translate() maps them to its
 # native params. Set for large-scale (~1.3M rows) sparse Morgan-count QSAR and fixed: hyperparameters found
 # on subsamples did not transfer to the 1.36M-row fit, so there is no tuning step.

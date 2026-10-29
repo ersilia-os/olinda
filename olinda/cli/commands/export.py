@@ -18,11 +18,10 @@ def export_cmd(model_dir):
     """(Re)build the single self-describing `model.onnx` for a trained model dir.
 
     Fuses every column and every stage into ONE graph with one output per task — the surrogate alone, or,
-    where a hard head exists, the blend `(1-a)·S + a·H_S`.
-    The channels behind a blend are declared as outputs too. The Morgan featurizer config + provenance (RDKit
+    where a hard head exists, the blend `(1-a)·S + a·H_S`, which stays internal to the graph. The graph takes
+    packed qmfp bytes (`uint8 (N, 1024)`) and decodes them itself. The fingerprint spec + provenance (RDKit
     version, reference library, hard-head summary) are embedded in the file's metadata, so it is
-    self-describing. Gated on a numeric parity check. Featurization (RDKit) stays in Python — the graph
-    consumes a 2048-count Morgan fingerprint.
+    self-describing. Gated on a numeric parity check.
     """
     require_train()
     from olinda import run as runlib
