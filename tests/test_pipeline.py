@@ -368,37 +368,48 @@ def test_learn_soft_refuses_a_model_too_big_for_one_onnx_file_before_training(
 def test_boosters_converted_in_parallel_give_the_same_predictions(
     tmp_path, library, backend, monkeypatch
 ):
-    """Large boosters are converted in worker processes; the model they make must be the one a serial run makes."""
+    """Large boosters are converted in worker processes; the model they make must be the one a serial run makes.
+
+    The booster is trained once and fused twice. Training two boosters would compare two trainings, and
+    multithreaded boosting is not bit-for-bit repeatable across machines.
+    """
+    import shutil
+
     import onnxruntime as ort
 
     from olinda.export import heads
+    from olinda.featurizer.codec import pack
     from olinda.train.backend import CANONICAL_DEFAULTS
 
     home, smiles, x = library
     monkeypatch.setitem(CANONICAL_DEFAULTS, "min_child_weight", 1.0)
     soft = write_soft(tmp_path, smiles, x)
+    monkeypatch.setattr(
+        heads, "_PARALLEL_MIN_BYTES", 0
+    )  # every booster counts as large
+    parallel = tmp_path / "parallel"
+    assert (
+        run_cli(["prepare", "-s", soft, "-m", parallel, "--val-frac", "0.2"]).exit_code
+        == 0
+    )
+    assert (
+        run_cli(["learn-soft", "-m", parallel, "--num-boost-round", "40"]).exit_code
+        == 0
+    )
 
-    def build(name, threshold):
-        monkeypatch.setattr(heads, "_PARALLEL_MIN_BYTES", threshold)
-        run = tmp_path / name
-        assert (
-            run_cli(["prepare", "-s", soft, "-m", run, "--val-frac", "0.2"]).exit_code
-            == 0
-        )
-        assert (
-            run_cli(["learn-soft", "-m", run, "--num-boost-round", "40"]).exit_code == 0
-        )
-        return run
+    serial = tmp_path / "serial"
+    shutil.copytree(parallel, serial)
+    for kept in serial.glob("columns/*/" + heads.SOFT_ONNX_NAME):
+        kept.unlink()  # so the fuse has to convert again
+    (serial / "model.onnx").unlink()
+    monkeypatch.setattr(heads, "_PARALLEL_MIN_BYTES", 10**12)  # none does
+    assert run_cli(["export", "-m", serial]).exit_code == 0
 
-    parallel = build("parallel", 0)  # every booster counts as large
-    serial = build("serial", 10**12)  # none does
-    probe = x[:50].astype("uint8")
-    from olinda.featurizer.codec import pack
-
-    outs = []
-    for run in (parallel, serial):
-        s = ort.InferenceSession(str(run / "model.onnx"))
-        outs.append(s.run(None, {"input": pack(probe)}))
+    probe = pack(x[:50].astype("uint8"))
+    outs = [
+        ort.InferenceSession(str(run / "model.onnx")).run(None, {"input": probe})
+        for run in (parallel, serial)
+    ]
     for a, b in zip(*outs):
         assert np.array_equal(a, b)
 

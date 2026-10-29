@@ -104,6 +104,7 @@ jobs:
           olinda predict -m /tmp/fixture/model.onnx -i /tmp/fixture/soft.csv -o /tmp/pred.csv
           head -3 /tmp/pred.csv
           # a distilling command must name its extra rather than dying on an import
+          touch x.csv  # the file must exist, or click rejects it before the extra is checked
           ! olinda fit -s x.csv -m y.onnx 2>&1 | tee /tmp/fit.log
           grep -q "olinda\[train\]" /tmp/fit.log
           ! grep -q "Traceback" /tmp/fit.log
