@@ -136,39 +136,14 @@ def fit_cmd(
     require_train()
     import time
 
-    from olinda import run as runlib
     from olinda.console import (
         STEP_COLORS,
-        echo,
-        resources,
-        rule,
         set_active_color,
-    )
-    from olinda.console import (
-        path as cpath,
     )
 
     started = time.time()
     set_active_color(STEP_COLORS["fit"])
-    try:
-        work = runlib.work_dir_for(model_onnx)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-    rule("olinda · fit", style=STEP_COLORS["fit"], right=resources())
-    # A *prepared* folder is a different run: its column directories are bound positionally to whatever
-    # teacher produced them, so mixing the two would train under one name and fuse another. Keyed on the
-    # manifest rather than on the folder existing, because a fit that failed early — bad input file,
-    # mismatched library — leaves an empty one behind, and that must not block the retry.
-    if runlib.is_run_dir(work):
-        echo(f"a prepared run is already there · [dim]{cpath(work)}[/]", "error")
-        raise click.ClickException(
-            f"{work} holds another run — delete it, or resume it with "
-            f"`olinda learn-soft -m {work}` and finish with `olinda clean -m {model_onnx}`"
-        )
-    echo(
-        f"building in [dim]{cpath(work)}[/] → [bold]{cpath(Path(model_onnx))}[/]", "run"
-    )
+    work = _open_work_dir(model_onnx)
 
     model_dir = str(work)
     _prepare_or_clean_up(
@@ -196,3 +171,31 @@ def fit_cmd(
     clean_cmd.callback(model_onnx=model_onnx)
 
     _print_summary(model_onnx, hard_labels is not None, started)
+
+
+def _open_work_dir(model_onnx) -> Path:
+    """The working folder for *model_onnx*, refusing one that already holds a prepared run."""
+    from olinda import run as runlib
+    from olinda.console import STEP_COLORS, echo, resources, rule
+    from olinda.console import path as cpath
+
+    try:
+        work = runlib.work_dir_for(model_onnx)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    rule("olinda · fit", style=STEP_COLORS["fit"], right=resources())
+    # A *prepared* folder is a different run: its column directories are bound positionally to whatever
+    # teacher produced them, so mixing the two would train under one name and fuse another. Keyed on the
+    # manifest rather than on the folder existing, because a fit that failed early — bad input file,
+    # mismatched library — leaves an empty one behind, and that must not block the retry.
+    if runlib.is_run_dir(work):
+        echo(f"a prepared run is already there · [dim]{cpath(work)}[/]", "error")
+        raise click.ClickException(
+            f"{work} holds another run — delete it, or resume it with "
+            f"`olinda learn-soft -m {work}` and finish with `olinda clean -m {model_onnx}`"
+        )
+    echo(
+        f"building in [dim]{cpath(work)}[/] → [bold]{cpath(Path(model_onnx))}[/]", "run"
+    )
+    return work
