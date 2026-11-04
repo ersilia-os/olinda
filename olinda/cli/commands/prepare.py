@@ -9,6 +9,206 @@ from olinda.cli.guards import require_train
 from olinda.cli.options import parse_label_columns
 
 
+def _read_library_spec(descriptors):
+    """Read the reference library's shape and featurization spec, refusing one olinda cannot train on.
+
+    The library records how it was featurized, and every model trained on it inherits that spec: it is
+    what olinda.fingerprint tells runtimes. A library without one predates qmfp.
+
+    Returns
+    -------
+    tuple
+        ``(n_rows, dim, spec)``.
+    """
+    import json
+
+    import h5py
+
+    from olinda.featurizer import validate_spec
+
+    with h5py.File(descriptors, "r") as f:
+        n_rows, dim = int(f["data"].shape[0]), int(f["data"].shape[1])
+        raw_spec = f.attrs.get("fingerprint")
+    try:
+        spec = validate_spec(json.loads(raw_spec))
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(
+            f"{descriptors} records no usable qmfp fingerprint spec ({exc}) — it is not a library "
+            "this olinda can train on. Run `olinda setup` for the current one."
+        ) from exc
+    if int(spec["slots"]) != dim:
+        raise click.ClickException(
+            f"{descriptors} has {dim}-wide rows but its spec says {spec['slots']} slots"
+        )
+    return n_rows, dim, spec
+
+
+def _read_teacher_columns(
+    soft_labels, descriptors, soft_label_columns, soft_smiles_column
+):
+    """Load the selected teacher columns, verified against the library once.
+
+    Returns
+    -------
+    tuple
+        ``(selected_cols, targets)``: the column names that will be distilled and their values.
+    """
+    from olinda.console import echo
+    from olinda.data import check_column_budget, load_reference_calcs_frame
+
+    wanted_soft = parse_label_columns(soft_label_columns)
+    try:
+        all_cols, targets = load_reference_calcs_frame(
+            soft_labels,
+            descriptors,
+            columns=wanted_soft,
+            smiles_column=soft_smiles_column,
+        )
+        # The budget bounds what actually gets distilled, so it counts the selection, not the file.
+        selected_cols = list(targets)
+        check_column_budget(selected_cols)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if wanted_soft is not None and len(selected_cols) < len(all_cols):
+        skipped = [c for c in all_cols if c not in targets]
+        echo(
+            f"distilling {len(selected_cols)} of {len(all_cols)} column(s) · [dim]skipping {skipped}[/]",
+            "info",
+        )
+    echo(
+        f"{len(selected_cols)} teacher column(s): [bold]{', '.join(selected_cols)}[/]",
+        "run",
+    )
+    return selected_cols, targets
+
+
+def _match_hard_to_soft(
+    hard_labels, selected_cols, hard_smiles_column, hard_label_columns
+):
+    """Match each hard column onto a soft column by name, before any work is done.
+
+    Failing here, rather than after the splits are written, keeps a bad hard file from leaving a
+    half-prepared run behind.
+
+    Returns
+    -------
+    dict
+        Hard column name to soft column name; empty when there are no hard labels.
+    """
+    from olinda.console import echo
+
+    if hard_labels is None:
+        return {}
+    from olinda.data import match_hard_columns
+    from olinda.data.reference import _read_table, resolve_smiles_frame
+
+    try:
+        _, hard_values = resolve_smiles_frame(
+            _read_table(hard_labels),
+            smiles_column=hard_smiles_column,
+            label_columns=parse_label_columns(hard_label_columns),
+        )
+        hard_map = match_hard_columns(
+            selected_cols, [str(c) for c in hard_values.columns]
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    for hard_col, soft_col in hard_map.items():
+        note = "exact" if hard_col == soft_col else "suffix"
+        echo(f"hard '{hard_col}' → '{soft_col}' ([dim]{note}[/])", "run")
+    return hard_map
+
+
+def _plan_column_splits(md, manifest, selected_cols, targets, val_frac, seed, limit):
+    """Plan a value-stratified split per column and register each in the manifest.
+
+    The descriptor matrix is never copied: a split is only row indices. Targets and splits are written
+    to the run directory here, since nothing later needs them in memory.
+
+    Returns
+    -------
+    dict
+        Soft column name to column id, for binding hard labels onto the same directories.
+    """
+    from olinda import run as runlib
+    from olinda.console import echo
+    from olinda.data import check_target, split_reference_to_indices
+
+    by_id, splits, name_to_id = {}, {}, {}
+    for name in selected_cols:
+        y = targets[name]
+        try:
+            train_idx, val_idx, split_info = split_reference_to_indices(
+                y, val_frac=val_frac, seed=seed, limit=limit
+            )
+        except ValueError as exc:
+            raise click.ClickException(f"column '{name}': {exc}") from exc
+        try:
+            check_target(name, split_info)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        entry = runlib.add_column(
+            manifest, name=name, y=y, train_idx=train_idx, val_idx=val_idx
+        )
+        by_id[entry["id"]] = y
+        splits[entry["id"]] = (train_idx, val_idx)
+        name_to_id[name] = entry["id"]
+        runlib.column_dir(md, entry["id"]).mkdir(parents=True, exist_ok=True)
+        echo(
+            f"{name}: [bold]{len(train_idx):,}[/] train · [bold]{len(val_idx):,}[/] val",
+            "run",
+        )
+
+    runlib.write_targets(md, by_id)
+    runlib.write_splits(md, splits)
+    return name_to_id
+
+
+def _featurize_hard_labels(
+    md, manifest, hard_labels, hard_map, name_to_id, task, hard_smiles_column, spec
+):
+    """Featurize the hard labels once, slice them per matched column and record them in the manifest."""
+    from olinda import run as runlib
+    from olinda.console import echo
+    from olinda.data import WARN_HARD_ROWS
+    from olinda.hard import prepare_hard_labels_wide
+
+    try:
+        hard_info = prepare_hard_labels_wide(
+            hard_labels,
+            md,
+            {h: name_to_id[s] for h, s in hard_map.items()},
+            task=task,
+            smiles_column=hard_smiles_column,
+            spec=spec,
+        )
+    except (ValueError, NotImplementedError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    for hard_col, info in hard_info.items():
+        soft_col = hard_map[hard_col]
+        col = runlib.find_column(manifest, soft_col)
+        col["hard"] = {
+            "source_column": hard_col,
+            "match": "exact" if hard_col == soft_col else "suffix",
+            **info,
+        }
+        pos = (
+            f" · {info['n_positive']} positive"
+            if info["n_positive"] is not None
+            else ""
+        )
+        echo(
+            f"{soft_col}: [bold]{info['n']:,}[/] hard rows · {info['task']}{pos}",
+            "run",
+        )
+        if info["n"] > WARN_HARD_ROWS:
+            echo(
+                f"{soft_col}: {info['n']:,} labelled compounds is a lot — the similarity gate compares "
+                "each against the whole library, so `learn-hard` will take a long time",
+                "warning",
+            )
+
+
 @click.command("prepare")
 @click.option(
     "--soft-labels",
@@ -76,8 +276,6 @@ def prepare_cmd(
     require_train()
     import time
 
-    import h5py
-
     from olinda import run as runlib
     from olinda.console import (
         STEP_COLORS,
@@ -91,16 +289,7 @@ def prepare_cmd(
     from olinda.console import (
         path as cpath,
     )
-    from olinda.data import (
-        MORGAN_FINGERPRINTS_FILENAME,
-        OLINDA_HOME,
-        WARN_HARD_ROWS,
-        check_column_budget,
-        check_target,
-        load_reference_calcs_frame,
-        match_hard_columns,
-        split_reference_to_indices,
-    )
+    from olinda.data import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
 
     started = time.time()
     set_active_color(STEP_COLORS["prepare"])
@@ -123,75 +312,21 @@ def prepare_cmd(
             "(or scripts/compute_qmfp_library.py to generate them locally)."
         )
 
-    import json
-
-    from olinda.featurizer import validate_spec
-
-    with h5py.File(descriptors, "r") as f:
-        n_rows, dim = int(f["data"].shape[0]), int(f["data"].shape[1])
-        raw_spec = f.attrs.get("fingerprint")
-    # The library records how it was featurized, and every model trained on it inherits that spec:
-    # it is what olinda.fingerprint tells runtimes. A library without one predates qmfp.
-    try:
-        spec = validate_spec(json.loads(raw_spec))
-    except (TypeError, ValueError) as exc:
-        raise click.ClickException(
-            f"{descriptors} records no usable qmfp fingerprint spec ({exc}) — it is not a library "
-            "this olinda can train on. Run `olinda setup` for the current one."
-        ) from exc
-    if int(spec["slots"]) != dim:
-        raise click.ClickException(
-            f"{descriptors} has {dim}-wide rows but its spec says {spec['slots']} slots"
-        )
+    n_rows, dim, spec = _read_library_spec(descriptors)
     features = {"features": "qmfp", "fingerprint": spec}
 
     n_steps = 3 if hard_labels is not None else 2
 
     # --- soft labels: the selected value columns, verified against the library once -----------
     step(1, n_steps, "reading teacher columns")
-    wanted_soft = parse_label_columns(soft_label_columns)
-    try:
-        all_cols, targets = load_reference_calcs_frame(
-            soft_labels,
-            descriptors,
-            columns=wanted_soft,
-            smiles_column=soft_smiles_column,
-        )
-        # The budget bounds what actually gets distilled, so it counts the selection, not the file.
-        selected_cols = list(targets)
-        check_column_budget(selected_cols)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-    if wanted_soft is not None and len(selected_cols) < len(all_cols):
-        skipped = [c for c in all_cols if c not in targets]
-        echo(
-            f"distilling {len(selected_cols)} of {len(all_cols)} column(s) · [dim]skipping {skipped}[/]",
-            "info",
-        )
-    echo(
-        f"{len(selected_cols)} teacher column(s): [bold]{', '.join(selected_cols)}[/]",
-        "run",
+    selected_cols, targets = _read_teacher_columns(
+        soft_labels, descriptors, soft_label_columns, soft_smiles_column
     )
 
     # --- hard labels: match them onto the soft columns before doing any work ------------------
-    hard_map: dict = {}
-    if hard_labels is not None:
-        from olinda.data.reference import _read_table, resolve_smiles_frame
-
-        try:
-            _, hard_values = resolve_smiles_frame(
-                _read_table(hard_labels),
-                smiles_column=hard_smiles_column,
-                label_columns=parse_label_columns(hard_label_columns),
-            )
-            hard_map = match_hard_columns(
-                selected_cols, [str(c) for c in hard_values.columns]
-            )
-        except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
-        for hard_col, soft_col in hard_map.items():
-            note = "exact" if hard_col == soft_col else "suffix"
-            echo(f"hard '{hard_col}' → '{soft_col}' ([dim]{note}[/])", "run")
+    hard_map = _match_hard_to_soft(
+        hard_labels, selected_cols, hard_smiles_column, hard_label_columns
+    )
 
     # --- per-column value-stratified splits; the descriptor matrix is never copied ------------
     step(2, n_steps, "planning per-column splits")
@@ -205,74 +340,23 @@ def prepare_cmd(
         seed=seed,
         limit=max_samples,
     )
-    by_id, splits, name_to_id = {}, {}, {}
-    for name in selected_cols:
-        y = targets[name]
-        try:
-            train_idx, val_idx, split_info = split_reference_to_indices(
-                y, val_frac=val_frac, seed=seed, limit=max_samples
-            )
-        except ValueError as exc:
-            raise click.ClickException(f"column '{name}': {exc}") from exc
-        try:
-            check_target(name, split_info)
-        except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
-        entry = runlib.add_column(
-            manifest, name=name, y=y, train_idx=train_idx, val_idx=val_idx
-        )
-        by_id[entry["id"]] = y
-        splits[entry["id"]] = (train_idx, val_idx)
-        name_to_id[name] = entry["id"]
-        runlib.column_dir(md, entry["id"]).mkdir(parents=True, exist_ok=True)
-        echo(
-            f"{name}: [bold]{len(train_idx):,}[/] train · [bold]{len(val_idx):,}[/] val",
-            "run",
-        )
-
-    runlib.write_targets(md, by_id)
-    runlib.write_splits(md, splits)
+    name_to_id = _plan_column_splits(
+        md, manifest, selected_cols, targets, val_frac, seed, max_samples
+    )
 
     # --- hard labels: featurize once, then slice per matched column ---------------------------
-    hard_info: dict = {}
     if hard_map:
-        from olinda.hard import prepare_hard_labels_wide
-
         step(3, n_steps, "featurizing hard labels")
-        try:
-            hard_info = prepare_hard_labels_wide(
-                hard_labels,
-                md,
-                {h: name_to_id[s] for h, s in hard_map.items()},
-                task=task,
-                smiles_column=hard_smiles_column,
-                spec=spec,
-            )
-        except (ValueError, NotImplementedError) as exc:
-            raise click.ClickException(str(exc)) from exc
-        for hard_col, info in hard_info.items():
-            soft_col = hard_map[hard_col]
-            col = runlib.find_column(manifest, soft_col)
-            col["hard"] = {
-                "source_column": hard_col,
-                "match": "exact" if hard_col == soft_col else "suffix",
-                **info,
-            }
-            pos = (
-                f" · {info['n_positive']} positive"
-                if info["n_positive"] is not None
-                else ""
-            )
-            echo(
-                f"{soft_col}: [bold]{info['n']:,}[/] hard rows · {info['task']}{pos}",
-                "run",
-            )
-            if info["n"] > WARN_HARD_ROWS:
-                echo(
-                    f"{soft_col}: {info['n']:,} labelled compounds is a lot — the similarity gate compares "
-                    "each against the whole library, so `learn-hard` will take a long time",
-                    "warning",
-                )
+        _featurize_hard_labels(
+            md,
+            manifest,
+            hard_labels,
+            hard_map,
+            name_to_id,
+            task,
+            hard_smiles_column,
+            spec,
+        )
 
     runlib.write_manifest(md, manifest)
 

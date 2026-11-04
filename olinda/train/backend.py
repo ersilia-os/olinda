@@ -248,6 +248,63 @@ class XGBoostBackend:
         export_xgb_onnx(model, path, input_dim)
 
 
+def _lgb_progress_callback(update, st, metric, num_boost_round, t0, xval, yval):
+    """Build the LightGBM callback that tracks the best round and feeds the live status line.
+
+    *st* is the mutable best-so-far record shared with the caller, which reads ``best_it`` afterwards.
+    """
+    import time as _time
+
+    from olinda.console import elapsed, status_line
+    from olinda.train.reference import _val_stats
+
+    def _val_scores(model):
+        # LightGBM keeps a running score for each validation set, so reading it costs O(n_val).
+        # Re-predicting xval would run every tree built so far, which grows quadratically with the
+        # round count. The inner score is private API, so fall back to predicting if it is gone.
+        try:
+            return np.asarray(model._Booster__inner_predict(1), dtype=np.float64)
+        except AttributeError:
+            return np.asarray(model.predict(xval), dtype=np.float64)
+
+    def _cb(env):
+        it = env.iteration
+        va = next(
+            (
+                float(v)
+                for n, m, v, _ in env.evaluation_result_list
+                if n == "val" and m == metric
+            ),
+            float("nan"),
+        )
+        if va < st["best"]:
+            st["best"], st["best_it"] = va, it
+        if it % 100 == 0 and xval is not None:
+            _, st["r2"], st["rho"] = _val_stats(yval, _val_scores(env.model))
+        if it % 25 == 0:
+            # Only what the live table's row cannot show: it already carries R², ρ, the val
+            # loss as RMSE, the round count and the elapsed time (see _row_values).
+            update(
+                status_line(
+                    "training",
+                    frac=(it + 1) / num_boost_round if num_boost_round else None,
+                    pairs=[
+                        ("round", f"{it:,}/{num_boost_round:,}"),
+                        (f"{metric} val", f"{va:.4f}"),
+                    ],
+                    tail=f"best@{st['best_it']:,} · {elapsed(_time.perf_counter() - t0)}",
+                ),
+                detail={
+                    "round": f"{it:,}/{num_boost_round:,}",
+                    f"{metric} val": f"{va:.4f}",
+                    "best": f"@{st['best_it']:,}",
+                },
+                **_row_values(st["r2"], st["rho"], va, metric, it),
+            )
+
+    return _cb
+
+
 # --------------------------------------------------------------------------------------------------
 # LightGBM
 # --------------------------------------------------------------------------------------------------
@@ -374,8 +431,7 @@ class LightGBMBackend:
 
         import lightgbm as lgb
 
-        from olinda.console import elapsed, live_status, status_line
-        from olinda.train.reference import _val_stats
+        from olinda.console import elapsed, live_status
 
         metric = self._metric_name(native_params)
         echo(
@@ -396,53 +452,10 @@ class LightGBMBackend:
             "rho": float("nan"),
         }
 
-        def _val_scores(model):
-            # LightGBM keeps a running score for each validation set, so reading it costs O(n_val).
-            # Re-predicting xval would run every tree built so far, which grows quadratically with the
-            # round count. The inner score is private API, so fall back to predicting if it is gone.
-            try:
-                return np.asarray(model._Booster__inner_predict(1), dtype=np.float64)
-            except AttributeError:
-                return np.asarray(model.predict(xval), dtype=np.float64)
-
         with live_status() as update:
-
-            def _cb(env):
-                it = env.iteration
-                va = next(
-                    (
-                        float(v)
-                        for n, m, v, _ in env.evaluation_result_list
-                        if n == "val" and m == metric
-                    ),
-                    float("nan"),
-                )
-                if va < st["best"]:
-                    st["best"], st["best_it"] = va, it
-                if it % 100 == 0 and xval is not None:
-                    _, st["r2"], st["rho"] = _val_stats(yval, _val_scores(env.model))
-                if it % 25 == 0:
-                    # Only what the live table's row cannot show: it already carries R², ρ, the val
-                    # loss as RMSE, the round count and the elapsed time (see _row_values).
-                    update(
-                        status_line(
-                            "training",
-                            frac=(it + 1) / num_boost_round
-                            if num_boost_round
-                            else None,
-                            pairs=[
-                                ("round", f"{it:,}/{num_boost_round:,}"),
-                                (f"{metric} val", f"{va:.4f}"),
-                            ],
-                            tail=f"best@{st['best_it']:,} · {elapsed(_time.perf_counter() - t0)}",
-                        ),
-                        detail={
-                            "round": f"{it:,}/{num_boost_round:,}",
-                            f"{metric} val": f"{va:.4f}",
-                            "best": f"@{st['best_it']:,}",
-                        },
-                        **_row_values(st["r2"], st["rho"], va, metric, it),
-                    )
+            _cb = _lgb_progress_callback(
+                update, st, metric, num_boost_round, t0, xval, yval
+            )
 
             booster = lgb.train(
                 native_params,

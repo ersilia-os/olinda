@@ -147,7 +147,7 @@ class OlindaArtifact:
     ) -> None:
         import onnxruntime as ort
 
-        from olinda.featurizer import QmfpFeaturizer, n_input_bytes, validate_spec
+        from olinda.featurizer import QmfpFeaturizer
 
         path = Path(path)
         if path.is_dir():
@@ -164,6 +164,29 @@ class OlindaArtifact:
             )
         except ort.capi.onnxruntime_pybind11_state.InvalidProtobuf as exc:
             raise ValueError(f"{path} is not an ONNX model file") from exc
+
+        self._read_metadata(path)
+
+        self._featurizer = QmfpFeaturizer(self.fingerprint)
+        have = self._featurizer.rdkit_version
+        if self._rdkit_version and have != self._rdkit_version:
+            warnings.warn(
+                f"{path.name} was featurized with RDKit {self._rdkit_version}; this olinda computes "
+                f"fingerprints with RDKit {have}. The golden check below says whether that matters.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        self.golden = None
+        if check_golden and self._golden:
+            self.golden = self._check_golden(strict)
+
+    def _read_metadata(self, path: Path) -> None:
+        """Parse and validate the embedded metadata and the graph's input/output signature.
+
+        Fails here, with a message naming the file, rather than deep inside ``run()`` if the artifact is
+        not an olinda one, is from another schema, or its column list and graph disagree.
+        """
+        from olinda.featurizer import n_input_bytes, validate_spec
 
         props = self._session.get_modelmeta().custom_metadata_map
         if "olinda.schema_version" not in props:
@@ -217,19 +240,6 @@ class OlindaArtifact:
                 f"{path} declares output(s) {missing} that the graph does not produce; "
                 f"it exposes {self._output_names}. Rebuild it with `olinda fit`."
             )
-
-        self._featurizer = QmfpFeaturizer(self.fingerprint)
-        have = self._featurizer.rdkit_version
-        if self._rdkit_version and have != self._rdkit_version:
-            warnings.warn(
-                f"{path.name} was featurized with RDKit {self._rdkit_version}; this olinda computes "
-                f"fingerprints with RDKit {have}. The golden check below says whether that matters.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        self.golden = None
-        if check_golden and self._golden:
-            self.golden = self._check_golden(strict)
 
     def _run_bytes(self, packed: np.ndarray) -> dict:
         return dict(

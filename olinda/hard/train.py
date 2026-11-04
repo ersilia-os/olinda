@@ -152,19 +152,387 @@ def _score_reference(
     with sweep_progress("scoring", n) as tick:
         for start in range(0, n, chunk):
             xb = np.asarray(matrix.x[start : start + chunk], dtype=np.float32)
-            if artifact is not None:
-                g = artifact.run(xb)
-            elif direct:
-                g = booster.inplace_predict(
-                    xb, iteration_range=(0, int(model.best_iteration_) + 1)
-                )
-            elif task == "binary":
-                g = np.asarray(model.predict_proba(xb))[:, 1]
-            else:
-                g = np.asarray(model.predict(xb))
+            g = _score_chunk(model, task, xb, artifact, booster if direct else None)
             out.append(np.asarray(g, dtype=np.float32).ravel())
             tick(min(start + chunk, n))
     return np.concatenate(out)
+
+
+def _score_chunk(model, task: str, xb: np.ndarray, artifact, booster):
+    """Score one chunk of the library: through the shipped ONNX, the raw booster, or lazy-qsar's own predict.
+
+    Guard clauses in order of preference; ``booster`` is passed only when the direct route is safe (see
+    :func:`_score_reference`).
+    """
+    if artifact is not None:
+        return artifact.run(xb)
+    if booster is not None:
+        return booster.inplace_predict(
+            xb, iteration_range=(0, int(model.best_iteration_) + 1)
+        )
+    if task == "binary":
+        return np.asarray(model.predict_proba(xb))[:, 1]
+    return np.asarray(model.predict(xb))
+
+
+def _load_hard_h5(hard_path: Path):
+    """Read a column's prepared ``hard.h5``: features, raw labels, the task, and the fingerprint spec."""
+    import h5py
+
+    with h5py.File(hard_path, "r") as f:
+        X = np.asarray(f["x"][:], dtype=np.float32)
+        y = np.asarray(f["y"][:], dtype=np.float64)
+        resolved_task = str(f.attrs.get("task", "binary"))
+        fingerprint_json = f.attrs.get("fingerprint")
+    fingerprint = json.loads(fingerprint_json) if fingerprint_json else default_spec()
+    return X, y, resolved_task, fingerprint
+
+
+def _echo_label_summary(task: str, y: np.ndarray, y_original) -> None:
+    """Say what H is about to learn from: how many labels, and their balance or range."""
+    if task == "binary":
+        echo(
+            f"{len(y):,} labelled compounds · {int(y.sum()):,} positive ({y.mean():.1%})",
+            "info",
+            sub=True,
+        )
+    else:
+        echo(
+            f"{len(y):,} labelled compounds · values {y_original.min():.4g} to {y_original.max():.4g} "
+            f"(median {np.median(y_original):.4g})",
+            "info",
+            sub=True,
+        )
+
+
+def _calibrate_to_soft(g_ref: np.ndarray, soft: np.ndarray, hard_root: Path):
+    """Fit and save the isotonic ``H -> S`` map, and report how well the calibrated head tracks the teacher.
+
+    Returns ``(direction, spearman, pearson_after, alignment_r2, n_calibrated)``. R², not the correlation,
+    is what later bounds the blend, so it is the number carried forward.
+    """
+    from olinda.calibrate import IsotonicCalibrator, _spearman_sign
+    from olinda.metrics import _r2
+
+    # `g_ref` covers the loaded view of the library while `soft` is always the full reference-aligned
+    # target, so under `--max-samples` the two differ in length. Pairing the head of each is correct
+    # because the limit truncates the head — but state that, rather than leaving a `min()` to absorb
+    # any future change to what the flag selects, which would silently mispair rows with labels.
+    if len(g_ref) > len(soft):
+        raise RuntimeError(
+            f"scored {len(g_ref):,} reference rows but the target vector has {len(soft):,} — "
+            "the run directory does not match this library"
+        )
+    gv, sv = g_ref.astype(np.float64), soft[: len(g_ref)]
+    mask = np.isfinite(gv) & np.isfinite(sv)
+    gv, sv = gv[mask], sv[mask]
+    calibrator = IsotonicCalibrator().fit(gv, sv, increasing="auto")
+    calibrator.save(hard_root / H_TO_S_NAME)
+    direction = "increasing" if calibrator._sign > 0 else "decreasing"
+    # fit() already ranked both arrays to choose the direction; reuse that rather than paying for a
+    # second full pass over the reference library just to report the magnitude.
+    spearman = calibrator.rank_correlation
+    if (
+        spearman is None
+    ):  # only when a caller fixed the direction instead of detecting it
+        spearman = _spearman_sign(gv, sv)
+
+    calibrated = calibrator.transform(gv)
+    pearson_after = _pearson(calibrated, sv)
+    # R², not the correlation, is what bounds the blend — see _blend_ceiling. The gap between r² and
+    # R² is the part of the disagreement that a shift or a rescaling would explain.
+    alignment_r2 = _r2(sv, calibrated)
+    echo(f"{direction} fit · Spearman(H, soft) {spearman:+.3f}", "info", sub=True)
+    # R² is the one that matters downstream — it is what caps the blend — so it is named as such
+    # rather than left as the third number in a row of three.
+    echo(
+        f"agreement after calibration · Pearson {pearson_after:.3f} · "
+        f"[bold]R² {alignment_r2:.3f}[/] [dim]· R² caps the blend weight[/]",
+        "info",
+        sub=True,
+    )
+    return direction, spearman, pearson_after, alignment_r2, int(len(gv))
+
+
+def _echo_tanimoto(ad_counts: dict, alignment_r2: float, task: str) -> None:
+    """Report T's similarity target, its held-out fit and reach, and what blend weight it earned."""
+    from olinda.tanimoto import A_CEILING, A_CEILING_REGRESSION, T_HI, T_LO
+
+    echo(
+        f"true similarity · median {ad_counts['sim_median']:.3f} · "
+        f"{ad_counts['frac_above_lo']:.1%} above {T_LO} · {ad_counts['frac_above_hi']:.1%} above {T_HI}",
+        "info",
+        sub=True,
+    )
+    echo(
+        f"T fit · R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} "
+        f"[dim]on {ad_counts['fit_n']:,} held out[/]",
+        "info",
+        sub=True,
+    )
+    echo(
+        f"T reach · opens for [bold]{ad_counts['fit_recall']:.0%}[/] of the compounds that qualify · "
+        f"{ad_counts['fit_precision']:.0%} of those it opens for deserve it",
+        "info",
+        sub=True,
+    )
+    if ad_counts["a_max"] <= 0.0:
+        reason = (
+            f"nothing in the scored reference reaches similarity {T_LO} — the labelled compounds have "
+            "no neighbours here, so the gate could never open"
+            if ad_counts["sim_max"] < T_LO
+            else f"R²(calibrated H_S, soft)={alignment_r2:.3f} — the hard head does not reproduce the "
+            "teacher's scale well enough to be worth mixing in"
+        )
+        # No leading indent on either of these: they are the step's conclusion, not one of its
+        # details, and `echo` supplies the glyph. Indenting them while keeping the ▪/⚠ that mark a
+        # top-level line is what made this read as a step nudged out of column.
+        echo(f"blend DISABLED · {reason}", "warning")
+    else:
+        echo(
+            f"blend weight ramps 0 → [bold]{ad_counts['a_max']:.3f}[/] across similarity {T_LO} → "
+            f"{T_HI} · ceiling from R²={alignment_r2:.3f}, capped at "
+            f"{A_CEILING_REGRESSION if task == 'regression' else A_CEILING}",
+            "run",
+        )
+
+
+def _tanimoto_record(ad_counts: dict, task: str) -> dict:
+    """The gate's entry in ``hard_meta.json`` and ``hard_eval.json``: its ramp, ceiling and fit statistics."""
+    from olinda.tanimoto import A_CEILING, A_CEILING_REGRESSION, T_HI, T_LO
+
+    return {
+        "signal": "similarity_regressor",
+        "sim_lo": T_LO,
+        "sim_hi": T_HI,
+        "artifact": TANIMOTO_DIRNAME,
+        "a_max_ceiling": A_CEILING_REGRESSION if task == "regression" else A_CEILING,
+        **ad_counts,
+    }
+
+
+def _write_hard_meta(
+    hard_root: Path, head: dict, selection: dict, calibration: dict, tanimoto: dict
+) -> None:
+    """Write ``hard_meta.json`` (last, because it is what says the head is complete) and ``hard_eval.json``."""
+    import lazyqsar as _lq
+
+    meta = {
+        **{k: head[k] for k in ("task", "n", "label_scale")},
+        "features": "qmfp",
+        "fingerprint": head["fingerprint"],
+        "hard_dir": HARD_MODEL_SUBDIR,
+        "h_reference": H_REFERENCE_NAME,
+        "calibrator": H_TO_S_NAME,
+        # Applicability gate is learned here and applied at predict time (a similarity regressor, no
+        # similarity search). Blend: prediction = (1-a)*surrogate + a*h_s.
+        "tanimoto": tanimoto,
+        "lazyqsar_version": getattr(_lq, "__version__", "unknown"),
+    }
+    with open(hard_root / HARD_META_NAME, "w") as fp:
+        json.dump(meta, fp, indent=2)
+    with open(hard_root / HARD_EVAL_NAME, "w") as fp:
+        json.dump(
+            {"selection": selection, "calibration": calibration, "tanimoto": tanimoto},
+            fp,
+            indent=2,
+        )
+
+
+def _print_summary(
+    hard_root: Path,
+    selection: dict,
+    calibration: dict,
+    ad_counts: dict,
+) -> None:
+    """The closing panel of ``learn-hard``: what was trained, calibrated, gated and where it was saved."""
+    from olinda.tanimoto import T_LO
+
+    rows = [
+        (
+            "Hard model H",
+            f"[bold]{selection['preset']}[/] · {selection['best_iteration'] + 1:,} trees",
+        ),
+        ("Reference scored", f"[bold]{calibration['n_reference']:,}[/] compounds"),
+        (
+            "H → S calibration",
+            f"[bold]{calibration['direction']}[/] · Spearman {calibration['spearman_g_soft']:+.3f} · Pearson(cal) {calibration['pearson_calibrated_soft']:.3f}",
+        ),
+        (
+            "Applicability",
+            f"similarity R² [bold]{ad_counts['fit_r2']:.3f}[/] · "
+            f"{ad_counts['frac_above_lo']:.1%} of the library above {T_LO} → [dim]{TANIMOTO_DIRNAME}/[/]",
+        ),
+        ("Saved", f"[dim]{cpath(hard_root)}[/]"),
+    ]
+    summary_panel("olinda · learn-hard", rows, border_style="green", icon="✓")
+
+
+def _check_inputs(model_dir: Path, hard_path: Path, soft, matrix):
+    """Refuse a column that is not ready for ``learn-hard``, and resolve the soft labels and the library.
+
+    Returns ``(soft, matrix)``: the soft labels as float64, and the shared library, loaded here only when
+    the caller did not pass one.
+    """
+    if not hard_path.exists():
+        raise FileNotFoundError(
+            f"no {HARD_H5_NAME} in {model_dir} — run `olinda prepare -s <teacher> --hard-labels <file> -m <run dir>` first"
+        )
+    # hard_meta.json is written last and is what says "this head is complete", so an interrupted re-run
+    # must not leave the previous one behind next to half-new files.
+    (model_dir / HARD_DIRNAME / HARD_META_NAME).unlink(missing_ok=True)
+    if soft is None:
+        raise ValueError(
+            "train_hard needs this column's reference-aligned soft labels; the caller reads them "
+            "from the run's targets.h5"
+        )
+    soft = np.asarray(soft, dtype=np.float64)
+    if matrix is None:
+        # Standalone call: load the library ourselves. `learn-hard` passes one in so a multi-column run
+        # loads it once for the whole run instead of twice per column.
+        from olinda.data.matrix import ReferenceMatrix
+
+        matrix = ReferenceMatrix.load(_reference_path())
+    return soft, matrix
+
+
+def _fit_head(hard_model, task: str, X, y, y_original, hard_dir: Path):
+    """Step 1: fit and save H; for a continuous head also load its ONNX back and check it follows the booster.
+
+    Returns ``(artifact, selection)``; ``artifact`` is ``None`` for a binary head, which is scored directly
+    off the booster.
+    """
+    step(1, 4, "training the hard-label model H")
+    _echo_label_summary(task, y, y_original)
+    hard_model.fit(X, y)
+    hard_model.save(str(hard_dir))
+    artifact = None
+    if task == "regression":
+        from lazyqsar.base.xgboost import BaseXGBArtifact
+
+        artifact = BaseXGBArtifact.load(str(hard_dir))
+        _check_regressor_export(hard_model, artifact, X)
+    selection = _selection_report(hard_model)
+    echo(
+        f"ready · {selection['preset']} preset · {selection['best_iteration'] + 1:,} trees",
+        "info",
+        sub=True,
+    )
+    return artifact, selection
+
+
+def _fit_gate(X, matrix, hard_root: Path, task: str, alignment_r2: float) -> dict:
+    """Step 4: learn T, save it, and report it. Returns the fit statistics."""
+    from olinda.tanimoto import A_CEILING_REGRESSION, T_HI, T_LO
+
+    step(4, 4, "learning T · Tanimoto to the labelled set")
+    hard_bits = (X > 0).astype(np.float32)
+    ad_clf, ad_counts = _fit_tanimoto(
+        hard_bits,
+        X.shape[1],
+        matrix,
+        T_LO,
+        T_HI,
+        alignment_r2,
+        ceiling=A_CEILING_REGRESSION if task == "regression" else None,
+    )
+    ad_clf.save(hard_root / TANIMOTO_DIRNAME)
+    _echo_tanimoto(ad_counts, alignment_r2, task)
+    return ad_counts
+
+
+def _scale_labels(task: str, y: np.ndarray):
+    """Prepare labels for training: ints for binary, scaled to order one for continuous.
+
+    Returns ``(y, y_original, label_scale)``; ``y_original`` is ``None`` for a binary head.
+    """
+    if task == "binary":
+        return y.astype(int), None, 1.0
+    label_scale = _label_scale(y)
+    return y / label_scale, y, label_scale
+
+
+def _score_and_save(
+    hard_model, task: str, n_features: int, matrix, artifact, hard_root: Path
+):
+    """Step 2: score H across the reference library and keep the scores next to the head."""
+    import h5py
+
+    step(2, 4, "scoring H across the reference library")
+    g_ref = _score_reference(hard_model, task, n_features, matrix, artifact=artifact)
+    with h5py.File(hard_root / H_REFERENCE_NAME, "w") as f:
+        f.create_dataset("g", data=g_ref.astype(np.float32))
+    echo(f"saved → {H_REFERENCE_NAME}", "info", sub=True)
+    return g_ref
+
+
+def _calibration_record(
+    direction: str,
+    spearman: float,
+    pearson_after: float,
+    alignment_r2: float,
+    n_calibrated: int,
+) -> dict:
+    """The calibration's entry in ``hard_eval.json``: how H lines up with the teacher once mapped onto its scale."""
+    return {
+        "direction": direction,
+        "spearman_g_soft": spearman,
+        "pearson_calibrated_soft": pearson_after,
+        "r2_calibrated_soft": alignment_r2,
+        # r² - R² is the share of the disagreement a shift or rescaling would account for; ~0 means the
+        # calibrated signal is already 1-to-1 with the teacher rather than merely correlated with it.
+        "misalignment_gap": float(pearson_after**2 - alignment_r2)
+        if np.isfinite(pearson_after) and np.isfinite(alignment_r2)
+        else None,
+        "n_reference": n_calibrated,
+    }
+
+
+def _persist(hard_root, head, selection, calibrated, ad_counts):
+    """Build the calibration and gate records and write ``hard_meta.json`` and ``hard_eval.json``.
+
+    Returns ``(calibration, tanimoto)`` for the caller to hand back.
+    """
+    calibration = _calibration_record(*calibrated)
+    tanimoto = _tanimoto_record(ad_counts, head["task"])
+    _write_hard_meta(hard_root, head, selection, calibration, tanimoto)
+    return calibration, tanimoto
+
+
+def _run_steps(hard_model, task, X, y, y_original, soft, matrix, hard_root):
+    """Run the four steps of ``learn-hard`` in order.
+
+    Returns ``(selection, calibrated, ad_counts)`` where ``calibrated`` is the tuple
+    :func:`_calibrate_to_soft` returns. The warnings filter lives here, around all four, because
+    lazy-qsar's version-drift warnings can come from any of them.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter(
+            "ignore"
+        )  # hush lazy-qsar's sklearn version-drift FutureWarnings
+
+        # === Step 1/4 — train the hard-label classifier H ======================
+        artifact, selection = _fit_head(
+            hard_model, task, X, y, y_original, hard_root / HARD_MODEL_SUBDIR
+        )
+
+        # === Step 2/4 — score H across the reference library ===================
+        g_ref = _score_and_save(
+            hard_model, task, X.shape[1], matrix, artifact, hard_root
+        )
+
+        # === Step 3/4 — calibrate H onto the soft-label scale ==================
+        step(3, 4, "calibrating H onto the soft-label scale")
+        calibrated = _calibrate_to_soft(g_ref, soft, hard_root)
+        alignment_r2 = calibrated[3]
+
+        # No plots here. `olinda validate` draws the calibration map from the fused graph itself, so a
+        # training-time copy would only ever be a second rendering of the same numbers — and drawing it
+        # pulled matplotlib into every training run, which is what made the CLI pause on its font cache.
+
+        # === Step 4/4 — train T, the Tanimoto regressor ========================
+        ad_counts = _fit_gate(X, matrix, hard_root, task, alignment_r2)
+    return selection, calibrated, ad_counts
 
 
 def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
@@ -190,263 +558,38 @@ def train_hard(model_dir: str | Path, soft=None, matrix=None) -> dict:
     dict
         ``{"task", "n", "hard_dir", "selection", "calibration", "tanimoto"}``.
     """
-    import h5py
-
     model_dir = Path(model_dir)
     hard_path = model_dir / HARD_H5_NAME
-    if not hard_path.exists():
-        raise FileNotFoundError(
-            f"no {HARD_H5_NAME} in {model_dir} — run `olinda prepare -s <teacher> --hard-labels <file> -m <run dir>` first"
-        )
-    # hard_meta.json is written last and is what says "this head is complete", so an interrupted re-run
-    # must not leave the previous one behind next to half-new files.
-    (model_dir / HARD_DIRNAME / HARD_META_NAME).unlink(missing_ok=True)
-    if soft is None:
-        raise ValueError(
-            "train_hard needs this column's reference-aligned soft labels; the caller reads them "
-            "from the run's targets.h5"
-        )
-    soft = np.asarray(soft, dtype=np.float64)
-    if matrix is None:
-        # Standalone call: load the library ourselves. `learn-hard` passes one in so a multi-column run
-        # loads it once for the whole run instead of twice per column.
-        from olinda.data.matrix import ReferenceMatrix
-
-        matrix = ReferenceMatrix.load(_reference_path())
+    soft, matrix = _check_inputs(model_dir, hard_path, soft, matrix)
 
     hard_root = model_dir / HARD_DIRNAME
     hard_dir = hard_root / HARD_MODEL_SUBDIR
     hard_root.mkdir(parents=True, exist_ok=True)
 
-    # --- load the prepared hard labels ---------------------------------------
-    with h5py.File(hard_path, "r") as f:
-        X = np.asarray(f["x"][:], dtype=np.float32)
-        y = np.asarray(f["y"][:], dtype=np.float64)
-        resolved_task = str(f.attrs.get("task", "binary"))
-        fingerprint_json = f.attrs.get("fingerprint")
-    fingerprint = json.loads(fingerprint_json) if fingerprint_json else default_spec()
+    X, y, resolved_task, fingerprint = _load_hard_h5(hard_path)
     hard_model = _new_hard_model(resolved_task)
-    label_scale = 1.0
-    if resolved_task == "binary":
-        y = y.astype(int)
-    else:
-        y_original = y
-        label_scale = _label_scale(y)
-        y = y / label_scale
+    y, y_original, label_scale = _scale_labels(resolved_task, y)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter(
-            "ignore"
-        )  # hush lazy-qsar's sklearn version-drift FutureWarnings
+    selection, calibrated, ad_counts = _run_steps(
+        hard_model, resolved_task, X, y, y_original, soft, matrix, hard_root
+    )
 
-        # === Step 1/4 — train the hard-label classifier H ======================
-        step(1, 4, "training the hard-label model H")
-        if resolved_task == "binary":
-            echo(
-                f"{len(y):,} labelled compounds · {int(y.sum()):,} positive ({y.mean():.1%})",
-                "info",
-                sub=True,
-            )
-        else:
-            echo(
-                f"{len(y):,} labelled compounds · values {y_original.min():.4g} to {y_original.max():.4g} "
-                f"(median {np.median(y_original):.4g})",
-                "info",
-                sub=True,
-            )
-        hard_model.fit(X, y)
-        hard_model.save(str(hard_dir))
-        artifact = None
-        if resolved_task == "regression":
-            from lazyqsar.base.xgboost import BaseXGBArtifact
-
-            artifact = BaseXGBArtifact.load(str(hard_dir))
-            _check_regressor_export(hard_model, artifact, X)
-        selection = _selection_report(hard_model)
-        echo(
-            f"ready · {selection['preset']} preset · {selection['best_iteration'] + 1:,} trees",
-            "info",
-            sub=True,
-        )
-
-        # === Step 2/4 — score H across the reference library ===================
-        step(2, 4, "scoring H across the reference library")
-        g_ref = _score_reference(
-            hard_model, resolved_task, X.shape[1], matrix, artifact=artifact
-        )
-        with h5py.File(hard_root / H_REFERENCE_NAME, "w") as f:
-            f.create_dataset("g", data=g_ref.astype(np.float32))
-        echo(f"saved → {H_REFERENCE_NAME}", "info", sub=True)
-
-        # === Step 3/4 — calibrate H onto the soft-label scale ==================
-        from olinda.calibrate import IsotonicCalibrator, _spearman_sign
-
-        step(3, 4, "calibrating H onto the soft-label scale")
-        # `g_ref` covers the loaded view of the library while `soft` is always the full reference-aligned
-        # target, so under `--max-samples` the two differ in length. Pairing the head of each is correct
-        # because the limit truncates the head — but state that, rather than leaving a `min()` to absorb
-        # any future change to what the flag selects, which would silently mispair rows with labels.
-        if len(g_ref) > len(soft):
-            raise RuntimeError(
-                f"scored {len(g_ref):,} reference rows but the target vector has {len(soft):,} — "
-                "the run directory does not match this library"
-            )
-        gv, sv = g_ref.astype(np.float64), soft[: len(g_ref)]
-        mask = np.isfinite(gv) & np.isfinite(sv)
-        gv, sv = gv[mask], sv[mask]
-        calibrator = IsotonicCalibrator().fit(gv, sv, increasing="auto")
-        calibrator.save(hard_root / H_TO_S_NAME)
-        direction = "increasing" if calibrator._sign > 0 else "decreasing"
-        # fit() already ranked both arrays to choose the direction; reuse that rather than paying for a
-        # second full pass over the reference library just to report the magnitude.
-        spearman = calibrator.rank_correlation
-        if (
-            spearman is None
-        ):  # only when a caller fixed the direction instead of detecting it
-            spearman = _spearman_sign(gv, sv)
-        from olinda.metrics import _r2
-
-        calibrated = calibrator.transform(gv)
-        pearson_after = _pearson(calibrated, sv)
-        # R², not the correlation, is what bounds the blend — see _blend_ceiling. The gap between r² and
-        # R² is the part of the disagreement that a shift or a rescaling would explain.
-        alignment_r2 = _r2(sv, calibrated)
-        echo(f"{direction} fit · Spearman(H, soft) {spearman:+.3f}", "info", sub=True)
-        # R² is the one that matters downstream — it is what caps the blend — so it is named as such
-        # rather than left as the third number in a row of three.
-        echo(
-            f"agreement after calibration · Pearson {pearson_after:.3f} · "
-            f"[bold]R² {alignment_r2:.3f}[/] [dim]· R² caps the blend weight[/]",
-            "info",
-            sub=True,
-        )
-
-        # No plots here. `olinda validate` draws the calibration map from the fused graph itself, so a
-        # training-time copy would only ever be a second rendering of the same numbers — and drawing it
-        # pulled matplotlib into every training run, which is what made the CLI pause on its font cache.
-
-        # === Step 4/4 — train T, the Tanimoto regressor ========================
-        from olinda.tanimoto import A_CEILING, A_CEILING_REGRESSION, T_HI, T_LO
-
-        step(4, 4, "learning T · Tanimoto to the labelled set")
-        hard_bits = (X > 0).astype(np.float32)
-        ad_clf, ad_counts = _fit_tanimoto(
-            hard_bits,
-            X.shape[1],
-            matrix,
-            T_LO,
-            T_HI,
-            alignment_r2,
-            ceiling=A_CEILING_REGRESSION if resolved_task == "regression" else None,
-        )
-        ad_clf.save(hard_root / TANIMOTO_DIRNAME)
-        echo(
-            f"true similarity · median {ad_counts['sim_median']:.3f} · "
-            f"{ad_counts['frac_above_lo']:.1%} above {T_LO} · {ad_counts['frac_above_hi']:.1%} above {T_HI}",
-            "info",
-            sub=True,
-        )
-        echo(
-            f"T fit · R² [bold]{ad_counts['fit_r2']:.3f}[/] · ρ {ad_counts['fit_spearman']:.3f} "
-            f"[dim]on {ad_counts['fit_n']:,} held out[/]",
-            "info",
-            sub=True,
-        )
-        echo(
-            f"T reach · opens for [bold]{ad_counts['fit_recall']:.0%}[/] of the compounds that qualify · "
-            f"{ad_counts['fit_precision']:.0%} of those it opens for deserve it",
-            "info",
-            sub=True,
-        )
-        if ad_counts["a_max"] <= 0.0:
-            reason = (
-                f"nothing in the scored reference reaches similarity {T_LO} — the labelled compounds have "
-                "no neighbours here, so the gate could never open"
-                if ad_counts["sim_max"] < T_LO
-                else f"R²(calibrated H_S, soft)={alignment_r2:.3f} — the hard head does not reproduce the "
-                "teacher's scale well enough to be worth mixing in"
-            )
-            # No leading indent on either of these: they are the step's conclusion, not one of its
-            # details, and `echo` supplies the glyph. Indenting them while keeping the ▪/⚠ that mark a
-            # top-level line is what made this read as a step nudged out of column.
-            echo(f"blend DISABLED · {reason}", "warning")
-        else:
-            echo(
-                f"blend weight ramps 0 → [bold]{ad_counts['a_max']:.3f}[/] across similarity {T_LO} → "
-                f"{T_HI} · ceiling from R²={alignment_r2:.3f}, capped at "
-                f"{A_CEILING_REGRESSION if resolved_task == 'regression' else A_CEILING}",
-                "run",
-            )
-
-    # --- persist metadata + eval ---------------------------------------------
-    import lazyqsar as _lq
-
-    calibration = {
-        "direction": direction,
-        "spearman_g_soft": spearman,
-        "pearson_calibrated_soft": pearson_after,
-        "r2_calibrated_soft": alignment_r2,
-        # r² - R² is the share of the disagreement a shift or rescaling would account for; ~0 means the
-        # calibrated signal is already 1-to-1 with the teacher rather than merely correlated with it.
-        "misalignment_gap": float(pearson_after**2 - alignment_r2)
-        if np.isfinite(pearson_after) and np.isfinite(alignment_r2)
-        else None,
-        "n_reference": int(len(gv)),
-    }
-    tanimoto = {
-        "signal": "similarity_regressor",
-        "sim_lo": T_LO,
-        "sim_hi": T_HI,
-        "artifact": TANIMOTO_DIRNAME,
-        "a_max_ceiling": A_CEILING_REGRESSION
-        if resolved_task == "regression"
-        else A_CEILING,
-        **ad_counts,
-    }
-    meta = {
-        "task": resolved_task,
-        "n": int(len(y)),
-        "label_scale": label_scale,
-        "features": "qmfp",
-        "fingerprint": fingerprint,
-        "hard_dir": HARD_MODEL_SUBDIR,
-        "h_reference": H_REFERENCE_NAME,
-        "calibrator": H_TO_S_NAME,
-        # Applicability gate is learned here and applied at predict time (a similarity regressor, no
-        # similarity search). Blend: prediction = (1-a)*surrogate + a*h_s.
-        "tanimoto": tanimoto,
-        "lazyqsar_version": getattr(_lq, "__version__", "unknown"),
-    }
-    with open(hard_root / HARD_META_NAME, "w") as fp:
-        json.dump(meta, fp, indent=2)
-    with open(hard_root / HARD_EVAL_NAME, "w") as fp:
-        json.dump(
-            {"selection": selection, "calibration": calibration, "tanimoto": tanimoto},
-            fp,
-            indent=2,
-        )
+    calibration, tanimoto = _persist(
+        hard_root,
+        {
+            "task": resolved_task,
+            "n": int(len(y)),
+            "label_scale": label_scale,
+            "fingerprint": fingerprint,
+        },
+        selection,
+        calibrated,
+        ad_counts,
+    )
 
     _mark_surrogate_combined(model_dir)
 
-    # --- report ---------------------------------------------------------------
-    rows = [
-        (
-            "Hard model H",
-            f"[bold]{selection['preset']}[/] · {selection['best_iteration'] + 1:,} trees",
-        ),
-        ("Reference scored", f"[bold]{len(gv):,}[/] compounds"),
-        (
-            "H → S calibration",
-            f"[bold]{direction}[/] · Spearman {spearman:+.3f} · Pearson(cal) {pearson_after:.3f}",
-        ),
-        (
-            "Applicability",
-            f"similarity R² [bold]{ad_counts['fit_r2']:.3f}[/] · "
-            f"{ad_counts['frac_above_lo']:.1%} of the library above {T_LO} → [dim]{TANIMOTO_DIRNAME}/[/]",
-        ),
-        ("Saved", f"[dim]{cpath(hard_root)}[/]"),
-    ]
-    summary_panel("olinda · learn-hard", rows, border_style="green", icon="✓")
+    _print_summary(hard_root, selection, calibration, ad_counts)
 
     return {
         "task": resolved_task,

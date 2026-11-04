@@ -341,10 +341,8 @@ def draw_pipeline(ax) -> None:
 # ── 3 · inside the fused bundle ──────────────────────────────────────────────
 
 
-def draw_model_onnx(ax) -> None:
-    """What the single self-describing model.onnx actually contains."""
-    _canvas(ax)
-
+def _onnx_boundary(ax) -> None:
+    """The ONNX boundary: the frame and title around everything the file contains."""
     # the ONNX boundary
     ax.add_patch(
         FancyBboxPatch(
@@ -371,6 +369,9 @@ def draw_model_onnx(ax) -> None:
         zorder=3,
     )
 
+
+def _onnx_inputs(ax) -> None:
+    """Featurization beside the graph, then the decoder and the three heads that read its output."""
     # featurization runs beside the graph, as RDKit compiled to WebAssembly; the graph takes its bytes
     _box(ax, 9, 66, 15, 11, "SMILES", DATA)
     _box(
@@ -403,6 +404,9 @@ def draw_model_onnx(ax) -> None:
     _arrow(ax, (48.5, 66), (52.5, 66), color=STUDENT)
     _arrow(ax, (48.5, 44), (52.5, 44), color=TEACHER)
 
+
+def _onnx_blend(ax) -> None:
+    """The isotonic maps, the blend and the prediction, with the weight a flowing in from T."""
     # everything converges on the blend
     _box(ax, 73, 44, 12, 20, "blend", OUT, bold_first=False)
     _arrow(ax, (65.5, 66), (69, 50), color=STUDENT)
@@ -415,6 +419,9 @@ def draw_model_onnx(ax) -> None:
     _arrow(ax, (79, 44), (86, 44), color=OUT)
     _box(ax, 93, 44, 13, 13, "prediction", OUT)
 
+
+def _onnx_notes(ax) -> None:
+    """The formula above the graph and the footnotes below it."""
     _note(
         ax,
         52,
@@ -438,6 +445,15 @@ def draw_model_onnx(ax) -> None:
         "re-featurizes and re-scores them",
         color=DATA,
     )
+
+
+def draw_model_onnx(ax) -> None:
+    """What the single self-describing model.onnx actually contains."""
+    _canvas(ax)
+    _onnx_boundary(ax)
+    _onnx_inputs(ax)
+    _onnx_blend(ax)
+    _onnx_notes(ax)
 
     stylia.label(ax, xlabel="", ylabel="", title="One fused, self-describing artifact")
 

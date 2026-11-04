@@ -7,6 +7,111 @@ import rich_click as click
 from olinda.cli.guards import require_train
 
 
+def _load_reference_matrix(manifest):
+    """Load the reference descriptors once and check they are the library the run was prepared on.
+
+    The descriptor matrix is identical for every column, so it is read once and addressed by index.
+    """
+    from olinda import run as runlib
+    from olinda.console import echo
+    from olinda.data import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
+    from olinda.data.matrix import ReferenceMatrix
+
+    descriptors = OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME
+    if not descriptors.exists():
+        raise click.ClickException(
+            f"reference library missing at {descriptors} — run `olinda setup`"
+        )
+    limit = runlib.row_limit(manifest)
+    scope = f" · [dim]first {limit:,} rows[/]" if limit else ""
+    echo(f"loading reference descriptors · [dim]{descriptors.name}[/]{scope}", "run")
+    matrix = ReferenceMatrix.load(descriptors, limit=limit)
+    try:
+        matrix.assert_matches(manifest["reference_library"])
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return matrix
+
+
+def _train_columns(model_dir, manifest, matrix, be, backend_name, num_boost_round):
+    """Train one surrogate per column under a live table, recording progress in the manifest as it goes.
+
+    The manifest is rewritten after every column so an interrupted run resumes with what finished.
+
+    Returns
+    -------
+    list
+        One ``train_one_column`` result per column, in order.
+    """
+    import time
+
+    from olinda import run as runlib
+    from olinda.console import STEP_COLORS, LiveTable, elapsed
+    from olinda.train.column import train_one_column
+
+    columns = manifest["columns"]
+    results = []
+    with LiveTable(
+        [c["name"] for c in columns],
+        title="Distilling columns",
+        fields=["R²", "ρ", "RMSE", "Trees", "Time"],
+        item_label="Column",
+        running_verb="training",
+        color=STEP_COLORS["learn-soft"],
+    ) as table:
+        for col in columns:
+            table.start(col["name"])
+            col_started = time.time()
+            result = train_one_column(
+                model_dir, manifest, col, matrix, be, backend_name, num_boost_round
+            )
+            m = result["metrics"]
+            table.finish(
+                col["name"],
+                **{
+                    "R²": f"{m['r2']:.4f}",
+                    "ρ": f"{m['spearman']:.4f}",
+                    "RMSE": f"{m['rmse']:.5f}",
+                    "Trees": f"{result['n_trees']:,}",
+                    "Time": elapsed(time.time() - col_started),
+                },
+            )
+            results.append(result)
+            col["status"]["soft_trained"] = True
+            runlib.write_manifest(model_dir, manifest)
+    return results
+
+
+def _print_summary(model_dir, results, backend_name, fused, started):
+    """Print the closing panel: per-column fit quality, and the model path when this run fused one."""
+    import time
+
+    from olinda.console import STEP_COLORS, elapsed, summary_panel
+    from olinda.console import path as cpath
+
+    summary_panel(
+        "olinda · learn-soft",
+        [
+            ("Columns", f"[bold]{len(results)}[/] trained · {backend_name}"),
+            *[
+                (
+                    r["name"],
+                    f"R² [bold]{r['metrics']['r2']:.4f}[/] · ρ {r['metrics']['spearman']:.4f} · {r['n_trees']:,} trees",
+                )
+                for r in results
+            ],
+            *(
+                [("Model", f"[dim]{cpath(model_dir / 'model.onnx')}[/]")]
+                if fused
+                else []
+            ),
+            ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
+        ],
+        border_style=STEP_COLORS["learn-soft"],
+        icon="✓",
+    )
+
+
 @click.command("learn-soft")
 @click.option(
     "--model-dir",
@@ -42,21 +147,11 @@ def learn_soft_cmd(model_dir, num_boost_round, fuse):
     from olinda import run as runlib
     from olinda.console import (
         STEP_COLORS,
-        LiveTable,
-        echo,
-        elapsed,
         engine_banner,
         rule,
         set_active_color,
-        summary_panel,
     )
-    from olinda.console import (
-        path as cpath,
-    )
-    from olinda.data import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
-    from olinda.data.matrix import ReferenceMatrix
     from olinda.train.backend import get_backend, select_backend
-    from olinda.train.column import train_one_column
 
     model_dir = Path(model_dir)
     try:
@@ -86,50 +181,11 @@ def learn_soft_cmd(model_dir, num_boost_round, fuse):
     be = get_backend(backend_name, device)
     engine_banner(backend_name, device, backend_reason)
 
-    # The descriptor matrix is identical for every column, so it is read once and addressed by index.
-    descriptors = OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME
-    if not descriptors.exists():
-        raise click.ClickException(
-            f"reference library missing at {descriptors} — run `olinda setup`"
-        )
-    limit = runlib.row_limit(manifest)
-    scope = f" · [dim]first {limit:,} rows[/]" if limit else ""
-    echo(f"loading reference descriptors · [dim]{descriptors.name}[/]{scope}", "run")
-    matrix = ReferenceMatrix.load(descriptors, limit=limit)
-    try:
-        matrix.assert_matches(manifest["reference_library"])
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+    matrix = _load_reference_matrix(manifest)
 
-    results = []
-    with LiveTable(
-        [c["name"] for c in columns],
-        title="Distilling columns",
-        fields=["R²", "ρ", "RMSE", "Trees", "Time"],
-        item_label="Column",
-        running_verb="training",
-        color=STEP_COLORS["learn-soft"],
-    ) as table:
-        for col in columns:
-            table.start(col["name"])
-            col_started = time.time()
-            result = train_one_column(
-                model_dir, manifest, col, matrix, be, backend_name, num_boost_round
-            )
-            m = result["metrics"]
-            table.finish(
-                col["name"],
-                **{
-                    "R²": f"{m['r2']:.4f}",
-                    "ρ": f"{m['spearman']:.4f}",
-                    "RMSE": f"{m['rmse']:.5f}",
-                    "Trees": f"{result['n_trees']:,}",
-                    "Time": elapsed(time.time() - col_started),
-                },
-            )
-            results.append(result)
-            col["status"]["soft_trained"] = True
-            runlib.write_manifest(model_dir, manifest)
+    results = _train_columns(
+        model_dir, manifest, matrix, be, backend_name, num_boost_round
+    )
 
     del matrix  # release ~2.8 GB before fusing, which is itself memory-hungry
 
@@ -141,24 +197,4 @@ def learn_soft_cmd(model_dir, num_boost_round, fuse):
         except (ValueError, FileNotFoundError) as exc:
             raise click.ClickException(str(exc)) from exc
 
-    summary_panel(
-        "olinda · learn-soft",
-        [
-            ("Columns", f"[bold]{len(results)}[/] trained · {backend_name}"),
-            *[
-                (
-                    r["name"],
-                    f"R² [bold]{r['metrics']['r2']:.4f}[/] · ρ {r['metrics']['spearman']:.4f} · {r['n_trees']:,} trees",
-                )
-                for r in results
-            ],
-            *(
-                [("Model", f"[dim]{cpath(model_dir / 'model.onnx')}[/]")]
-                if fuse
-                else []
-            ),
-            ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
-        ],
-        border_style=STEP_COLORS["learn-soft"],
-        icon="✓",
-    )
+    _print_summary(model_dir, results, backend_name, fuse, started)

@@ -39,6 +39,74 @@ MIN_REGRESSION_ROWS = (
 MIN_PER_CLASS = 2  # below this a class-stratified train/val split is impossible
 
 
+def _check_column(hard_col: str, yc: np.ndarray, task: str):
+    """Resolve one column's task and refuse labels it could not learn from.
+
+    Raised here rather than inside ``learn-hard``, hours later, so a column that cannot be split or fitted
+    fails at ``prepare`` time. Returns ``(task, labels, n_positive)``; binary labels come back as clean
+    0/1 floats and ``n_positive`` is ``None`` for a continuous column.
+    """
+    if len(yc) < MIN_HARD_ROWS:
+        raise ValueError(
+            f"hard column '{hard_col}' has only {len(yc)} usable row(s); at least {MIN_HARD_ROWS} needed"
+        )
+    resolved = _detect_task(yc) if task == "auto" else task
+    if resolved not in ("binary", "regression"):
+        raise ValueError(f"unknown task {task!r}")
+    n_positive = None
+    if resolved == "binary":
+        off_scale = set(np.unique(yc).tolist()) - {0.0, 1.0}
+        if off_scale:
+            raise ValueError(
+                f"hard column '{hard_col}' was forced to --task binary but holds non-binary values "
+                f"(e.g. {sorted(off_scale)[:3]}). Casting them would floor everything below 1.0 to a "
+                "negative. Threshold the column yourself, or drop --task."
+            )
+        yc = yc.astype(int).astype(np.float64)
+        n_positive = int(yc.sum())
+        n_negative = int(len(yc) - n_positive)
+        if min(n_positive, n_negative) < MIN_PER_CLASS:
+            raise ValueError(
+                f"hard column '{hard_col}' has {n_positive} positive and {n_negative} negative row(s); "
+                f"at least {MIN_PER_CLASS} of each are needed for a class-stratified split. "
+                "Drop the column or supply more labels."
+            )
+    else:
+        if len(yc) < MIN_REGRESSION_ROWS:
+            raise ValueError(
+                f"hard column '{hard_col}' has {len(yc)} usable row(s); a continuous column needs at "
+                f"least {MIN_REGRESSION_ROWS} to learn from. Supply more labels or drop the column."
+            )
+        if float(np.ptp(yc)) == 0.0:
+            raise ValueError(
+                f"hard column '{hard_col}' holds a single value ({yc[0]:g}), so there is nothing to learn. "
+                "Drop the column."
+            )
+    return resolved, yc, n_positive
+
+
+def _write_hard_h5(out_dir, xc, yc, resolved: str, featurizer, n_dropped: int) -> Path:
+    """Shuffle one column's rows with a fixed seed and write its ``hard.h5``.
+
+    The shuffle is seeded so a re-run of ``prepare`` yields the same file, and so the head's internal
+    validation split is not ordered by whatever order the input file happened to be in.
+    """
+    import h5py
+
+    perm = np.random.RandomState(42).permutation(len(yc))
+    xc, yc = xc[perm], yc[perm]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / HARD_H5_NAME
+    with h5py.File(out_path, "w") as f:
+        f.create_dataset("x", data=xc.astype(np.float32))
+        f.create_dataset("y", data=yc.astype(np.float32))
+        f.attrs["task"] = resolved
+        f.attrs["features"] = "qmfp"
+        f.attrs["fingerprint"] = json.dumps(featurizer.spec)
+        f.attrs["n_dropped"] = n_dropped
+    return out_path
+
+
 def prepare_hard_labels_wide(
     input_path: str | Path,
     run_dir: str | Path,
@@ -82,8 +150,6 @@ def prepare_hard_labels_wide(
         If a column has too few usable rows, or — for a binary column — too few of either class to
         support a stratified split. Raised here rather than hours later inside ``learn-hard``.
     """
-    import h5py
-
     from olinda.data.reference import _read_table, resolve_smiles_frame
     from olinda.run import column_dir
 
@@ -102,56 +168,16 @@ def prepare_hard_labels_wide(
         y_raw = np.asarray(values[hard_col].to_numpy(), dtype=np.float64)
         keep = parsed & np.isfinite(y_raw)
         xc, yc = X[keep], y_raw[keep]
-        if len(yc) < MIN_HARD_ROWS:
-            raise ValueError(
-                f"hard column '{hard_col}' has only {len(yc)} usable row(s); at least {MIN_HARD_ROWS} needed"
-            )
+        resolved, yc, n_positive = _check_column(hard_col, yc, task)
 
-        resolved = _detect_task(yc) if task == "auto" else task
-        if resolved not in ("binary", "regression"):
-            raise ValueError(f"unknown task {task!r}")
-        n_positive = None
-        if resolved == "binary":
-            off_scale = set(np.unique(yc).tolist()) - {0.0, 1.0}
-            if off_scale:
-                raise ValueError(
-                    f"hard column '{hard_col}' was forced to --task binary but holds non-binary values "
-                    f"(e.g. {sorted(off_scale)[:3]}). Casting them would floor everything below 1.0 to a "
-                    "negative. Threshold the column yourself, or drop --task."
-                )
-            yc = yc.astype(int).astype(np.float64)
-            n_positive = int(yc.sum())
-            n_negative = int(len(yc) - n_positive)
-            if min(n_positive, n_negative) < MIN_PER_CLASS:
-                raise ValueError(
-                    f"hard column '{hard_col}' has {n_positive} positive and {n_negative} negative row(s); "
-                    f"at least {MIN_PER_CLASS} of each are needed for a class-stratified split. "
-                    "Drop the column or supply more labels."
-                )
-        else:
-            if len(yc) < MIN_REGRESSION_ROWS:
-                raise ValueError(
-                    f"hard column '{hard_col}' has {len(yc)} usable row(s); a continuous column needs at "
-                    f"least {MIN_REGRESSION_ROWS} to learn from. Supply more labels or drop the column."
-                )
-            if float(np.ptp(yc)) == 0.0:
-                raise ValueError(
-                    f"hard column '{hard_col}' holds a single value ({yc[0]:g}), so there is nothing to learn. "
-                    "Drop the column."
-                )
-
-        perm = np.random.RandomState(42).permutation(len(yc))
-        xc, yc = xc[perm], yc[perm]
-        out_dir = column_dir(run_dir, col_id)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / HARD_H5_NAME
-        with h5py.File(out_path, "w") as f:
-            f.create_dataset("x", data=xc.astype(np.float32))
-            f.create_dataset("y", data=yc.astype(np.float32))
-            f.attrs["task"] = resolved
-            f.attrs["features"] = "qmfp"
-            f.attrs["fingerprint"] = json.dumps(featurizer.spec)
-            f.attrs["n_dropped"] = int((~keep).sum())
+        out_path = _write_hard_h5(
+            column_dir(run_dir, col_id),
+            xc,
+            yc,
+            resolved,
+            featurizer,
+            int((~keep).sum()),
+        )
         out[hard_col] = {
             "task": resolved,
             "n": int(len(yc)),

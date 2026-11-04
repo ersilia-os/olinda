@@ -191,6 +191,208 @@ def _predict(artifact, smiles, echo=None) -> "dict[str, np.ndarray]":
     return {c: values[:, i] for i, c in enumerate(artifact.columns)}
 
 
+def _new_report(artifact) -> dict:
+    """Start the report: when, which model, and a warning if this install does not reproduce it."""
+    from datetime import datetime, timezone
+
+    report: dict = {
+        "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "model": {
+            **artifact.describe(),
+            "backend": (artifact.metadata.get("run") or {}).get("backend"),
+        },
+        "notes": [],
+        "figures": {"soft": [], "hard": [], "internals": []},
+    }
+    if report["model"]["golden"].startswith("fail"):
+        report["notes"].append(
+            f"golden check {report['model']['golden']}: this install does not reproduce the model's "
+            "golden vectors, so the metrics below describe this install, not necessarily the model."
+        )
+    return report
+
+
+def _soft_figures(task, y, p, m, out_dir) -> list:
+    """Draw the regression diagnostics for one task and return the figures that rendered."""
+    from olinda.report import plots
+
+    figures = []
+    for name, draw in (
+        (
+            "correlation",
+            lambda ax, st, y=y, p=p, m=m, t=task: plots.correlation(
+                ax, st, y, p, metrics=m, task=t
+            ),
+        ),
+        (
+            "residuals",
+            lambda ax, st, y=y, p=p: plots.residual_hist(ax, st, y, p),
+        ),
+        (
+            "residual_structure",
+            lambda ax, st, y=y, p=p: plots.residuals_vs_pred(ax, st, y, p),
+        ),
+        (
+            "calibration",
+            lambda ax, st, y=y, p=p: plots.calibration_bins(ax, st, y, p),
+        ),
+        (
+            "residual_qq",
+            lambda ax, st, y=y, p=p: plots.qq_residuals(ax, st, y, p),
+        ),
+        (
+            "score_distributions",
+            lambda ax, st, y=y, p=p: plots.score_distributions(ax, st, y, p),
+        ),
+    ):
+        fig = plots.render(draw, out_dir, f"{task}_{name}", cells=plots.CELLS.get(name))
+        if fig:
+            figures.append(fig)
+    return figures
+
+
+def _hard_figures(task, y, p, m, out_dir) -> list:
+    """Draw the ranking diagnostics for one binary task and return the figures that rendered."""
+    from olinda.report import plots
+
+    figures = []
+    for name, draw in (
+        (
+            "roc",
+            lambda ax, st, y=y, p=p, m=m: plots.roc(ax, st, y, p, metrics=m),
+        ),
+        (
+            "precision_recall",
+            lambda ax, st, y=y, p=p, m=m: plots.precision_recall(
+                ax, st, y, p, metrics=m
+            ),
+        ),
+        (
+            "enrichment",
+            lambda ax, st, y=y, p=p: plots.enrichment(ax, st, y, p),
+        ),
+        (
+            "score_by_class",
+            lambda ax, st, y=y, p=p: plots.score_by_class(ax, st, y, p),
+        ),
+    ):
+        fig = plots.render(draw, out_dir, f"{task}_{name}", cells=plots.CELLS.get(name))
+        if fig:
+            figures.append(fig)
+    return figures
+
+
+def _score_task(kind, task, y, p, report, entry, out_dir) -> None:
+    """Score one task on its comparable rows, recording metrics and figures in *report* and *entry*."""
+    from olinda.metrics import binary_metrics, regression_metrics
+
+    if kind == "soft":
+        m = regression_metrics(y, p)
+        entry["metrics"][task] = m
+        report["figures"]["soft"].extend(_soft_figures(task, y, p, m, out_dir))
+        return
+    if not set(np.unique(y).tolist()) <= {0.0, 1.0}:
+        report["notes"].append(
+            f"{task}: hard labels are not 0/1, skipping the ranking metrics"
+        )
+        return
+    m = binary_metrics(y, p)
+    entry["metrics"][task] = m
+    report["figures"]["hard"].extend(_hard_figures(task, y, p, m, out_dir))
+
+
+def _score_labels(
+    kind, source, artifact, report, out_dir, smiles_column, label_columns
+) -> None:
+    """Read one labels file, predict it and score every task it names, adding the result to *report*."""
+    from olinda.console import echo
+
+    smiles, values, ignored = _read_labels(
+        source,
+        artifact.columns,
+        smiles_column=smiles_column,
+        label_columns=label_columns,
+    )
+    echo(
+        f"{kind} labels · [bold]{len(smiles):,}[/] compounds · {', '.join(values)}",
+        "run",
+    )
+    if ignored:
+        report["notes"].append(
+            f"{kind} labels: ignored {', '.join(map(str, ignored))} — no task of this model is named that"
+        )
+    predicted = _predict(artifact, smiles, echo)
+
+    overlap = _library_overlap(smiles)
+    if overlap is not None and overlap > 0.5:
+        report["notes"].append(
+            f"{overlap:.0%} of the {kind}-label compounds are in the reference library this model was "
+            "distilled from, so these numbers describe fit, not generalisation."
+        )
+    report["notes"].extend(_hard_head_warning(kind, artifact, len(smiles)))
+
+    entry = {"file": str(source), "n": len(smiles), "metrics": {}}
+    n_bad = 0
+    for task, truth in values.items():
+        pred = predicted[task]
+        truth = np.asarray(truth, dtype=np.float64)
+        ok = np.isfinite(pred) & np.isfinite(truth)
+        n_bad = max(n_bad, int((~np.isfinite(pred)).sum()))
+        y, p = truth[ok], pred[ok]
+        if len(y) == 0:
+            report["notes"].append(
+                f"no comparable rows for {task} in the {kind} labels — skipped"
+            )
+            continue
+        _score_task(kind, task, y, p, report, entry, out_dir)
+
+    entry["n_unparseable"] = n_bad
+    report[kind] = entry
+
+
+def _add_internals(artifact, report, out_dir) -> None:
+    """Add the artifact's own calibration curves, which need no labelled data at all."""
+    from olinda.report import plots
+    from olinda.report.internals import describe_graph
+
+    try:
+        internals = describe_graph(artifact.path)
+    except (ValueError, OSError) as exc:
+        report["notes"].append(f"could not read the graph internals: {exc}")
+        internals = {}
+    report["internals"] = {
+        task: {k: v for k, v in info.items() if k in ("id", "n_trees", "n_nodes")}
+        for task, info in internals.items()
+    }
+    for task, info in internals.items():
+        # The column name is the section heading on the page, so it stays out of the title here.
+        for stage, curve, label, xlabel, role in (
+            (
+                "soft_calibration",
+                info["soft_calibration"],
+                "S",
+                "Raw student output",
+                "model",
+            ),
+            (
+                "hard_calibration",
+                info["hard_calibration"],
+                "H_S",
+                "H probability",
+                "hard",
+            ),
+        ):
+            fig = plots.render(
+                lambda ax, st, c=curve, t=label, x=xlabel, r=role: (
+                    plots.calibration_map(ax, st, c, title=t, xlabel=x, role=r)
+                ),
+                out_dir,
+                f"{task}_{stage}",
+            )
+            if fig:
+                report["figures"]["internals"].append(fig)
+
+
 def validate_model(
     model_onnx: str | Path,
     *,
@@ -229,34 +431,17 @@ def validate_model(
         The same structure written to ``metrics.json``.
     """
     import json
-    from datetime import datetime, timezone
 
     from olinda.artifact import OlindaArtifact
-    from olinda.console import echo
-    from olinda.metrics import binary_metrics, json_safe, regression_metrics
+    from olinda.metrics import json_safe
     from olinda.report import html as html_mod
-    from olinda.report import plots
-    from olinda.report.internals import describe_graph
 
     require_report_extra()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact = OlindaArtifact(model_onnx)
 
-    report: dict = {
-        "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "model": {
-            **artifact.describe(),
-            "backend": (artifact.metadata.get("run") or {}).get("backend"),
-        },
-        "notes": [],
-        "figures": {"soft": [], "hard": [], "internals": []},
-    }
-    if report["model"]["golden"].startswith("fail"):
-        report["notes"].append(
-            f"golden check {report['model']['golden']}: this install does not reproduce the model's "
-            "golden vectors, so the metrics below describe this install, not necessarily the model."
-        )
+    report = _new_report(artifact)
 
     columns_for = {
         "soft": (soft_smiles_column, soft_label_columns),
@@ -266,156 +451,9 @@ def validate_model(
         if source is None:
             continue
         smiles_col, label_cols = columns_for[kind]
-        smiles, values, ignored = _read_labels(
-            source, artifact.columns, smiles_column=smiles_col, label_columns=label_cols
-        )
-        echo(
-            f"{kind} labels · [bold]{len(smiles):,}[/] compounds · {', '.join(values)}",
-            "run",
-        )
-        if ignored:
-            report["notes"].append(
-                f"{kind} labels: ignored {', '.join(map(str, ignored))} — no task of this model is named that"
-            )
-        predicted = _predict(artifact, smiles, echo)
+        _score_labels(kind, source, artifact, report, out_dir, smiles_col, label_cols)
 
-        overlap = _library_overlap(smiles)
-        if overlap is not None and overlap > 0.5:
-            report["notes"].append(
-                f"{overlap:.0%} of the {kind}-label compounds are in the reference library this model was "
-                "distilled from, so these numbers describe fit, not generalisation."
-            )
-        report["notes"].extend(_hard_head_warning(kind, artifact, len(smiles)))
-
-        entry = {"file": str(source), "n": len(smiles), "metrics": {}}
-        n_bad = 0
-        for task, truth in values.items():
-            pred = predicted[task]
-            truth = np.asarray(truth, dtype=np.float64)
-            ok = np.isfinite(pred) & np.isfinite(truth)
-            n_bad = max(n_bad, int((~np.isfinite(pred)).sum()))
-            y, p = truth[ok], pred[ok]
-            if len(y) == 0:
-                report["notes"].append(
-                    f"no comparable rows for {task} in the {kind} labels — skipped"
-                )
-                continue
-
-            if kind == "soft":
-                m = regression_metrics(y, p)
-                entry["metrics"][task] = m
-                for name, draw in (
-                    (
-                        "correlation",
-                        lambda ax, st, y=y, p=p, m=m, t=task: plots.correlation(
-                            ax, st, y, p, metrics=m, task=t
-                        ),
-                    ),
-                    (
-                        "residuals",
-                        lambda ax, st, y=y, p=p: plots.residual_hist(ax, st, y, p),
-                    ),
-                    (
-                        "residual_structure",
-                        lambda ax, st, y=y, p=p: plots.residuals_vs_pred(ax, st, y, p),
-                    ),
-                    (
-                        "calibration",
-                        lambda ax, st, y=y, p=p: plots.calibration_bins(ax, st, y, p),
-                    ),
-                    (
-                        "residual_qq",
-                        lambda ax, st, y=y, p=p: plots.qq_residuals(ax, st, y, p),
-                    ),
-                    (
-                        "score_distributions",
-                        lambda ax, st, y=y, p=p: plots.score_distributions(
-                            ax, st, y, p
-                        ),
-                    ),
-                ):
-                    fig = plots.render(
-                        draw, out_dir, f"{task}_{name}", cells=plots.CELLS.get(name)
-                    )
-                    if fig:
-                        report["figures"]["soft"].append(fig)
-            else:
-                binary = np.unique(y)
-                if not set(binary.tolist()) <= {0.0, 1.0}:
-                    report["notes"].append(
-                        f"{task}: hard labels are not 0/1, skipping the ranking metrics"
-                    )
-                    continue
-                m = binary_metrics(y, p)
-                entry["metrics"][task] = m
-                for name, draw in (
-                    (
-                        "roc",
-                        lambda ax, st, y=y, p=p, m=m: plots.roc(
-                            ax, st, y, p, metrics=m
-                        ),
-                    ),
-                    (
-                        "precision_recall",
-                        lambda ax, st, y=y, p=p, m=m: plots.precision_recall(
-                            ax, st, y, p, metrics=m
-                        ),
-                    ),
-                    (
-                        "enrichment",
-                        lambda ax, st, y=y, p=p: plots.enrichment(ax, st, y, p),
-                    ),
-                    (
-                        "score_by_class",
-                        lambda ax, st, y=y, p=p: plots.score_by_class(ax, st, y, p),
-                    ),
-                ):
-                    fig = plots.render(
-                        draw, out_dir, f"{task}_{name}", cells=plots.CELLS.get(name)
-                    )
-                    if fig:
-                        report["figures"]["hard"].append(fig)
-
-        entry["n_unparseable"] = n_bad
-        report[kind] = entry
-
-    # The artifact's own calibration curves — available with no data at all.
-    try:
-        internals = describe_graph(artifact.path)
-    except (ValueError, OSError) as exc:
-        report["notes"].append(f"could not read the graph internals: {exc}")
-        internals = {}
-    report["internals"] = {
-        task: {k: v for k, v in info.items() if k in ("id", "n_trees", "n_nodes")}
-        for task, info in internals.items()
-    }
-    for task, info in internals.items():
-        # The column name is the section heading on the page, so it stays out of the title here.
-        for stage, curve, label, xlabel, role in (
-            (
-                "soft_calibration",
-                info["soft_calibration"],
-                "S",
-                "Raw student output",
-                "model",
-            ),
-            (
-                "hard_calibration",
-                info["hard_calibration"],
-                "H_S",
-                "H probability",
-                "hard",
-            ),
-        ):
-            fig = plots.render(
-                lambda ax, st, c=curve, t=label, x=xlabel, r=role: (
-                    plots.calibration_map(ax, st, c, title=t, xlabel=x, role=r)
-                ),
-                out_dir,
-                f"{task}_{stage}",
-            )
-            if fig:
-                report["figures"]["internals"].append(fig)
+    _add_internals(artifact, report, out_dir)
 
     (out_dir / METRICS_NAME).write_text(
         json.dumps(json_safe(report), indent=2), encoding="utf-8"
