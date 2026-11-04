@@ -29,125 +29,65 @@ from olinda.hard.layout import (
 )
 
 
-def build_bundle(model_dir: str | Path) -> dict:
-    """Fuse a run directory into ``model.onnx``, gated on numeric parity against the Python pipeline.
+def _column_reference(entry: dict, fp) -> tuple:
+    """Recompose one column's prediction in pure Python, with the envelope the graph may land in.
 
-    Every column is checked independently: the graph's output for that column must match a pure-Python
-    recomposition of exactly the same artifacts, so a mis-wired subgraph cannot slip through. The probe
-    enters the graph as bytes, so the decoder in front of the heads is checked too. The golden vectors
-    are computed from the same in-memory graph, and only then is the file written, once.
+    Returns ``(reference, (lower, upper))``. The band exists because a calibrator is a step function,
+    so float32 vs float64 can legitimately land on a neighbouring step; see :func:`build_bundle`.
     """
-
-    import onnxruntime as ort
-
-    from olinda.featurizer import QmfpFeaturizer
-    from olinda.golden import compute_golden
     from olinda.models.bundle import StudentModel
 
-    model_dir = Path(model_dir)
-    rule("olinda · export", style=STEP_COLORS["export"], right=cpath(model_dir))
-    model, plan, outputs = _fuse(model_dir)
-    echo(f"fusing {len(plan)} column(s) → model.onnx", "run")
-    _finalise(model)
-    spec = json.loads(
-        next(p.value for p in model.metadata_props if p.key == "olinda.fingerprint")
+    sm = StudentModel.load(entry["dir"])
+    raw = np.asarray(sm.predict(X=fp, calibrate=False)).ravel()
+    surrogate = _calibrated(sm.calibrator, raw)
+    s_lo, s_hi = _step_envelope(sm.calibrator, raw)
+    if not entry["has_hard"]:
+        return surrogate, (s_lo, s_hi)
+
+    from lazyqsar.base.xgboost import BaseXGBArtifact
+
+    from olinda.calibrate import IsotonicCalibrator
+    from olinda.tanimoto import TanimotoRegressor
+
+    hard_root = entry["dir"] / HARD_DIRNAME
+    with open(hard_root / HARD_META_NAME) as fp_meta:
+        hard_task = json.load(fp_meta).get("task", "binary")
+    scores = np.asarray(
+        BaseXGBArtifact.load(str(hard_root / HARD_MODEL_SUBDIR)).run(fp)
     )
-    featurizer = QmfpFeaturizer(spec)
-    sess = ort.InferenceSession(
-        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    # a classifier's score is P(class 1); a regressor's is the one column it returns, in label units
+    g = (scores.ravel() if hard_task == "regression" else scores[:, 1]).astype(
+        np.float64
     )
-    out_names = [o.name for o in sess.get_outputs()]
-
-    def run(packed):
-        return dict(zip(out_names, sess.run(None, {"input": packed})))
-
-    echo("checking parity: model.onnx vs Python reference", "run")
-    ref: dict = {}
-    band: dict = {}
-    packed, fp = _parity_probe(plan, spec, model_dir)
-    for entry in plan:
-        sm = StudentModel.load(entry["dir"])
-        raw = np.asarray(sm.predict(X=fp, calibrate=False)).ravel()
-        surrogate = _calibrated(sm.calibrator, raw)
-        s_lo, s_hi = _step_envelope(sm.calibrator, raw)
-        if not entry["has_hard"]:
-            ref[entry["output"]] = surrogate
-            band[entry["output"]] = (s_lo, s_hi)
-            continue
-
-        from lazyqsar.base.xgboost import BaseXGBArtifact
-
-        from olinda.calibrate import IsotonicCalibrator
-        from olinda.tanimoto import TanimotoRegressor
-
-        hard_root = entry["dir"] / HARD_DIRNAME
-        with open(hard_root / HARD_META_NAME) as fp_meta:
-            hard_task = json.load(fp_meta).get("task", "binary")
-        scores = np.asarray(
-            BaseXGBArtifact.load(str(hard_root / HARD_MODEL_SUBDIR)).run(fp)
-        )
-        # a classifier's score is P(class 1); a regressor's is the one column it returns, in label units
-        g = (scores.ravel() if hard_task == "regression" else scores[:, 1]).astype(
-            np.float64
-        )
-        gmap = IsotonicCalibrator.load(hard_root / H_TO_S_NAME)
-        gsoft = np.asarray(gmap.transform(g)).ravel()
-        h_lo, h_hi = _step_envelope(gmap, g)
-        gate = TanimotoRegressor.load(hard_root / TANIMOTO_DIRNAME)
-        a = np.asarray(gate.weight(fp)).ravel()
-        # a == 0 everywhere has two very different causes. If the ceiling itself is zero the hard head did
-        # not earn any weight, the blend is off by design, and the fused output simply *is* the surrogate —
-        # there is nothing left to cross-check. If the ceiling is positive and the gate still never fires,
-        # the gate is broken and the hard branch would ship unverified.
-        if gate.a_max > 0 and not (a > 0).any():
-            raise RuntimeError(
-                f"parity probe for column {entry['name']!r} scored zero blend weight on every molecule, so "
-                "the blend collapses to the surrogate and the hard head would go unchecked. This should not "
-                "happen — the probe includes that column's own labelled compounds."
-            )
-        ref[entry["output"]] = (1.0 - a) * surrogate + a * gsoft
-        corners = [
-            (1.0 - w) * s_ + w * h_
-            for w in (np.clip(a - _RAW_SLACK, 0, 1), np.clip(a + _RAW_SLACK, 0, 1))
-            for s_ in (s_lo, s_hi)
-            for h_ in (h_lo, h_hi)
-        ]
-        band[entry["output"]] = (np.minimum.reduce(corners), np.maximum.reduce(corners))
-
-    got = {k: np.asarray(v).ravel() for k, v in run(packed).items()}
-    # How far outside the reference's step envelope each output lands (zero when inside it): a calibrator is
-    # a step function, so a raw score that differs by 1e-7 between float32 and float64 can legitimately land
-    # on the neighbouring step. That is not drift, and a flat tolerance would reject good models at scale.
-    # Relative to the column's scale: float32 rounding grows with the values, so 1e-4 absolute is right for a
-    # probability and unreachable for a column of concentrations in the thousands.
-    parity = {
-        k: float(np.max(np.maximum(band[k][0] - got[k], got[k] - band[k][1]).clip(0)))
-        / value_scale(ref[k])
-        for k in outputs
-    }
-    plain = {
-        k: float(np.max(np.abs(got[k] - ref[k]))) / value_scale(ref[k]) for k in outputs
-    }
-    worst_plain = max(plain.values())
-    worst = max(parity.values())
-    if worst > _PARITY_TOL:
-        offender = max(parity, key=parity.get)
+    gmap = IsotonicCalibrator.load(hard_root / H_TO_S_NAME)
+    gsoft = np.asarray(gmap.transform(g)).ravel()
+    h_lo, h_hi = _step_envelope(gmap, g)
+    gate = TanimotoRegressor.load(hard_root / TANIMOTO_DIRNAME)
+    a = np.asarray(gate.weight(fp)).ravel()
+    # a == 0 everywhere has two very different causes. If the ceiling itself is zero the hard head did
+    # not earn any weight, the blend is off by design, and the fused output simply *is* the surrogate —
+    # there is nothing left to cross-check. If the ceiling is positive and the gate still never fires,
+    # the gate is broken and the hard branch would ship unverified.
+    if gate.a_max > 0 and not (a > 0).any():
         raise RuntimeError(
-            f"model.onnx parity failed on column {offender!r}: max abs diff {worst:.2e} (relative to the column's scale) > {_PARITY_TOL:.0e}"
+            f"parity probe for column {entry['name']!r} scored zero blend weight on every molecule, so "
+            "the blend collapses to the surrogate and the hard head would go unchecked. This should not "
+            "happen — the probe includes that column's own labelled compounds."
         )
+    reference = (1.0 - a) * surrogate + a * gsoft
+    corners = [
+        (1.0 - w) * s_ + w * h_
+        for w in (np.clip(a - _RAW_SLACK, 0, 1), np.clip(a + _RAW_SLACK, 0, 1))
+        for s_ in (s_lo, s_hi)
+        for h_ in (h_lo, h_hi)
+    ]
+    return reference, (np.minimum.reduce(corners), np.maximum.reduce(corners))
 
-    from olinda.metrics import json_safe
 
-    golden = compute_golden(run, featurizer)
-    set_props(
-        model,
-        {
-            "olinda.rdkit_version": featurizer.rdkit_version,
-            "olinda.golden": json.dumps(json_safe(golden)),
-        },
-    )
-    _write(model, model_dir / MODEL_NAME)
-
+def _print_summary(
+    plan, outputs, model_dir, spec, featurizer, golden, packed, worst, worst_plain
+) -> None:
+    """Print the closing panel: what was fused, how tightly it matched, and where it was saved."""
     n_hard = sum(1 for e in plan if e["has_hard"])
     size_b = (model_dir / MODEL_NAME).stat().st_size
     size_txt = f"{size_b / 1e6:.1f} MB" if size_b >= 1e6 else f"{size_b / 1e3:.0f} KB"
@@ -171,6 +111,90 @@ def build_bundle(model_dir: str | Path) -> dict:
         ],
         border_style=STEP_COLORS["export"],
         icon="✓",
+    )
+
+
+def _parity_distances(got_raw: dict, ref: dict, band: dict, outputs: list) -> tuple:
+    """Return ``(parity, plain)``: per-output distance outside the envelope, and plain max abs diff."""
+    got = {k: np.asarray(v).ravel() for k, v in got_raw.items()}
+    # How far outside the reference's step envelope each output lands (zero when inside it): a calibrator is
+    # a step function, so a raw score that differs by 1e-7 between float32 and float64 can legitimately land
+    # on the neighbouring step. That is not drift, and a flat tolerance would reject good models at scale.
+    # Relative to the column's scale: float32 rounding grows with the values, so 1e-4 absolute is right for a
+    # probability and unreachable for a column of concentrations in the thousands.
+    parity = {
+        k: float(np.max(np.maximum(band[k][0] - got[k], got[k] - band[k][1]).clip(0)))
+        / value_scale(ref[k])
+        for k in outputs
+    }
+    plain = {
+        k: float(np.max(np.abs(got[k] - ref[k]))) / value_scale(ref[k]) for k in outputs
+    }
+    return parity, plain
+
+
+def build_bundle(model_dir: str | Path) -> dict:
+    """Fuse a run directory into ``model.onnx``, gated on numeric parity against the Python pipeline.
+
+    Every column is checked independently: the graph's output for that column must match a pure-Python
+    recomposition of exactly the same artifacts, so a mis-wired subgraph cannot slip through. The probe
+    enters the graph as bytes, so the decoder in front of the heads is checked too. The golden vectors
+    are computed from the same in-memory graph, and only then is the file written, once.
+    """
+
+    import onnxruntime as ort
+
+    from olinda.featurizer import QmfpFeaturizer
+    from olinda.golden import compute_golden
+
+    model_dir = Path(model_dir)
+    rule("olinda · export", style=STEP_COLORS["export"], right=cpath(model_dir))
+    model, plan, outputs = _fuse(model_dir)
+    echo(f"fusing {len(plan)} column(s) → model.onnx", "run")
+    _finalise(model)
+    spec = json.loads(
+        next(p.value for p in model.metadata_props if p.key == "olinda.fingerprint")
+    )
+    featurizer = QmfpFeaturizer(spec)
+    sess = ort.InferenceSession(
+        model.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+    out_names = [o.name for o in sess.get_outputs()]
+
+    def run(packed):
+        """Score *packed* qmfp bytes through the fused graph, returning ``{output name: values}``."""
+        return dict(zip(out_names, sess.run(None, {"input": packed})))
+
+    echo("checking parity: model.onnx vs Python reference", "run")
+    ref: dict = {}
+    band: dict = {}
+    packed, fp = _parity_probe(plan, spec, model_dir)
+    for entry in plan:
+        ref[entry["output"]], band[entry["output"]] = _column_reference(entry, fp)
+
+    parity, plain = _parity_distances(run(packed), ref, band, outputs)
+    worst_plain = max(plain.values())
+    worst = max(parity.values())
+    if worst > _PARITY_TOL:
+        offender = max(parity, key=parity.get)
+        raise RuntimeError(
+            f"model.onnx parity failed on column {offender!r}: max abs diff {worst:.2e} (relative to the column's scale) > {_PARITY_TOL:.0e}"
+        )
+
+    from olinda.metrics import json_safe
+
+    golden = compute_golden(run, featurizer)
+    set_props(
+        model,
+        {
+            "olinda.rdkit_version": featurizer.rdkit_version,
+            "olinda.golden": json.dumps(json_safe(golden)),
+        },
+    )
+    _write(model, model_dir / MODEL_NAME)
+
+    _print_summary(
+        plan, outputs, model_dir, spec, featurizer, golden, packed, worst, worst_plain
     )
     success(
         f"fused model.onnx built and parity-checked → [dim]{cpath(model_dir / MODEL_NAME)}[/]"

@@ -163,12 +163,8 @@ def _section(slug: str, title: str, *blocks: str) -> str:
     return f'<h2 id="{slug}">{html.escape(title)}</h2>' + "".join(blocks)
 
 
-def write_report(out_dir: str | Path, report: dict) -> Path:
-    """Render ``report.html`` from the structure :func:`olinda.report.validate_model` assembles."""
-    out_dir = Path(out_dir)
-    meta = report["model"]
-    title = f"olinda validation · {Path(meta['path']).name}"
-
+def _config_table(meta):
+    """The model's provenance, as a two-column table."""
     config = _table(
         [
             ("Model", meta["path"]),
@@ -186,7 +182,11 @@ def write_report(out_dir: str | Path, report: dict) -> Path:
         ],
         ("", "Value"),
     )
+    return config
 
+
+def _dataset_table(report):
+    """One row per label file that was scored."""
     dataset_rows = []
     for key, label in (("soft", "Soft labels"), ("hard", "Hard labels")):
         d = report.get(key)
@@ -195,11 +195,11 @@ def write_report(out_dir: str | Path, report: dict) -> Path:
                 (label, d["file"], f"{d['n']:,}", f"{d['n_unparseable']:,}")
             )
     dataset = _table(dataset_rows, ("", "File", "Compounds", "Unparseable"))
+    return dataset
 
-    notes = "".join(
-        f'<div class="note">{html.escape(n)}</div>' for n in report.get("notes", [])
-    )
 
+def _performance_table(report):
+    """Agreement with the teacher, one row per soft task."""
     perf_rows = []
     for task, m in (report.get("soft") or {}).get("metrics", {}).items():
         perf_rows.append(
@@ -214,7 +214,11 @@ def write_report(out_dir: str | Path, report: dict) -> Path:
             )
         )
     perf = _table(perf_rows, ("Task", "n", "R²", "Pearson", "Spearman", "RMSE", "MAE"))
+    return perf
 
+
+def _ranking_table(report):
+    """Ranking metrics against measured labels, one row per hard task."""
     rank_rows = []
     for task, m in (report.get("hard") or {}).get("metrics", {}).items():
         enr = m.get("enrichment", {})
@@ -236,7 +240,15 @@ def write_report(out_dir: str | Path, report: dict) -> Path:
         rank_rows,
         ("Task", "n", "Actives", "Hit rate", "AUROC", "AP", "EF 1%", "EF 5%", "EF 10%"),
     )
+    return rank
 
+
+def _sections(report: dict) -> list:
+    """The page's ``(slug, title, blocks)`` sections; :func:`_section` drops the empty ones."""
+    config = _config_table(report["model"])
+    dataset = _dataset_table(report)
+    perf = _performance_table(report)
+    rank = _ranking_table(report)
     figs = report.get("figures", {})
     sections = [
         ("config", "Configuration", (config,)),
@@ -253,6 +265,20 @@ def write_report(out_dir: str | Path, report: dict) -> Path:
         ),
         ("internals", "Model internals", (_figures(figs.get("internals", [])),)),
     ]
+    return sections
+
+
+def write_report(out_dir: str | Path, report: dict) -> Path:
+    """Render ``report.html`` from the structure :func:`olinda.report.validate_model` assembles."""
+    out_dir = Path(out_dir)
+    meta = report["model"]
+    title = f"olinda validation · {Path(meta['path']).name}"
+
+    notes = "".join(
+        f'<div class="note">{html.escape(n)}</div>' for n in report.get("notes", [])
+    )
+
+    sections = _sections(report)
     body = "".join(_section(slug, name, *blocks) for slug, name, blocks in sections)
     nav_links = "".join(
         f'<a href="#{slug}">{html.escape(name)}</a>'

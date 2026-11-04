@@ -32,6 +32,7 @@ _COMMANDS = {
 
 @click.group()
 def cli():
+    """The ``olinda`` command group; subcommands are registered by :func:`create_olinda_cli`."""
     pass
 
 

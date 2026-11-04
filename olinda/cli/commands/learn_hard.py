@@ -7,6 +7,96 @@ import rich_click as click
 from olinda.cli.guards import require_train
 
 
+def _columns_to_learn(md, manifest, model_dir):
+    """Return the columns with hard labels, refusing a run that cannot finish.
+
+    Every column must already have a surrogate: learn-hard fuses at the end and would otherwise fail
+    there, after training every hard-label head.
+    """
+    from olinda import run as runlib
+    from olinda.hard import HARD_H5_NAME
+
+    with_hard = [
+        c
+        for c in manifest["columns"]
+        if (runlib.column_dir(md, c["id"]) / HARD_H5_NAME).exists()
+    ]
+    untrained = [
+        c["name"]
+        for c in manifest["columns"]
+        if not (runlib.column_dir(md, c["id"]) / "train_meta.json").exists()
+    ]
+    if untrained:
+        raise click.ClickException(
+            f"{len(untrained)} column(s) have no surrogate yet ({', '.join(untrained)}) — "
+            f"run `olinda learn-soft -m {model_dir}` first. learn-hard fuses at the end and would "
+            "otherwise fail there, after training every hard-label head."
+        )
+
+    if not with_hard:
+        raise click.ClickException(
+            f"no column in {model_dir!r} has hard labels — run "
+            f"`olinda prepare -s <soft> -h <hard> -m {model_dir}` first"
+        )
+    return with_hard
+
+
+def _load_reference_matrix(manifest):
+    """Load the reference library once, resident, and check it is the one the run was prepared on.
+
+    One resident copy serves the whole run: each column otherwise reopened and streamed it twice
+    (scoring H, then fitting T), so a 10-column run read 2.8 GB twenty times over.
+    """
+    from olinda import run as runlib
+    from olinda.console import echo
+    from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
+    from olinda.data.matrix import ReferenceMatrix
+
+    limit = runlib.row_limit(manifest)
+    scope = f" · [dim]first {limit:,} rows[/]" if limit else ""
+    echo(
+        f"loading reference descriptors · [dim]{MORGAN_FINGERPRINTS_FILENAME}[/]{scope}",
+        "run",
+    )
+    matrix = ReferenceMatrix.load(
+        OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME, limit=limit
+    )
+    try:
+        matrix.assert_matches(manifest["reference_library"])
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return matrix
+
+
+def _print_summary(md, manifest, with_hard, started):
+    """Print the closing panel: the columns that gained a hard head, the model path and the elapsed time."""
+    import time
+
+    from olinda.console import STEP_COLORS, elapsed, summary_panel
+    from olinda.console import path as cpath
+
+    summary_panel(
+        "olinda · learn-hard",
+        [
+            (
+                "Columns",
+                f"[bold]{len(with_hard)}[/] of {len(manifest['columns'])} have a hard head",
+            ),
+            *[
+                (
+                    c["name"],
+                    f"[dim]{(c.get('hard') or {}).get('n', 0):,} labelled compounds[/]",
+                )
+                for c in with_hard
+            ],
+            ("Model", f"[dim]{cpath(md / 'model.onnx')}[/]"),
+            ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
+        ],
+        border_style=STEP_COLORS["learn-hard"],
+        icon="✓",
+    )
+
+
 @click.command("learn-hard")
 @click.option(
     "--model-dir",
@@ -32,16 +122,13 @@ def learn_hard_cmd(model_dir):
     from olinda import run as runlib
     from olinda.console import (
         STEP_COLORS,
-        echo,
-        elapsed,
         rule,
         set_active_color,
-        summary_panel,
     )
     from olinda.console import (
         path as cpath,
     )
-    from olinda.hard import HARD_H5_NAME, train_hard
+    from olinda.hard import train_hard
 
     md = Path(model_dir)
     started = time.time()
@@ -51,28 +138,7 @@ def learn_hard_cmd(model_dir):
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    with_hard = [
-        c
-        for c in manifest["columns"]
-        if (runlib.column_dir(md, c["id"]) / HARD_H5_NAME).exists()
-    ]
-    untrained = [
-        c["name"]
-        for c in manifest["columns"]
-        if not (runlib.column_dir(md, c["id"]) / "train_meta.json").exists()
-    ]
-    if untrained:
-        raise click.ClickException(
-            f"{len(untrained)} column(s) have no surrogate yet ({', '.join(untrained)}) — "
-            f"run `olinda learn-soft -m {model_dir}` first. learn-hard fuses at the end and would "
-            "otherwise fail there, after training every hard-label head."
-        )
-
-    if not with_hard:
-        raise click.ClickException(
-            f"no column in {model_dir!r} has hard labels — run "
-            f"`olinda prepare -s <soft> -h <hard> -m {model_dir}` first"
-        )
+    with_hard = _columns_to_learn(md, manifest, model_dir)
 
     rule(
         "olinda · learn-hard",
@@ -80,24 +146,7 @@ def learn_hard_cmd(model_dir):
         right=f"{len(with_hard)} column(s) with hard labels · {cpath(md)}",
     )
 
-    # One resident copy of the library for the whole run: each column otherwise reopened and streamed
-    # it twice (scoring H, then fitting T), so a 10-column run read 2.8 GB twenty times over.
-    from olinda.data.fetch import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
-    from olinda.data.matrix import ReferenceMatrix
-
-    limit = runlib.row_limit(manifest)
-    scope = f" · [dim]first {limit:,} rows[/]" if limit else ""
-    echo(
-        f"loading reference descriptors · [dim]{MORGAN_FINGERPRINTS_FILENAME}[/]{scope}",
-        "run",
-    )
-    matrix = ReferenceMatrix.load(
-        OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME, limit=limit
-    )
-    try:
-        matrix.assert_matches(manifest["reference_library"])
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+    matrix = _load_reference_matrix(manifest)
 
     for i, col in enumerate(with_hard, start=1):
         # The command banner is printed once, above; a per-column rule only earns its line when there is
@@ -122,23 +171,4 @@ def learn_hard_cmd(model_dir):
         build_bundle(md)
     except (ValueError, FileNotFoundError) as exc:
         raise click.ClickException(str(exc)) from exc
-    summary_panel(
-        "olinda · learn-hard",
-        [
-            (
-                "Columns",
-                f"[bold]{len(with_hard)}[/] of {len(manifest['columns'])} have a hard head",
-            ),
-            *[
-                (
-                    c["name"],
-                    f"[dim]{(c.get('hard') or {}).get('n', 0):,} labelled compounds[/]",
-                )
-                for c in with_hard
-            ],
-            ("Model", f"[dim]{cpath(md / 'model.onnx')}[/]"),
-            ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
-        ],
-        border_style=STEP_COLORS["learn-hard"],
-        icon="✓",
-    )
+    _print_summary(md, manifest, with_hard, started)

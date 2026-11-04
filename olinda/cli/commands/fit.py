@@ -15,6 +15,51 @@ from olinda.cli.commands.prepare import prepare_cmd
 from olinda.cli.guards import require_train
 
 
+def _prepare_or_clean_up(work, **prepare_kwargs):
+    """Run `prepare`, removing the folder this run made for it if it fails.
+
+    A failed prepare (a bad file, a mismatched library) has produced nothing to resume, so the folder
+    it made is just debris. One that already existed is not ours to remove.
+    """
+    from olinda import run as runlib
+
+    created = not work.exists()
+    try:
+        prepare_cmd.callback(**prepare_kwargs)
+    except BaseException:
+        if created and not runlib.is_run_dir(work):
+            import shutil
+
+            shutil.rmtree(work, ignore_errors=True)
+        raise
+
+
+def _print_summary(model_onnx, with_hard, started):
+    """Print the closing panel: which pipeline ran, with which head, and how long it took."""
+    import time
+
+    from olinda.console import STEP_COLORS, elapsed, summary_panel
+    from olinda.console import path as cpath
+
+    pipeline = (
+        "prepare → "
+        + "learn-soft"
+        + (" → learn-hard" if with_hard else "")
+        + " → clean"
+    )
+    summary_panel(
+        "olinda · fit",
+        [
+            ("Pipeline", pipeline),
+            ("Head", "soft + hard" if with_hard else "soft only"),
+            ("Model", f"[dim]{cpath(Path(model_onnx))}[/]"),
+            ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
+        ],
+        border_style=STEP_COLORS["fit"],
+        icon="✓",
+    )
+
+
 @click.command("fit")
 @click.option(
     "--soft-labels",
@@ -95,11 +140,9 @@ def fit_cmd(
     from olinda.console import (
         STEP_COLORS,
         echo,
-        elapsed,
         resources,
         rule,
         set_active_color,
-        summary_panel,
     )
     from olinda.console import (
         path as cpath,
@@ -128,28 +171,19 @@ def fit_cmd(
     )
 
     model_dir = str(work)
-    created = not work.exists()
-    try:
-        prepare_cmd.callback(
-            soft_labels=soft_labels,
-            hard_labels=hard_labels,
-            model_dir=model_dir,
-            task=task,
-            max_samples=max_samples,
-            val_frac=val_frac,
-            soft_smiles_column=soft_smiles_column,
-            soft_label_columns=soft_label_columns,
-            hard_smiles_column=hard_smiles_column,
-            hard_label_columns=hard_label_columns,
-        )
-    except BaseException:
-        # A failed prepare (a bad file, a mismatched library) has produced nothing to resume, so the folder this
-        # run made for it is just debris. One that already existed is not ours to remove.
-        if created and not runlib.is_run_dir(work):
-            import shutil
-
-            shutil.rmtree(work, ignore_errors=True)
-        raise
+    _prepare_or_clean_up(
+        work,
+        model_dir=model_dir,
+        soft_labels=soft_labels,
+        hard_labels=hard_labels,
+        task=task,
+        max_samples=max_samples,
+        val_frac=val_frac,
+        soft_smiles_column=soft_smiles_column,
+        soft_label_columns=soft_label_columns,
+        hard_smiles_column=hard_smiles_column,
+        hard_label_columns=hard_label_columns,
+    )
     # With hard labels, learn-hard fuses the run itself, so a soft-only fuse here would be thrown away.
     learn_soft_cmd.callback(
         model_dir=model_dir,
@@ -161,20 +195,4 @@ def fit_cmd(
     # Everything is fused, so the working folder has no consumer left.
     clean_cmd.callback(model_onnx=model_onnx)
 
-    pipeline = (
-        "prepare → "
-        + "learn-soft"
-        + (" → learn-hard" if hard_labels else "")
-        + " → clean"
-    )
-    summary_panel(
-        "olinda · fit",
-        [
-            ("Pipeline", pipeline),
-            ("Head", "soft + hard" if hard_labels else "soft only"),
-            ("Model", f"[dim]{cpath(Path(model_onnx))}[/]"),
-            ("Elapsed", f"[dim]{elapsed(time.time() - started)}[/]"),
-        ],
-        border_style=STEP_COLORS["fit"],
-        icon="✓",
-    )
+    _print_summary(model_onnx, hard_labels is not None, started)

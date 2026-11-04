@@ -18,6 +18,7 @@ from pathlib import Path
 
 
 def stamp(path: Path, replacements: list[tuple[str, str]]) -> None:
+    """Apply each ``(old, new)`` replacement to *path*, insisting that *old* occurs exactly once."""
     text = path.read_text()
     for old, new in replacements:
         count = text.count(old)
@@ -30,6 +31,7 @@ def stamp(path: Path, replacements: list[tuple[str, str]]) -> None:
 
 
 def main() -> None:
+    """Cache-bust the site's assets with the build id and pin the onnxruntime version."""
     site, build, ort_version = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
     v = f"?v={build}"
     stamp(site / "index.html", [('src="app.js"', f'src="app.js{v}"')])

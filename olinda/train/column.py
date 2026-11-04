@@ -17,15 +17,43 @@ from olinda.console import echo, live_region_taken, strategy_banner
 from olinda.train.backend import CANONICAL_DEFAULTS
 
 
+def _evaluate_and_save(be, model, xval, yval, col: dict, col_dir) -> dict:
+    """Score the validation split and persist what depends on it: metrics, isotonic correction, plot.
+
+    Done together because the validation predictions are computed once here and reused by all three.
+    """
+    from olinda.calibrate import IsotonicCalibrator
+    from olinda.metrics import regression_metrics
+    from olinda.train.plots import save_true_vs_pred
+
+    pval = be.predict(model, xval)
+    metrics = regression_metrics(yval, pval)
+    with open(col_dir / "val_metrics.json", "w") as fp:
+        json.dump(metrics, fp, indent=2)
+    col["metrics"] = metrics
+
+    # Fit the surrogate's isotonic correction here, where the validation predictions already exist.
+    # Export then only loads calibrator.json instead of re-reading and re-predicting the whole split.
+    if len(yval) >= 4 and np.isfinite(yval).any():
+        IsotonicCalibrator().fit(
+            raw=pval, target=np.asarray(yval, dtype=np.float64)
+        ).save(col_dir / "calibrator.json")
+
+    save_true_vs_pred(
+        yval,
+        pval,
+        col_dir / "val_true_pred.png",
+        title=f"{col['name']}  (R²={metrics['r2']:.3f})",
+    )
+    return metrics
+
+
 def train_one_column(
     model_dir, manifest, col, matrix, be, backend_name, num_boost_round
 ) -> dict:
     """Train one column's surrogate into ``columns/<id>/``; returns its name, metrics and tree count."""
-    from olinda.calibrate import IsotonicCalibrator
     from olinda.data import resolve_regression_weights
-    from olinda.metrics import regression_metrics
     from olinda.models import StudentModel
-    from olinda.train.plots import save_true_vs_pred
 
     col_dir = runlib.column_dir(model_dir, col["id"])
     col_dir.mkdir(parents=True, exist_ok=True)
@@ -88,25 +116,7 @@ def train_one_column(
     )
     student.save(col_dir)
 
-    pval = be.predict(res.model, xval)
-    metrics = regression_metrics(yval, pval)
-    with open(col_dir / "val_metrics.json", "w") as fp:
-        json.dump(metrics, fp, indent=2)
-    col["metrics"] = metrics
-
-    # Fit the surrogate's isotonic correction here, where the validation predictions already exist.
-    # Export then only loads calibrator.json instead of re-reading and re-predicting the whole split.
-    if len(yval) >= 4 and np.isfinite(yval).any():
-        IsotonicCalibrator().fit(
-            raw=pval, target=np.asarray(yval, dtype=np.float64)
-        ).save(col_dir / "calibrator.json")
-
-    save_true_vs_pred(
-        yval,
-        pval,
-        col_dir / "val_true_pred.png",
-        title=f"{col['name']}  (R²={metrics['r2']:.3f})",
-    )
+    metrics = _evaluate_and_save(be, res.model, xval, yval, col, col_dir)
     if not quiet:
         echo(
             f"R² [bold]{metrics['r2']:.4f}[/] · ρ {metrics['spearman']:.4f} · RMSE {metrics['rmse']:.5f} "

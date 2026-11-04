@@ -63,6 +63,111 @@ def _blend_ceiling(alignment_r2: float, ceiling: float | None = None) -> float:
     return float(cap) if cap >= A_MIN else 0.0
 
 
+def _scan_similarity(hard_bits, matrix, chunk: int) -> np.ndarray:
+    """Exact 1-NN Tanimoto from every reference compound to the labelled set, streamed a chunk at a time."""
+    from olinda.tanimoto import prepare_hard_bits, tanimoto_nn
+
+    hard_prepared = prepare_hard_bits(hard_bits)  # built once, reused for every chunk
+    n = matrix.n_rows
+    sim = np.empty(n, dtype=np.float32)
+    with sweep_progress("scanning", n) as tick:
+        for start in range(0, n, chunk):
+            stop = min(start + chunk, n)
+            bits = (matrix.x[start:stop] > 0).astype(np.float32)
+            sim[start:stop] = tanimoto_nn(bits, prepared=hard_prepared)
+            tick(stop)
+    return sim
+
+
+def _held_out_metrics(truth: np.ndarray, predicted: np.ndarray) -> dict:
+    """How well T fits its held-out slice: the usual regression scores plus how often the gate opens right."""
+    from olinda.metrics import regression_metrics
+    from olinda.tanimoto import ramp
+
+    metrics = regression_metrics(truth, predicted)
+    # R² on the similarity says how well the net learned its target; what the blend actually depends on
+    # is whether the gate *opens* for the compounds that deserve weight, which R² can hide entirely — a
+    # gate that is simply always shut still scores respectably. So report the reach as well.
+    deserved, opened = ramp(truth) > 0, ramp(predicted) > 0
+    hit = int((deserved & opened).sum())
+    return {
+        **{k: metrics[k] for k in ("n", "r2", "spearman", "rmse")},
+        "recall": float(hit / deserved.sum()) if deserved.any() else float("nan"),
+        "precision": float(hit / opened.sum()) if opened.any() else float("nan"),
+    }
+
+
+def _tanimoto_stats(
+    regressor,
+    sim,
+    train_idx,
+    n_gt: int,
+    alignment_r2: float,
+    sim_lo: float,
+    sim_hi: float,
+) -> dict:
+    """The numbers ``learn-hard`` reports and records about T: its target's distribution and its fit."""
+    return {
+        "a_max": regressor.a_max,
+        "alignment_r2": float(alignment_r2),
+        "n_ref": int(len(sim)),
+        "n_gt": n_gt,
+        "n_train": int(len(train_idx)),
+        "sim_median": float(np.median(sim)),
+        "sim_p99": float(np.quantile(sim, 0.99)),
+        "sim_max": float(sim.max()),
+        "frac_above_lo": float((sim >= sim_lo).mean()),
+        "frac_above_hi": float((sim >= sim_hi).mean()),
+        **{f"fit_{k}": v for k, v in regressor.metrics.items()},
+    }
+
+
+def _train_regressor(matrix, sim, sim_lo, sim_hi, alignment_r2, ceiling):
+    """Fit the MLP on the library's similarity target, holding a slice out for early stopping and reporting.
+
+    Returns ``(regressor, xval, val_idx, train_idx)``; the held-out features are returned so the reported
+    numbers use the very rows early stopping saw.
+    """
+    from olinda.tanimoto import T_BATCH, T_MAX_EPOCHS, TanimotoRegressor
+
+    n = matrix.n_rows
+    # Hold a slice out for early stopping and for the reported numbers; the net trains on everything
+    # else, streamed a batch at a time straight off the resident uint8 library.
+    rng = np.random.default_rng(42)
+    order = rng.permutation(n)
+    n_val = min(50_000, max(1, n // 10))
+    val_idx, train_idx = np.sort(order[:n_val]), order[n_val:]
+
+    def batches(shuffler):
+        """Yield one shuffled epoch of ``(fingerprints, target similarity)`` batches."""
+        idx = train_idx.copy()
+        shuffler.shuffle(idx)
+        for start in range(0, len(idx), T_BATCH):
+            take = np.sort(idx[start : start + T_BATCH])
+            yield matrix.gather(take), sim[take]
+
+    # A ceiling is only meaningful if the gate can ever legitimately open. If nothing in the view reaches
+    # the ramp's lower knee, the labelled set has no neighbours here: the target is flat near zero, the
+    # gate stays shut everywhere, and a positive ceiling is a number with nothing behind it. That same
+    # combination — a_max > 0 with T never opening on any probe molecule — is what
+    # `export.build_bundle` refuses to fuse, so leaving it ungated turns a degenerate gate into a failed
+    # run. Reachable is the norm on the full library; a subsampled view is where this bites.
+    reachable = float(sim.max()) >= sim_lo
+    # Gathered once: early stopping during the fit and the reported numbers after it use the same rows.
+    xval = matrix.gather(val_idx)
+    with epoch_progress("learning T", T_MAX_EPOCHS) as report:
+        regressor = TanimotoRegressor.fit(
+            batches,
+            matrix.n_cols,
+            (xval, sim[val_idx]),
+            progress=report,
+            a_max=_blend_ceiling(alignment_r2, ceiling) if reachable else 0.0,
+            sim_lo=sim_lo,
+            sim_hi=sim_hi,
+        )
+    return regressor, xval, val_idx, train_idx
+
+
 def _fit_tanimoto(
     hard_bits,
     n_features,
@@ -99,88 +204,18 @@ def _fit_tanimoto(
         ``(regressor, stats)`` where ``regressor`` is a :class:`~olinda.tanimoto.TanimotoRegressor`
         and ``stats`` reports the target distribution and the fit's held-out quality.
     """
-    from olinda.metrics import regression_metrics
-    from olinda.tanimoto import (
-        T_BATCH,
-        T_MAX_EPOCHS,
-        TanimotoRegressor,
-        prepare_hard_bits,
-        ramp,
-        tanimoto_nn,
-    )
-
-    hard_prepared = prepare_hard_bits(hard_bits)  # built once, reused for every chunk
-    n = matrix.n_rows
-    sim = np.empty(n, dtype=np.float32)
-    with sweep_progress("scanning", n) as tick:
-        for start in range(0, n, chunk):
-            stop = min(start + chunk, n)
-            bits = (matrix.x[start:stop] > 0).astype(np.float32)
-            sim[start:stop] = tanimoto_nn(bits, prepared=hard_prepared)
-            tick(stop)
-
+    sim = _scan_similarity(hard_bits, matrix, chunk)
     n_gt = int(np.asarray(hard_bits).shape[0])
 
-    # Hold a slice out for early stopping and for the reported numbers; the net trains on everything
-    # else, streamed a batch at a time straight off the resident uint8 library.
-    rng = np.random.default_rng(42)
-    order = rng.permutation(n)
-    n_val = min(50_000, max(1, n // 10))
-    val_idx, train_idx = np.sort(order[:n_val]), order[n_val:]
-
-    def batches(shuffler):
-        idx = train_idx.copy()
-        shuffler.shuffle(idx)
-        for start in range(0, len(idx), T_BATCH):
-            take = np.sort(idx[start : start + T_BATCH])
-            yield matrix.gather(take), sim[take]
-
-    # A ceiling is only meaningful if the gate can ever legitimately open. If nothing in the view reaches
-    # the ramp's lower knee, the labelled set has no neighbours here: the target is flat near zero, the
-    # gate stays shut everywhere, and a positive ceiling is a number with nothing behind it. That same
-    # combination — a_max > 0 with T never opening on any probe molecule — is what
-    # `export.build_bundle` refuses to fuse, so leaving it ungated turns a degenerate gate into a failed
-    # run. Reachable is the norm on the full library; a subsampled view is where this bites.
-    reachable = float(sim.max()) >= sim_lo
-    # Gathered once: early stopping during the fit and the reported numbers after it use the same rows.
-    xval = matrix.gather(val_idx)
-    with epoch_progress("learning T", T_MAX_EPOCHS) as report:
-        regressor = TanimotoRegressor.fit(
-            batches,
-            matrix.n_cols,
-            (xval, sim[val_idx]),
-            progress=report,
-            a_max=_blend_ceiling(alignment_r2, ceiling) if reachable else 0.0,
-            sim_lo=sim_lo,
-            sim_hi=sim_hi,
-        )
-
+    regressor, xval, val_idx, train_idx = _train_regressor(
+        matrix, sim, sim_lo, sim_hi, alignment_r2, ceiling
+    )
     predicted = regressor.predict_tanimoto(xval)
     del xval
     truth = sim[val_idx].astype(np.float64)
-    metrics = regression_metrics(truth, predicted)
-    # R² on the similarity says how well the net learned its target; what the blend actually depends on
-    # is whether the gate *opens* for the compounds that deserve weight, which R² can hide entirely — a
-    # gate that is simply always shut still scores respectably. So report the reach as well.
-    deserved, opened = ramp(truth) > 0, ramp(predicted) > 0
-    hit = int((deserved & opened).sum())
-    regressor.metrics = {
-        **{k: metrics[k] for k in ("n", "r2", "spearman", "rmse")},
-        "recall": float(hit / deserved.sum()) if deserved.any() else float("nan"),
-        "precision": float(hit / opened.sum()) if opened.any() else float("nan"),
-    }
+    regressor.metrics = _held_out_metrics(truth, predicted)
 
-    stats = {
-        "a_max": regressor.a_max,
-        "alignment_r2": float(alignment_r2),
-        "n_ref": int(n),
-        "n_gt": n_gt,
-        "n_train": int(len(train_idx)),
-        "sim_median": float(np.median(sim)),
-        "sim_p99": float(np.quantile(sim, 0.99)),
-        "sim_max": float(sim.max()),
-        "frac_above_lo": float((sim >= sim_lo).mean()),
-        "frac_above_hi": float((sim >= sim_hi).mean()),
-        **{f"fit_{k}": v for k, v in regressor.metrics.items()},
-    }
+    stats = _tanimoto_stats(
+        regressor, sim, train_idx, n_gt, alignment_r2, sim_lo, sim_hi
+    )
     return regressor, stats

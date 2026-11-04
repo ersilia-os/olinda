@@ -41,7 +41,7 @@ Package code lives in `olinda/`, **not** `src/olinda/`. Don't "fix" this.
 | `olinda/featurizer/` | SMILES → qmfp bytes: the spec, the byte codec, and the wasmtime loader for `rdkit_qmfp.wasm` |
 | `wasm/` | the C++ wrapper and build script that compile RDKit to that WebAssembly module |
 | `site/` | the raw web page at ersilia-os.github.io/olinda (`olinda.js` ports inference to JavaScript; `.github/workflows/pages.yml` deploys it after `test.mjs` matches Python) |
-| `olinda/console.py` | user-facing output — see below |
+| `olinda/console/` | user-facing output — see below |
 | `olinda/utils/logging.py` | the levelled logger — see below |
 
 ## The lazy-import contract
@@ -68,7 +68,7 @@ the pipeline by calling their callbacks directly.
 
 ## Output: two channels, and they are not interchangeable
 
-- **`olinda/console.py`** — everything a user reads. Rules, panels, live tables, progress bars, `echo`.
+- **`olinda/console/`** — everything a user reads. Rules, panels, live tables, progress bars, `echo`.
   Not levelled and not silenceable; it is presentation.
 - **`olinda/utils/logging.py`** — the loguru singleton (`from olinda.utils.logging import logger`),
   with the usual levels plus `success()`.
