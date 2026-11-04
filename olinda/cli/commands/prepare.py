@@ -274,47 +274,15 @@ def prepare_cmd(
     subset of a wide teacher file. Naming a column that isn't in the file is an error.
     """
     require_train()
-    import time
 
     from olinda import run as runlib
     from olinda.console import (
-        STEP_COLORS,
-        echo,
-        elapsed,
-        rule,
-        set_active_color,
         step,
-        summary_panel,
     )
-    from olinda.console import (
-        path as cpath,
-    )
-    from olinda.data import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
 
-    started = time.time()
-    set_active_color(STEP_COLORS["prepare"])
-    rule("olinda · prepare", style=STEP_COLORS["prepare"], right=cpath(model_dir))
-    md = Path(model_dir)
-    # Column directories are named by position and keep their boosters and hard heads, so preparing over
-    # an old run would fuse the previous run's models under the new run's names.
-    if runlib.is_run_dir(md):
-        raise click.ClickException(
-            f"{md} already holds a prepared run — delete it to start over, or use a new --model-dir "
-            f"(`olinda learn-soft -m {md}` resumes it)"
-        )
-    md.mkdir(parents=True, exist_ok=True)
-
-    descriptors = OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME
-    if not descriptors.exists():
-        echo(f"reference library missing · [dim]{descriptors}[/]", "error")
-        raise click.ClickException(
-            f"Morgan descriptors missing at {descriptors} — run `olinda setup` "
-            "(or scripts/compute_qmfp_library.py to generate them locally)."
-        )
+    md, descriptors, started = _begin(model_dir)
 
     n_rows, dim, spec = _read_library_spec(descriptors)
-    features = {"features": "qmfp", "fingerprint": spec}
-
     n_steps = 3 if hard_labels is not None else 2
 
     # --- soft labels: the selected value columns, verified against the library once -----------
@@ -330,18 +298,15 @@ def prepare_cmd(
 
     # --- per-column value-stratified splits; the descriptor matrix is never copied ------------
     step(2, n_steps, "planning per-column splits")
-    seed = 42
-    manifest = runlib.new_manifest(
-        soft_labels=soft_labels,
-        hard_labels=hard_labels,
-        reference={"name": MORGAN_FINGERPRINTS_FILENAME, "n_rows": n_rows, "dim": dim},
-        features=features,
-        val_frac=val_frac,
-        seed=seed,
-        limit=max_samples,
-    )
-    name_to_id = _plan_column_splits(
-        md, manifest, selected_cols, targets, val_frac, seed, max_samples
+    manifest, name_to_id = _plan_run(
+        md,
+        soft_labels,
+        hard_labels,
+        (n_rows, dim, spec),
+        selected_cols,
+        targets,
+        val_frac,
+        max_samples,
     )
 
     # --- hard labels: featurize once, then slice per matched column ---------------------------
@@ -360,6 +325,42 @@ def prepare_cmd(
 
     runlib.write_manifest(md, manifest)
 
+    _print_summary(md, manifest, val_frac, started)
+
+
+def _preflight(md: Path) -> Path:
+    """Refuse an already-prepared folder or a missing library; create *md* and return the library path."""
+    from olinda import run as runlib
+    from olinda.console import echo
+    from olinda.data import MORGAN_FINGERPRINTS_FILENAME, OLINDA_HOME
+
+    # Column directories are named by position and keep their boosters and hard heads, so preparing over
+    # an old run would fuse the previous run's models under the new run's names.
+    if runlib.is_run_dir(md):
+        raise click.ClickException(
+            f"{md} already holds a prepared run — delete it to start over, or use a new --model-dir "
+            f"(`olinda learn-soft -m {md}` resumes it)"
+        )
+    md.mkdir(parents=True, exist_ok=True)
+
+    descriptors = OLINDA_HOME / MORGAN_FINGERPRINTS_FILENAME
+    if not descriptors.exists():
+        echo(f"reference library missing · [dim]{descriptors}[/]", "error")
+        raise click.ClickException(
+            f"Morgan descriptors missing at {descriptors} — run `olinda setup` "
+            "(or scripts/compute_qmfp_library.py to generate them locally)."
+        )
+    return descriptors
+
+
+def _print_summary(md: Path, manifest: dict, val_frac: float, started: float) -> None:
+    """The closing panel: what was prepared, where it was saved, and how long it took."""
+    import time
+
+    from olinda import run as runlib
+    from olinda.console import STEP_COLORS, elapsed, summary_panel
+    from olinda.console import path as cpath
+
     n_hard = sum(1 for c in manifest["columns"] if c.get("hard"))
     summary_panel(
         "olinda · prepare",
@@ -376,3 +377,41 @@ def prepare_cmd(
         border_style=STEP_COLORS["prepare"],
         icon="✓",
     )
+
+
+def _plan_run(
+    md, soft_labels, hard_labels, library, selected_cols, targets, val_frac, max_samples
+):
+    """Create the run manifest and each column's split; returns ``(manifest, {name: column id})``."""
+    from olinda import run as runlib
+    from olinda.data import MORGAN_FINGERPRINTS_FILENAME
+
+    n_rows, dim, spec = library
+    seed = 42
+    manifest = runlib.new_manifest(
+        soft_labels=soft_labels,
+        hard_labels=hard_labels,
+        reference={"name": MORGAN_FINGERPRINTS_FILENAME, "n_rows": n_rows, "dim": dim},
+        features={"features": "qmfp", "fingerprint": spec},
+        val_frac=val_frac,
+        seed=seed,
+        limit=max_samples,
+    )
+    name_to_id = _plan_column_splits(
+        md, manifest, selected_cols, targets, val_frac, seed, max_samples
+    )
+    return manifest, name_to_id
+
+
+def _begin(model_dir) -> tuple[Path, Path, float]:
+    """Open the step's rule and run the preflight; returns ``(run dir, library path, start time)``."""
+    import time
+
+    from olinda.console import STEP_COLORS, rule, set_active_color
+    from olinda.console import path as cpath
+
+    started = time.time()
+    set_active_color(STEP_COLORS["prepare"])
+    rule("olinda · prepare", style=STEP_COLORS["prepare"], right=cpath(model_dir))
+    md = Path(model_dir)
+    return md, _preflight(md), started
