@@ -30,7 +30,7 @@ _COMMANDS = {
 }
 
 
-@click.group()
+@click.group(help="")  # empty on purpose: a docstring here would print under --help
 def cli():
     """The ``olinda`` command group; subcommands are registered by :func:`create_olinda_cli`."""
     pass
