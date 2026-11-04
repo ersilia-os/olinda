@@ -129,6 +129,7 @@ def _fit_tanimoto(
     val_idx, train_idx = np.sort(order[:n_val]), order[n_val:]
 
     def batches(shuffler):
+        """Yield one shuffled epoch of ``(fingerprints, target similarity)`` batches."""
         idx = train_idx.copy()
         shuffler.shuffle(idx)
         for start in range(0, len(idx), T_BATCH):

@@ -48,6 +48,7 @@ def column_id(index: int) -> str:
 
 
 def column_dir(model_dir: str | Path, col_id: str) -> Path:
+    """Where column *col_id*'s artifacts live inside the run directory."""
     return Path(model_dir) / COLUMNS_DIRNAME / col_id
 
 
@@ -200,6 +201,7 @@ def finish_run(model_onnx: str | Path) -> tuple[Path, list[tuple[str, int]]]:
 
 
 def find_column(manifest: dict, name_or_id: str) -> dict:
+    """The manifest entry whose name or id is *name_or_id*; ``KeyError`` lists the columns that exist."""
     for col in manifest["columns"]:
         if name_or_id in (col["name"], col["id"]):
             return col
@@ -246,6 +248,7 @@ def write_splits(model_dir: str | Path, splits: dict) -> Path:
 
 
 def read_split(model_dir: str | Path, col_id: str) -> tuple[np.ndarray, np.ndarray]:
+    """The ``(train_idx, val_idx)`` row indices of the split stored for column *col_id*."""
     import h5py
 
     with h5py.File(Path(model_dir) / SPLITS_NAME, "r") as f:

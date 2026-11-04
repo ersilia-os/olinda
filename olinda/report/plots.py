@@ -271,6 +271,7 @@ def qq_residuals(ax, st, y, p) -> None:
 
 
 def roc(ax, st, y, s, *, metrics: dict) -> None:
+    """Draw the ROC curve of scores *s* against binary labels *y*; returns False when it cannot be drawn."""
     from olinda.metrics import roc_curve
 
     fpr, tpr, _ = roc_curve(y, s)

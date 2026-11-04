@@ -13,6 +13,7 @@ def _truthy(value: object) -> bool:
 
 @lru_cache(maxsize=1)
 def detect_training_device() -> tuple[str, str]:
+    """Pick ``cpu`` or ``cuda`` for XGBoost and say why; ``OLINDA_XGB_DEVICE`` overrides the probe."""
     forced = os.environ.get("OLINDA_XGB_DEVICE")
     if forced:
         forced = forced.strip().lower()

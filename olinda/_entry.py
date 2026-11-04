@@ -14,6 +14,7 @@ _CLI_PACKAGES = {"click", "rich_click", "rich", "loguru", "tqdm"}
 
 
 def main() -> None:
+    """Run the ``olinda`` command, or say which extra to install when the CLI stack is absent."""
     try:
         from olinda.cli import cli
     except ImportError as exc:

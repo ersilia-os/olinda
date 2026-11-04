@@ -150,9 +150,11 @@ def _ramp(ax, *, x0, x1, y0, y1):
     lo, hi = 0.4, 0.7  # olinda.tanimoto.T_LO / T_HI
 
     def px(t):  # similarity 0..1 → canvas x
+        """Map a similarity in 0..1 to a canvas x."""
         return x0 + t * (x1 - x0)
 
     def py(a):  # weight 0..1 → canvas y
+        """Map a blend weight in 0..1 to a canvas y."""
         return y0 + a * (y1 - y0)
 
     ax.plot([x0, x1], [y0, y0], color=NC.gray, linewidth=0.9, zorder=2)  # axes
@@ -534,6 +536,7 @@ FIGURES = [
 
 
 def main() -> None:
+    """Render the README diagrams."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--out-dir", default="docs/diagrams", help="Directory for the PNGs."

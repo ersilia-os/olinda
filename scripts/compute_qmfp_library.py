@@ -42,6 +42,7 @@ def _featurize(smiles: list[str]):
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse the command line; the module docstring is the help text."""
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -96,6 +97,7 @@ def _check_rdkit(path: Path, n: int) -> int:
 
 
 def main() -> None:
+    """Featurize the reference library into the qmfp H5 file."""
     args = parse_args()
     import pandas as pd
 

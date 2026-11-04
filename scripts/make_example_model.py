@@ -62,6 +62,7 @@ def build() -> onnx.ModelProto:
 
 
 def main() -> None:
+    """Build the tiny example model and write it, with its golden vectors, to the path in ``argv[1]``."""
     out = sys.argv[1]
     model = build()
     featurizer = QmfpFeaturizer(QMFP_SPEC)
@@ -70,6 +71,7 @@ def main() -> None:
     )
 
     def run(packed):
+        """Score *packed* bytes through the example graph."""
         return {OUTPUT: session.run(None, {"input": packed})[0]}
 
     columns = [

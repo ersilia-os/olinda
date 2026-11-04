@@ -59,6 +59,7 @@ def build_bundle(model_dir: str | Path) -> dict:
     out_names = [o.name for o in sess.get_outputs()]
 
     def run(packed):
+        """Score *packed* qmfp bytes through the fused graph, returning ``{output name: values}``."""
         return dict(zip(out_names, sess.run(None, {"input": packed})))
 
     echo("checking parity: model.onnx vs Python reference", "run")
